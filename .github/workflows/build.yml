@@ -27,8 +27,6 @@ jobs:
           npm init -y
           npm install @capacitor/core
           npm install -D @capacitor/cli @capacitor/android @capacitor/assets
-          
-          # Install Native Media Session plugin for Lock Screen / Background controls
           npm install @capgo/capacitor-media-session
 
       - name: Initialize Capacitor Config & Set URL
@@ -54,19 +52,41 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # FIXED: Uses 'awk' to perfectly inject permissions exactly where Android expects them
-      - name: Setup Background Audio & Notification Permissions
+      # DEEP FIX 1: Modifies the downloaded plugin directly to strictly enforce Android 14+ Foreground Media rules. 
+      # Without this, Android silently crashes the Notification and kills background play!
+      - name: Patch Media Session Plugin for Android 14+
         run: |
-          awk '/<application/ {
-            print "    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />"
-            print "    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />"
-            print "    <uses-permission android:name=\"android.permission.WAKE_LOCK\" />"
-            print "    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />"
-            print "    <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />"
-          } 1' android/app/src/main/AndroidManifest.xml > temp.xml && mv temp.xml android/app/src/main/AndroidManifest.xml
+          node -e "
+          const fs = require('fs');
+          const path = 'node_modules/@capgo/capacitor-media-session/android/src/main/AndroidManifest.xml';
+          if (fs.existsSync(path)) {
+              let xml = fs.readFileSync(path, 'utf8');
+              xml = xml.replace('<service', '<service android:foregroundServiceType=\"mediaPlayback\"');
+              fs.writeFileSync(path, xml);
+          }
+          "
 
-      # NEW: Overrides Android lifecycle to stop WebView (HTML5 Audio) from pausing in the background
-      - name: Inject Background Webview Hack & Permission Prompts
+      # DEEP FIX 2: Uses Node.js to securely inject all 6 necessary Wake Lock & Background permissions
+      - name: Inject Deep Android Permissions
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = 'android/app/src/main/AndroidManifest.xml';
+          let xml = fs.readFileSync(path, 'utf8');
+          const perms = \`
+              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />
+              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />
+              <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
+              <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
+              <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
+              <uses-permission android:name=\"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS\" />
+          \`;
+          xml = xml.replace('<application', perms + '<application');
+          fs.writeFileSync(path, xml);
+          "
+
+      # DEEP FIX 3: Writes a Custom Native Java file to hold CPU Wake Locks and override WebView lifecycle
+      - name: Inject Native Premium Background Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
           package com.music8481.app;
@@ -79,8 +99,13 @@ jobs:
           import androidx.core.content.ContextCompat;
           import com.getcapacitor.BridgeActivity;
           import android.webkit.WebView;
+          import android.webkit.WebSettings;
+          import android.content.Context;
+          import android.os.PowerManager;
 
           public class MainActivity extends BridgeActivity {
+              private PowerManager.WakeLock wakeLock;
+
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -91,9 +116,23 @@ jobs:
                           ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
                       }
                   }
+
+                  // Acquire CPU WakeLock to prevent Deep Sleep stuttering
+                  PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                  wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
+                  wakeLock.acquire();
               }
 
-              // MAGIC FIX: Prevent Android from pausing the WebView (HTML5 Audio) when the app goes to the background!
+              @Override
+              public void onStart() {
+                  super.onStart();
+                  if (this.bridge != null && this.bridge.getWebView() != null) {
+                      WebSettings settings = this.bridge.getWebView().getSettings();
+                      settings.setMediaPlaybackRequiresUserGesture(false); // Allows auto-playing next track in background
+                  }
+              }
+
+              // MAGIC FIX: Prevent Android OS from pausing the WebView engine when minimizing the app
               @Override
               public void onPause() {
                   super.onPause();
@@ -103,6 +142,14 @@ jobs:
                           webView.resumeTimers();
                           webView.onResume(); 
                       }
+                  }
+              }
+
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  if (wakeLock != null && wakeLock.isHeld()) {
+                      wakeLock.release(); // Clean up memory
                   }
               }
           }
