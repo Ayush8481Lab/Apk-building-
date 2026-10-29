@@ -23,7 +23,6 @@ jobs:
           gradle-version: '8.10.2'
           validate-wrappers: false
 
-      # 🔧 FIX: override default packages — 'tools' no longer exists in SDK repo
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -34,9 +33,6 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      # ═══════════════════════════════════════════════════════════
-      # STEP 1 — Generate Gradle & Resource files
-      # ═══════════════════════════════════════════════════════════
       - name: Generate Gradle + Resources
         run: |
           set -e
@@ -219,7 +215,7 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 2 — Data + Network layer
+      # Data + Network layer — FIXED: added reified extension import
       # ═══════════════════════════════════════════════════════════
       - name: Generate Data + API layer
         run: |
@@ -237,6 +233,7 @@ jobs:
           import kotlinx.serialization.json.JsonArray
           import kotlinx.serialization.json.JsonElement
           import kotlinx.serialization.json.JsonObject
+          import kotlinx.serialization.json.decodeFromJsonElement
 
           @Serializable
           data class Song(
@@ -406,9 +403,6 @@ jobs:
           }
           EOF
 
-      # ═══════════════════════════════════════════════════════════
-      # STEP 3 — Playback engine
-      # ═══════════════════════════════════════════════════════════
       - name: Generate Playback engine
         run: |
           set -e
@@ -630,9 +624,6 @@ jobs:
           }
           EOF
 
-      # ═══════════════════════════════════════════════════════════
-      # STEP 4 — HomeViewModel
-      # ═══════════════════════════════════════════════════════════
       - name: Generate HomeViewModel
         run: |
           set -e
@@ -716,7 +707,7 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 5 — MainActivity (Compose UI)
+      # MainActivity — FIXED: snapshotFlow import corrected
       # ═══════════════════════════════════════════════════════════
       - name: Generate MainActivity (Compose UI)
         run: |
@@ -750,6 +741,7 @@ jobs:
           import androidx.compose.material.icons.filled.*
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
+          import androidx.compose.runtime.snapshotFlow
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.draw.clip
@@ -766,10 +758,6 @@ jobs:
           import androidx.lifecycle.viewmodel.compose.viewModel
           import coil.compose.AsyncImage
           import kotlinx.coroutines.flow.distinctUntilChanged
-          import kotlinx.coroutines.flow.snapshotFlow
-          import androidx.compose.foundation.layout.WindowInsets
-          import androidx.compose.foundation.layout.statusBars
-          import androidx.compose.foundation.layout.windowInsetsPadding
 
           private val BgDark = Color(0xFF0B1320)
           private val CardBg = Color(0xFF131D30)
@@ -1135,9 +1123,6 @@ jobs:
           }
           EOF
 
-      # ═══════════════════════════════════════════════════════════
-      # STEP 6 — Launcher icons
-      # ═══════════════════════════════════════════════════════════
       - name: Generate launcher icons
         run: |
           set -e
@@ -1151,9 +1136,6 @@ jobs:
               "native/app/src/main/res/mipmap-${density}/ic_launcher.png"
           done
 
-      # ═══════════════════════════════════════════════════════════
-      # STEP 7 — Signing keystore
-      # ═══════════════════════════════════════════════════════════
       - name: Generate signing keystore
         run: |
           cd native
@@ -1162,9 +1144,6 @@ jobs:
             -storepass music8481 -keypass music8481 \
             -dname "CN=Music8481, O=Music, C=IN" 2>&1 | tail -5
 
-      # ═══════════════════════════════════════════════════════════
-      # STEP 8 — Build APK
-      # ═══════════════════════════════════════════════════════════
       - name: Build Release APK
         run: |
           cd native
