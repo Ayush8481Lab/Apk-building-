@@ -11,14 +11,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # UPDATED: Node 22 fixes GitHub Actions deprecation warnings in 2026
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
-      # FIX: Capacitor 6 and Gradle 8.11+ strictly require Java 21
+      # UPDATED: setup-java@v5 fixes deprecation warnings
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
@@ -31,14 +32,11 @@ jobs:
 
       - name: Initialize Capacitor Config & Set URL
         run: |
-          # Capacitor requires a local web directory to initialize properly
           mkdir -p www
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
-          # Initialize the Capacitor project
           npx cap init Music8481 com.music8481.app --web-dir www
 
-          # Overwrite config to point directly to your remote Web App URL
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -55,31 +53,42 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
+      # NEW FIX: Resolves the Kotlin Duplicate Classes bug during APK compilation
+      - name: Fix Kotlin Duplicate Classes (Gradle Bug)
+        run: |
+          cat <<EOF >> android/app/build.gradle
+          
+          dependencies {
+              constraints {
+                  implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22") {
+                      because("kotlin-stdlib-jdk7 is now a part of kotlin-stdlib")
+                  }
+                  implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22") {
+                      because("kotlin-stdlib-jdk8 is now a part of kotlin-stdlib")
+                  }
+              }
+          }
+          EOF
+
       - name: Generate App Icon & Splash Screen
         run: |
           sudo apt-get install -y imagemagick
           mkdir -p assets
           
-          # Create a 512x512 app icon (Spotify green color as placeholder)
           convert -size 512x512 xc:"#1DB954" assets/icon.png
-          # Create a 2732x2732 splash screen (black background)
           convert -size 2732x2732 xc:"#000000" assets/splash.png
           
-          # Apply the icons natively to the Android project
           npx @capacitor/assets generate --android
 
       - name: Fix Gradle Daemon & Memory Issues (CI Stability)
         run: |
-          # Optimize memory to prevent 'Could not reserve enough space' CI crashes
           echo "org.gradle.daemon=false" >> android/gradle.properties
           echo "org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
 
       - name: Generate Android Keystore (For App Signing)
         run: |
-          # Generate the keystore in the root workspace directory
           keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music8481, OU=App, O=Music8481, C=IN"
 
-      # FIX: Let Gradle securely auto-sign and auto-zipalign the APK using injected arguments
       - name: Build & Auto-Sign Android APK (Release)
         run: |
           cd android
@@ -93,5 +102,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Music8481-Independent-APK
-          # Gradle outputs a clean, signed 'app-release.apk' when signing properties are injected
           path: android/app/build/outputs/apk/release/app-release.apk
