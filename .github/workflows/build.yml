@@ -16,11 +16,12 @@ jobs:
         with:
           node-version: '20'
 
+      # FIX: Capacitor 6 and Gradle 8.11+ strictly require Java 21
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Install Capacitor & Dependencies
         run: |
@@ -75,26 +76,22 @@ jobs:
 
       - name: Generate Android Keystore (For App Signing)
         run: |
+          # Generate the keystore in the root workspace directory
           keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music8481, OU=App, O=Music8481, C=IN"
 
-      - name: Build Android APK (Release)
+      # FIX: Let Gradle securely auto-sign and auto-zipalign the APK using injected arguments
+      - name: Build & Auto-Sign Android APK (Release)
         run: |
           cd android
-          ./gradlew assembleRelease
-
-      - name: Sign & Align APK
-        run: |
-          # Dynamically locate the latest installed Android build-tools
-          BUILD_TOOLS_DIR=$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -1)
-          
-          # 1. Align the unsigned APK for Android OS performance
-          ${BUILD_TOOLS_DIR}/zipalign -v -p 4 android/app/build/outputs/apk/release/app-release-unsigned.apk app-release-aligned.apk
-          
-          # 2. Sign the APK using the generated keystore
-          ${BUILD_TOOLS_DIR}/apksigner sign --ks android.keystore --ks-key-alias android --ks-pass pass:password123 --key-pass pass:password123 --out Music8481-Independent-signed.apk app-release-aligned.apk
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=${{ github.workspace }}/android.keystore \
+            -Pandroid.injected.signing.store.password=password123 \
+            -Pandroid.injected.signing.key.alias=android \
+            -Pandroid.injected.signing.key.password=password123
 
       - name: Upload Independent APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Music8481-Independent-APK
-          path: Music8481-Independent-signed.apk
+          # Gradle outputs a clean, signed 'app-release.apk' when signing properties are injected
+          path: android/app/build/outputs/apk/release/app-release.apk
