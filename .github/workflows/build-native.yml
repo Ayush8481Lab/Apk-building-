@@ -21,12 +21,18 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
+          validate-wrappers: false
 
+      # 🔧 FIX: override default packages — 'tools' no longer exists in SDK repo
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Install SDK packages
-        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       # ═══════════════════════════════════════════════════════════
       # STEP 1 — Generate Gradle & Resource files
@@ -36,7 +42,6 @@ jobs:
           set -e
           mkdir -p native/app/src/main/java/com/music8481/app
           mkdir -p native/app/src/main/res/values
-          mkdir -p native/app/src/main/res/xml
           mkdir -p native/app/src/main/res/mipmap-mdpi
           mkdir -p native/app/src/main/res/mipmap-hdpi
           mkdir -p native/app/src/main/res/mipmap-xhdpi
@@ -402,7 +407,7 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 3 — Playback engine (Media3 Service + PlayerManager)
+      # STEP 3 — Playback engine
       # ═══════════════════════════════════════════════════════════
       - name: Generate Playback engine
         run: |
@@ -514,7 +519,6 @@ jobs:
           }
 
           object PlayerManager {
-              private const val TAG = "PlayerManager"
               private var controller: MediaController? = null
               private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -623,12 +627,11 @@ jobs:
                       }
                   }
               }
-              fun playSongs(songs: List<Song>) { play(songs, 0) }
           }
           EOF
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 4 — Home ViewModel
+      # STEP 4 — HomeViewModel
       # ═══════════════════════════════════════════════════════════
       - name: Generate HomeViewModel
         run: |
@@ -713,7 +716,7 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 5 — MainActivity + all Compose UI
+      # STEP 5 — MainActivity (Compose UI)
       # ═══════════════════════════════════════════════════════════
       - name: Generate MainActivity (Compose UI)
         run: |
@@ -747,7 +750,6 @@ jobs:
           import androidx.compose.material.icons.filled.*
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
-          import androidx.compose.runtime.getValue
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.draw.clip
@@ -755,7 +757,6 @@ jobs:
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.layout.ContentScale
-          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.dp
@@ -764,7 +765,6 @@ jobs:
           import androidx.lifecycle.compose.collectAsStateWithLifecycle
           import androidx.lifecycle.viewmodel.compose.viewModel
           import coil.compose.AsyncImage
-          import kotlinx.coroutines.delay
           import kotlinx.coroutines.flow.distinctUntilChanged
           import kotlinx.coroutines.flow.snapshotFlow
           import androidx.compose.foundation.layout.WindowInsets
@@ -789,11 +789,7 @@ jobs:
                           notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
                       }
                   }
-                  setContent {
-                      Music8481Theme {
-                          AppRoot()
-                      }
-                  }
+                  setContent { Music8481Theme { AppRoot() } }
               }
           }
 
@@ -842,10 +838,7 @@ jobs:
                       enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
                       exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
                   ) {
-                      PlayerScreen(
-                          playerState = playerState,
-                          onClose = { showPlayer = false }
-                      )
+                      PlayerScreen(playerState = playerState, onClose = { showPlayer = false })
                   }
               }
           }
@@ -876,13 +869,11 @@ jobs:
                   contentPadding = PaddingValues(bottom = 90.dp)
               ) {
                   item { Header() }
-
                   sections.forEach { section ->
                       item(key = section.key) {
                           SectionRow(section = section, onSongClick = onSongClick)
                       }
                   }
-
                   if (isLoading) item { LoadingRow() }
               }
           }
@@ -901,12 +892,7 @@ jobs:
                       contentAlignment = Alignment.Center
                   ) { Text("M", color = Color.Black, fontWeight = FontWeight.Black, fontSize = 18.sp) }
                   Spacer(Modifier.width(12.dp))
-                  Text(
-                      "Music@8481",
-                      color = Color.White,
-                      fontSize = 24.sp,
-                      fontWeight = FontWeight.Black
-                  )
+                  Text("Music@8481", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Black)
               }
           }
 
@@ -933,16 +919,11 @@ jobs:
 
           @Composable
           private fun SongCard(song: Song, onClick: () -> Unit) {
-              Column(
-                  modifier = Modifier.width(140.dp).clickable { onClick() }
-              ) {
+              Column(modifier = Modifier.width(140.dp).clickable { onClick() }) {
                   AsyncImage(
                       model = song.imageUrl,
                       contentDescription = song.displayTitle,
-                      modifier = Modifier
-                          .size(140.dp)
-                          .clip(RoundedCornerShape(16.dp))
-                          .background(CardBg),
+                      modifier = Modifier.size(140.dp).clip(RoundedCornerShape(16.dp)).background(CardBg),
                       contentScale = ContentScale.Crop
                   )
                   Text(
@@ -971,11 +952,7 @@ jobs:
           }
 
           @Composable
-          fun MiniPlayer(
-              playerState: PlayerState,
-              modifier: Modifier = Modifier,
-              onClick: () -> Unit
-          ) {
+          fun MiniPlayer(playerState: PlayerState, modifier: Modifier = Modifier, onClick: () -> Unit) {
               val song = playerState.currentSong ?: return
               val progress = if (playerState.durationMs > 0)
                   playerState.positionMs.toFloat() / playerState.durationMs else 0f
@@ -1016,7 +993,6 @@ jobs:
                           }
                       }
                   }
-                  // Progress strip
                   Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(2.dp).background(Color.White.copy(alpha = 0.1f))) {
                       Box(Modifier.fillMaxHeight().fillMaxWidth(progress).background(Color.White))
                   }
@@ -1034,9 +1010,7 @@ jobs:
                       Brush.verticalGradient(listOf(Color(0xFF1A2B45), BgDark))
                   )
               ) {
-                  Column(
-                      Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)
-                  ) {
+                  Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars)) {
                       Row(
                           modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                           verticalAlignment = Alignment.CenterVertically
@@ -1114,10 +1088,7 @@ jobs:
                           verticalAlignment = Alignment.CenterVertically
                       ) {
                           IconButton(onClick = { PlayerManager.setShuffle(!playerState.shuffle) }) {
-                              Icon(
-                                  Icons.Default.Shuffle, null,
-                                  tint = if (playerState.shuffle) Accent else Color.White
-                              )
+                              Icon(Icons.Default.Shuffle, null, tint = if (playerState.shuffle) Accent else Color.White)
                           }
                           IconButton(onClick = { PlayerManager.previous() }) {
                               Icon(Icons.Default.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(40.dp))
@@ -1165,7 +1136,7 @@ jobs:
           EOF
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 6 — Generate launcher icons
+      # STEP 6 — Launcher icons
       # ═══════════════════════════════════════════════════════════
       - name: Generate launcher icons
         run: |
@@ -1181,7 +1152,7 @@ jobs:
           done
 
       # ═══════════════════════════════════════════════════════════
-      # STEP 7 — Generate signing keystore
+      # STEP 7 — Signing keystore
       # ═══════════════════════════════════════════════════════════
       - name: Generate signing keystore
         run: |
@@ -1197,7 +1168,7 @@ jobs:
       - name: Build Release APK
         run: |
           cd native
-          gradle assembleRelease --no-daemon --stacktrace --warning-mode all
+          gradle assembleRelease --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
