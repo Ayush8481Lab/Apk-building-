@@ -27,6 +27,8 @@ jobs:
           npm init -y
           npm install @capacitor/core
           npm install -D @capacitor/cli @capacitor/android @capacitor/assets
+          
+          # Install Native Media Session plugin for Lock Screen / Background controls
           npm install @capgo/capacitor-media-session
 
       - name: Initialize Capacitor Config & Set URL
@@ -52,21 +54,7 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX 1: Modifies the downloaded plugin directly to strictly enforce Android 14+ Foreground Media rules. 
-      # Without this, Android silently crashes the Notification and kills background play!
-      - name: Patch Media Session Plugin for Android 14+
-        run: |
-          node -e "
-          const fs = require('fs');
-          const path = 'node_modules/@capgo/capacitor-media-session/android/src/main/AndroidManifest.xml';
-          if (fs.existsSync(path)) {
-              let xml = fs.readFileSync(path, 'utf8');
-              xml = xml.replace('<service', '<service android:foregroundServiceType=\"mediaPlayback\"');
-              fs.writeFileSync(path, xml);
-          }
-          "
-
-      # DEEP FIX 2: Uses Node.js to securely inject all 6 necessary Wake Lock & Background permissions
+      # DEEP FIX: Securely inject WakeLock and OS Background Permissions without breaking XML
       - name: Inject Deep Android Permissions
         run: |
           node -e "
@@ -81,11 +69,13 @@ jobs:
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
               <uses-permission android:name=\"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS\" />
           \`;
-          xml = xml.replace('<application', perms + '<application');
-          fs.writeFileSync(path, xml);
+          if (!xml.includes('android.permission.WAKE_LOCK')) {
+              xml = xml.replace('<application', perms + '\n    <application');
+              fs.writeFileSync(path, xml);
+          }
           "
 
-      # DEEP FIX 3: Writes a Custom Native Java file to hold CPU Wake Locks and override WebView lifecycle
+      # NEW: Writes a Custom Native Java file to hold CPU Wake Locks and override WebView lifecycle
       - name: Inject Native Premium Background Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
