@@ -1,4 +1,4 @@
-name: Build Music8481 APK
+name: Build Independent WebView APK
 
 on:
   workflow_dispatch:
@@ -22,84 +22,79 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Accept Android SDK Licenses
-        run: yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses || true
-
-      - name: Install Bubblewrap CLI
-        run: npm install -g @bubblewrap/cli
-
-      - name: Configure Bubblewrap & Fix SDK Path Bug
+      - name: Install Capacitor & Dependencies
         run: |
-          mkdir -p ~/.bubblewrap
-          # Removed 'sudo' so the directories remain owned by the GitHub 'runner' user
-          mkdir -p ${ANDROID_HOME}/tools
-          mkdir -p ${ANDROID_HOME}/bin
-          echo "{\"jdkPath\": \"${JAVA_HOME}\", \"androidSdkPath\": \"${ANDROID_HOME}\"}" > ~/.bubblewrap/config.json
+          npm init -y
+          npm install @capacitor/core
+          npm install -D @capacitor/cli @capacitor/android @capacitor/assets
+
+      - name: Initialize Capacitor Config & Set URL
+        run: |
+          # Capacitor requires a local web directory to initialize properly
+          mkdir -p www
+          echo "<html><body>Loading Music8481...</body></html>" > www/index.html
+          
+          # Initialize the Capacitor project
+          npx cap init Music8481 com.music8481.app --web-dir www
+
+          # Overwrite config to point directly to your remote Web App URL
+          rm capacitor.config.ts || true
+          cat <<EOF > capacitor.config.json
+          {
+            "appId": "com.music8481.app",
+            "appName": "Music8481",
+            "webDir": "www",
+            "server": {
+              "url": "https://ayushgaana.vercel.app",
+              "cleartext": true
+            }
+          }
+          EOF
+
+      - name: Add Native Android Platform
+        run: npx cap add android
+
+      - name: Generate App Icon & Splash Screen
+        run: |
+          sudo apt-get install -y imagemagick
+          mkdir -p assets
+          
+          # Create a 512x512 app icon (Spotify green color as placeholder)
+          convert -size 512x512 xc:"#1DB954" assets/icon.png
+          # Create a 2732x2732 splash screen (black background)
+          convert -size 2732x2732 xc:"#000000" assets/splash.png
+          
+          # Apply the icons natively to the Android project
+          npx @capacitor/assets generate --android
+
+      - name: Fix Gradle Daemon & Memory Issues (CI Stability)
+        run: |
+          # Optimize memory to prevent 'Could not reserve enough space' CI crashes
+          echo "org.gradle.daemon=false" >> android/gradle.properties
+          echo "org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
 
       - name: Generate Android Keystore (For App Signing)
         run: |
           keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music8481, OU=App, O=Music8481, C=IN"
 
-      - name: Generate Local Icon & TWA Manifest
+      - name: Build Android APK (Release)
         run: |
-          sudo apt-get install -y imagemagick
-          convert -size 512x512 xc:"#1DB954" icon.png
+          cd android
+          ./gradlew assembleRelease
+
+      - name: Sign & Align APK
+        run: |
+          # Dynamically locate the latest installed Android build-tools
+          BUILD_TOOLS_DIR=$(ls -d ${ANDROID_HOME}/build-tools/* | sort -V | tail -1)
           
-          # Updated JSON with "minSdkVersion": 24 at the end
-          cat <<EOF > twa-manifest.json
-          {
-            "packageId": "com.music8481.app",
-            "host": "ayushgaana.vercel.app",
-            "name": "Music8481",
-            "launcherName": "Music8481",
-            "display": "standalone",
-            "themeColor": "#000000",
-            "navigationColor": "#000000",
-            "backgroundColor": "#ffffff",
-            "startUrl": "/",
-            "iconUrl": "http://localhost:8080/icon.png",
-            "maskableIconUrl": "http://localhost:8080/icon.png",
-            "splashScreenFadeOutDuration": 300,
-            "signingKey": {
-              "path": "android.keystore",
-              "alias": "android"
-            },
-            "appVersionName": "1.0.0",
-            "appVersionCode": 1,
-            "fallbackType": "customtabs",
-            "enableNotifications": true,
-            "features": {},
-            "alphaDependencies": {
-              "enabled": false
-            },
-            "shortcuts": [],
-            "minSdkVersion": 24
-          }
-          EOF
-
-      - name: Generate Android Project
-        run: |
-          python3 -m http.server 8080 &
-          sleep 3
-          bubblewrap update --skipVersionUpgrade
-
-      - name: Fix Gradle Daemon & Memory Issues
-        run: |
-          # 1. Lower JVM Memory allocation to prevent 'Could not reserve enough space' errors
-          sed -i 's/-Xmx1536m/-Xmx1024m/g' gradle.properties
+          # 1. Align the unsigned APK for Android OS performance
+          ${BUILD_TOOLS_DIR}/zipalign -v -p 4 android/app/build/outputs/apk/release/app-release-unsigned.apk app-release-aligned.apk
           
-          # 2. Disable Daemon and VFS watching to prevent CI timeout/crash bugs
-          echo "org.gradle.daemon=false" >> gradle.properties
-          echo "org.gradle.vfs.watch=false" >> gradle.properties
+          # 2. Sign the APK using the generated keystore
+          ${BUILD_TOOLS_DIR}/apksigner sign --ks android.keystore --ks-key-alias android --ks-pass pass:password123 --key-pass pass:password123 --out Music8481-Independent-signed.apk app-release-aligned.apk
 
-      - name: Build APK
-        env:
-          BUBBLEWRAP_KEYSTORE_PASSWORD: password123
-          BUBBLEWRAP_KEY_PASSWORD: password123
-        run: bubblewrap build --skipPwaValidation
-
-      - name: Upload APK Artifact
+      - name: Upload Independent APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Music8481-APK
-          path: app-release-signed.apk
+          name: Music8481-Independent-APK
+          path: Music8481-Independent-signed.apk
