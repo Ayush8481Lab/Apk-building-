@@ -11,24 +11,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # UPDATED: Node 22 fixes GitHub Actions deprecation warnings in 2026
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      # UPDATED: setup-java@v5 fixes deprecation warnings
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install Capacitor & Dependencies
+      - name: Install Capacitor, Dependencies & Media Plugins
         run: |
           npm init -y
           npm install @capacitor/core
           npm install -D @capacitor/cli @capacitor/android @capacitor/assets
+          
+          # NEW: Install Native Media Session plugin for Lock Screen / Notification controls
+          npm install @capgo/capacitor-media-session
 
       - name: Initialize Capacitor Config & Set URL
         run: |
@@ -53,7 +54,17 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # NEW FIX: Resolves the Kotlin Duplicate Classes bug during APK compilation
+      # NEW: Inject required Android background audio & notification permissions
+      - name: Setup Background Audio OS Permissions
+        run: |
+          sed -i 's/<\/manifest>//g' android/app/src/main/AndroidManifest.xml
+          cat <<EOF >> android/app/src/main/AndroidManifest.xml
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+          </manifest>
+          EOF
+
       - name: Fix Kotlin Duplicate Classes (Gradle Bug)
         run: |
           cat <<EOF >> android/app/build.gradle
