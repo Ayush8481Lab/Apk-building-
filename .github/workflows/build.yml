@@ -28,7 +28,7 @@ jobs:
           npm install @capacitor/core
           npm install -D @capacitor/cli @capacitor/android @capacitor/assets
           
-          # NEW: Install Native Media Session plugin for Lock Screen / Notification controls
+          # Install Native Media Session plugin for Lock Screen / Notification controls
           npm install @capgo/capacitor-media-session
 
       - name: Initialize Capacitor Config & Set URL
@@ -54,15 +54,45 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # NEW: Inject required Android background audio & notification permissions
-      - name: Setup Background Audio OS Permissions
+      # UPDATED: Added POST_NOTIFICATIONS permission
+      - name: Setup Background Audio & Notification OS Permissions
         run: |
           sed -i 's/<\/manifest>//g' android/app/src/main/AndroidManifest.xml
           cat <<EOF >> android/app/src/main/AndroidManifest.xml
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
           </manifest>
+          EOF
+
+      # NEW: Inject Native Java code to prompt the user for Notification permissions on app launch
+      - name: Auto-Prompt Notification Permissions on Launch
+        run: |
+          cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
+          package com.music8481.app;
+
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.Manifest;
+          import android.content.pm.PackageManager;
+          import androidx.core.app.ActivityCompat;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  
+                  // Trigger Android 13+ Notification Permission Popup automatically
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
+                      }
+                  }
+              }
+          }
           EOF
 
       - name: Fix Kotlin Duplicate Classes (Gradle Bug)
