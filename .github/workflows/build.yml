@@ -35,7 +35,6 @@ jobs:
           mkdir -p www
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
-          # Beautiful Offline UI Fallback
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
@@ -63,7 +62,6 @@ jobs:
           
           npx cap init Music8481 com.music8481.app --web-dir www
 
-          # FIX: Removed transparent overlay so Portrait mode stays perfectly within safe areas!
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -91,8 +89,19 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX 1: Lock App to Portrait Globally, Enable PiP, Inject Permissions
-      - name: Inject Permissions & App Locks
+      # DEEP FIX: Configure Gradle to download Native yt-dlp & FFmpeg libraries
+      - name: Inject Native yt-dlp Dependencies
+        run: |
+          sed -i "s/mavenCentral()/mavenCentral()\n        maven { url 'https:\/\/jitpack.io' }/g" android/build.gradle
+          cat <<EOF >> android/app/build.gradle
+          
+          dependencies {
+              implementation 'com.github.yausername.youtubedl-android:library:0.16.3'
+              implementation 'com.github.yausername.youtubedl-android:ffmpeg:0.16.3'
+          }
+          EOF
+
+      - name: Inject Permissions & Vivo Meta-Data
         run: |
           node -e "
           const fs = require('fs');
@@ -104,27 +113,44 @@ jobs:
               <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
               <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
+              <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" />
+              <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" />
           \`;
-          
           const vivoTags = \`
               <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
               <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
               <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
           \`;
-
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              
-              // LOCK TO PORTRAIT DEFAULT & ALLOW PIP
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:screenOrientation=\"portrait\"');
-              
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
               xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
-      # DEEP FIX 2: Advanced Java Engine for Seamless Landscape Video, PiP, and Background Audio
+      - name: Force Android App Theme to Edge-to-Edge
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = 'android/app/src/main/res/values/styles.xml';
+          if (fs.existsSync(path)) {
+              let xml = fs.readFileSync(path, 'utf8');
+              const edgeToEdge = \`
+                  <item name=\"android:windowLayoutInDisplayCutoutMode\">always</item>
+                  <item name=\"android:statusBarColor\">@android:color/transparent</item>
+                  <item name=\"android:navigationBarColor\">@android:color/transparent</item>
+                  <item name=\"android:windowDrawsSystemBarBackgrounds\">true</item>
+                  <item name=\"android:enforceNavigationBarContrast\">false</item>
+                  <item name=\"android:enforceStatusBarContrast\">false</item>
+              \`;
+              xml = xml.replace('</style>', edgeToEdge + '\n</style>');
+              fs.writeFileSync(path, xml);
+          }
+          "
+
+      # DEEP FIX: Java Engine with Native yt-dlp, FFmpeg Muxing, PiP, and Edge-To-Edge hooks
       - name: Inject Native Premium Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
@@ -137,6 +163,7 @@ jobs:
           import android.content.pm.PackageManager;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
+          import androidx.core.view.WindowCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -153,6 +180,20 @@ jobs:
           import android.content.pm.ActivityInfo;
           import android.util.Rational;
           import android.content.res.Configuration;
+          
+          import android.os.Environment;
+          import java.io.File;
+          import android.app.NotificationManager;
+          import android.app.NotificationChannel;
+          import androidx.core.app.NotificationCompat;
+
+          // NATIVE YT-DLP & FFMPEG IMPORTS
+          import com.yausername.youtubedl_android.YoutubeDL;
+          import com.yausername.youtubedl_android.YoutubeDLRequest;
+          import com.yausername.youtubedl_android.mapper.VideoInfo;
+          import com.yausername.youtubedl_android.mapper.VideoFormat;
+          import com.yausername.ffmpeg_android.FFmpeg;
+          import java.util.ArrayList;
 
           public class MainActivity extends BridgeActivity {
               private PowerManager.WakeLock wakeLock;
@@ -175,13 +216,86 @@ jobs:
                   public void setVideoMode(boolean isVideo) {
                       if (isVideoModeActive != isVideo) {
                           isVideoModeActive = isVideo;
-                          runOnUiThread(new Runnable() {
-                              @Override
-                              public void run() {
-                                  updatePiPParams(isVideoFullscreen || isVideoModeActive);
-                              }
-                          });
+                          runOnUiThread(() -> updatePiPParams(isVideoFullscreen || isVideoModeActive));
                       }
+                  }
+
+                  // NATIVE YT-DLP FORMAT FETCHING
+                  @JavascriptInterface
+                  public void fetchVideoFormats(String videoUrl) {
+                      new Thread(() -> {
+                          try {
+                              YoutubeDLRequest request = new YoutubeDLRequest(videoUrl);
+                              VideoInfo streamInfo = YoutubeDL.getInstance().getInfo(request);
+                              
+                              StringBuilder json = new StringBuilder("[");
+                              for(VideoFormat format : streamInfo.getFormats()) {
+                                  if (format.getExt().contains("mp4") || format.getExt().contains("webm")) {
+                                      String quality = format.getFormatNote() != null ? format.getFormatNote() : format.getHeight() + "p";
+                                      json.append("{")
+                                          .append("\"formatId\":\"").append(format.getFormatId()).append("\",")
+                                          .append("\"resolution\":\"").append(quality).append("\",")
+                                          .append("\"ext\":\"").append(format.getExt()).append("\"")
+                                          .append("},");
+                                  }
+                              }
+                              if(json.length() > 1) json.setLength(json.length() - 1);
+                              json.append("]");
+                              
+                              runOnUiThread(() -> bridge.getWebView().evaluateJavascript("window.onVideoFormatsFetched('" + json.toString() + "');", null));
+                          } catch (Exception e) {
+                              runOnUiThread(() -> bridge.getWebView().evaluateJavascript("window.onVideoFormatsError();", null));
+                          }
+                      }).start();
+                  }
+
+                  // NATIVE YT-DLP DOWNLOADING & FFMPEG MUXING
+                  @JavascriptInterface
+                  public void downloadAndMuxVideo(String url, String formatId, String title) {
+                      new Thread(() -> {
+                          try {
+                              if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                                  ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 102);
+                              }
+                              
+                              File videoDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "Music8481/Musicvideo");
+                              if (!videoDir.exists()) videoDir.mkdirs();
+                              String cleanTitle = title.replaceAll("[\\\\/:*?\"<>|]", "");
+                              File outputFile = new File(videoDir, cleanTitle + ".mp4");
+                              
+                              NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                              String channelId = "dl_channel";
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                  nm.createNotificationChannel(new NotificationChannel(channelId, "Downloads", NotificationManager.IMPORTANCE_LOW));
+                              }
+                              int notifId = (int)System.currentTimeMillis();
+                              NotificationCompat.Builder builder = new NotificationCompat.Builder(MainActivity.this, channelId)
+                                      .setSmallIcon(android.R.drawable.stat_sys_download)
+                                      .setContentTitle(cleanTitle)
+                                      .setContentText("Starting Native Download...")
+                                      .setProgress(100, 0, false)
+                                      .setOngoing(true);
+                              nm.notify(notifId, builder.build());
+                              
+                              // Native yt-dlp request to download targeted video AND best audio, then FFmpeg merges them natively!
+                              YoutubeDLRequest request = new YoutubeDLRequest(url);
+                              request.addOption("-f", formatId + "+bestaudio/best");
+                              request.addOption("--merge-output-format", "mp4");
+                              request.addOption("-o", outputFile.getAbsolutePath());
+                              
+                              YoutubeDL.getInstance().execute(request, (progress, etaInSeconds, line) -> {
+                                  builder.setProgress(100, (int)progress, false);
+                                  builder.setContentText("Downloading & Muxing... " + (int)progress + "%");
+                                  nm.notify(notifId, builder.build());
+                              });
+                              
+                              builder.setContentText("Download Complete!")
+                                     .setProgress(0, 0, false)
+                                     .setOngoing(false)
+                                     .setSmallIcon(android.R.drawable.stat_sys_download_done);
+                              nm.notify(notifId, builder.build());
+                          } catch (Exception e) { e.printStackTrace(); }
+                      }).start();
                   }
               }
 
@@ -189,12 +303,26 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  // ALWAYS ALLOW DRAWING UNDER PUNCH HOLE (Required for Landscape Fullscreen)
+                  // Initialize Native YT-DLP & FFmpeg
+                  try {
+                      YoutubeDL.getInstance().init(this);
+                      FFmpeg.getInstance().init(this);
+                  } catch (Exception e) { e.printStackTrace(); }
+                  
+                  // ULTIMATE EDGE-TO-EDGE PUNCH HOLE FIX FOR ANDROID 15/16
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+                  getWindow().setStatusBarColor(Color.TRANSPARENT);
+                  getWindow().setNavigationBarColor(Color.TRANSPARENT);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      getWindow().setNavigationBarContrastEnforced(false);
+                      getWindow().setStatusBarContrastEnforced(false);
+                  }
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                       WindowManager.LayoutParams attributes = getWindow().getAttributes();
-                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
                       getWindow().setAttributes(attributes);
                   }
+                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
                   
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -205,7 +333,6 @@ jobs:
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
-                  // Silent Background Execution Lock (No Battery Popups Needed)
                   PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
                   wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
                   wakeLock.acquire();
@@ -223,19 +350,14 @@ jobs:
                       settings.setDomStorageEnabled(true);
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
-                      
-                      // Poll for specific iframe video source to trigger PiP capability
-                      webView.postDelayed(new Runnable() {
-                          @Override
-                          public void run() {
-                              webView.evaluateJavascript(
-                                  "setInterval(function() {" +
-                                  "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                                  "  var hasVideo = iframe !== null;" +
-                                  "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
-                                  "}, 1000);", null);
-                          }
-                      }, 2000);
+                      webView.postDelayed(() -> {
+                          webView.evaluateJavascript(
+                              "setInterval(function() {" +
+                              "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                              "  var hasVideo = iframe !== null;" +
+                              "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
+                              "}, 1000);", null);
+                      }, 3000);
 
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
@@ -251,22 +373,14 @@ jobs:
                               mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
                               
-                              runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() { updatePiPParams(true); }
-                              });
+                              runOnUiThread(() -> updatePiPParams(true));
 
-                              // 1. FORCE LANDSCAPE
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
-                              // 2. FORCE IMMERSIVE FULLSCREEN (Hides Nav/Status Bar, overlaps punch hole)
                               getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
 
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
@@ -277,15 +391,9 @@ jobs:
                               mCustomView = null;
                               isVideoFullscreen = false;
                               
-                              runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() { updatePiPParams(isVideoModeActive); }
-                              });
+                              runOnUiThread(() -> updatePiPParams(isVideoModeActive));
 
-                              // 1. REVERT TO PORTRAIT
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-                              
-                              // 2. RESTORE NORMAL SAFE-AREA UI
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
                           }
@@ -299,7 +407,6 @@ jobs:
                   }
               }
 
-              // PIP STRETCH HACK: Targets ayushcom.vercel.app and fills the small PiP box seamlessly
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
@@ -341,15 +448,12 @@ jobs:
               public void onBackPressed() {
                   if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) { super.onBackPressed(); }
-                  } else {
-                      super.onBackPressed();
-                  }
+                  } else { super.onBackPressed(); }
               }
 
               @Override
               public void onPause() {
                   super.onPause();
-                  // Keeps audio and video running silently!
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       this.bridge.getWebView().resumeTimers();
                       this.bridge.getWebView().onResume(); 
@@ -384,7 +488,6 @@ jobs:
         run: |
           sudo apt-get install -y imagemagick
           mkdir -p assets
-          
           wget -q https://raw.githubusercontent.com/Ayush8481Lab/Ayushgaana/refs/heads/main/app/android-chrome-512x512.png -O assets/icon.png
           convert -size 2732x2732 xc:"#000000" assets/icon.png -gravity center -composite assets/splash.png
           npx @capacitor/assets generate --android
@@ -410,5 +513,5 @@ jobs:
       - name: Upload Independent APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Music8481-Independent-APK
+          name: Music8481-Premium-APK
           path: android/app/build/outputs/apk/release/app-release.apk
