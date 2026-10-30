@@ -35,7 +35,6 @@ jobs:
           mkdir -p www
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
-          # Beautiful Offline UI Fallback
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
@@ -63,7 +62,6 @@ jobs:
           
           npx cap init Music8481 com.music8481.app --web-dir www
 
-          # FIX: Removed transparent overlay so Portrait mode stays perfectly within safe areas!
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -91,8 +89,6 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX 1: Lock App to Portrait Globally, Enable PiP, Inject Permissions
-      # ANDROID 16 FIX: android:enableOnBackInvokedCallback="false" prevents predictive back from killing Activity before PiP fires
       - name: Inject Permissions & App Locks
         run: |
           node -e "
@@ -117,16 +113,15 @@ jobs:
               xml = xml.replace('<application', perms + '\n    <application');
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
               
-              // LOCK TO PORTRAIT DEFAULT, ALLOW PIP, AND DISABLE PREDICTIVE BACK (Android 16 PiP fix)
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:screenOrientation=\"portrait\" android:enableOnBackInvokedCallback=\"false\"');
+              // Added resizeableActivity and configChanges for stable PiP
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:resizeableActivity=\"true\" android:configChanges=\"orientation|screenSize|smallestScreenSize|screenLayout\" android:screenOrientation=\"portrait\" android:enableOnBackInvokedCallback=\"false\"');
               
               xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
-      # DEEP FIX 2: Advanced Java Engine for Seamless Landscape Video, PiP, and Background Audio
-      # ANDROID 16 FIX: setAutoEnterEnabled on API 31+, onUserLeaveHint gated to API 26-30, onBackPressed kept as back-gesture fallback
+      # DEEP FIX: Corrected PiP engine – delays iframe resize, uses robust CSS, and ensures auto-enter works on Android 12+
       - name: Inject Native Premium Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
@@ -193,7 +188,6 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  // ALWAYS ALLOW DRAWING UNDER PUNCH HOLE (Required for Landscape Fullscreen)
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                       WindowManager.LayoutParams attributes = getWindow().getAttributes();
                       attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
@@ -209,7 +203,6 @@ jobs:
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
-                  // Silent Background Execution Lock (No Battery Popups Needed)
                   PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
                   wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
                   wakeLock.acquire();
@@ -228,7 +221,7 @@ jobs:
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
                       
-                      // Poll for specific iframe video source to trigger PiP capability
+                      // Poll more frequently and start immediately to catch the iframe early
                       webView.postDelayed(new Runnable() {
                           @Override
                           public void run() {
@@ -237,9 +230,9 @@ jobs:
                                   "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
                                   "  var hasVideo = iframe !== null;" +
                                   "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
-                                  "}, 1000);", null);
+                                  "}, 500);", null);
                           }
-                      }, 2000);
+                      }, 1000); // 1 second instead of 2
 
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
@@ -260,10 +253,8 @@ jobs:
                                   public void run() { updatePiPParams(true); }
                               });
 
-                              // 1. FORCE LANDSCAPE
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
-                              // 2. FORCE IMMERSIVE FULLSCREEN (Hides Nav/Status Bar, overlaps punch hole)
                               getWindow().getDecorView().setSystemUiVisibility(
                                       View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
                                       View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
@@ -286,10 +277,8 @@ jobs:
                                   public void run() { updatePiPParams(isVideoModeActive); }
                               });
 
-                              // 1. REVERT TO PORTRAIT
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
                               
-                              // 2. RESTORE NORMAL SAFE-AREA UI
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
                           }
@@ -303,29 +292,42 @@ jobs:
                   }
               }
 
-              // PIP STRETCH HACK: Targets ayushcom.vercel.app and fills the small PiP box seamlessly
+              // DEEP FIX: Delayed resize with robust CSS to force iframe to fill PiP window
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       WebView webView = this.bridge.getWebView();
                       if (isInPictureInPictureMode) {
-                          webView.evaluateJavascript(
-                              "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                              "if(iframe) {" +
-                              "  iframe.style.position = 'fixed';" +
-                              "  iframe.style.top = '0'; iframe.style.left = '0';" +
-                              "  iframe.style.width = '100vw'; iframe.style.height = '100vh';" +
-                              "  iframe.style.zIndex = '999999';" +
-                              "  iframe.setAttribute('data-pip', 'true');" +
-                              "}", null);
+                          // Delay resizing to allow WebView to complete layout pass
+                          webView.postDelayed(new Runnable() {
+                              @Override
+                              public void run() {
+                                  webView.evaluateJavascript(
+                                      "(function() {" +
+                                      "  var style = document.createElement('style');" +
+                                      "  style.innerHTML = 'html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }';" +
+                                      "  document.head.appendChild(style);" +
+                                      "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                                      "  if (iframe) {" +
+                                      "    iframe.style.position = 'fixed';" +
+                                      "    iframe.style.top = '0'; iframe.style.left = '0';" +
+                                      "    iframe.style.width = '100%'; iframe.style.height = '100%';" +
+                                      "    iframe.style.border = 'none';" +
+                                      "    iframe.style.zIndex = '999999';" +
+                                      "    iframe.setAttribute('data-pip', 'true');" +
+                                      "  }" +
+                                      "})();", null);
+                              }
+                          }, 150); // 150 ms delay
                       } else {
                           webView.evaluateJavascript(
                               "var iframe = document.querySelector('iframe[data-pip=\"true\"]');" +
                               "if(iframe) {" +
                               "  iframe.style.position = '';" +
                               "  iframe.style.top = ''; iframe.style.left = '';" +
-                              "  iframe.style.width = '100%'; iframe.style.height = '100%';" +
+                              "  iframe.style.width = ''; iframe.style.height = '';" +
+                              "  iframe.style.border = '';" +
                               "  iframe.style.zIndex = '';" +
                               "  iframe.removeAttribute('data-pip');" +
                               "}", null);
@@ -333,7 +335,7 @@ jobs:
                   }
               }
 
-              // Android 12+ uses setAutoEnterEnabled; only fire legacy path on Android 8-11
+              // Android 12+ uses setAutoEnterEnabled; legacy path for Android 8-11
               @Override
               public void onUserLeaveHint() {
                   super.onUserLeaveHint();
@@ -356,7 +358,6 @@ jobs:
               @Override
               public void onPause() {
                   super.onPause();
-                  // Keeps audio and video running silently!
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       this.bridge.getWebView().resumeTimers();
                       this.bridge.getWebView().onResume(); 
