@@ -28,17 +28,14 @@ jobs:
           npm install @capacitor/core
           npm install -D @capacitor/cli @capacitor/android @capacitor/assets
           npm install @capgo/capacitor-media-session
-          
-          # Install Splash Screen Plugin for beautiful loading animations
           npm install @capacitor/splash-screen
 
       - name: Initialize Capacitor Config & Offline UI
         run: |
           mkdir -p www
-          
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
-          # Create a beautiful Offline UI Fallback
+          # Beautiful Offline UI Fallback
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
@@ -66,7 +63,6 @@ jobs:
           
           npx cap init Music8481 com.music8481.app --web-dir www
 
-          # Configure App with Error Path and Splash Screen styling
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -95,8 +91,8 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX: Inject PiP Support, Hardware Acceleration, and Permissions securely!
-      - name: Inject Hardware Acceleration & Permissions
+      # DEEP FIX: Inject PiP, Hardware Acceleration, and Vivo OriginOS Lockscreen/Island bypass metadata
+      - name: Inject Permissions & Vivo Meta-Data
         run: |
           node -e "
           const fs = require('fs');
@@ -110,19 +106,24 @@ jobs:
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
               <uses-permission android:name=\"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS\" />
           \`;
+          
+          const vivoTags = \`
+              <!-- Bypass Vivo OriginOS & Xiaomi Lockscreen limits -->
+              <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
+              <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
+              <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
+          \`;
+
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
-              
-              // Enable GPU Hardware Acceleration & Large RAM
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              
-              // FIX: Only inject PiP. Capacitor already defines configChanges natively!
               xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
-              
+              xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
+      # NEW: Deep Java Injection for True Edge-to-Edge Punch Hole & Landscape Auto-Rotate
       - name: Inject Native Premium Engine & Fullscreen Handler
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
@@ -134,6 +135,9 @@ jobs:
           import android.content.pm.PackageManager;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -146,19 +150,21 @@ jobs:
           import android.media.AudioManager;
           import android.view.WindowManager;
           import android.app.PictureInPictureParams;
+          import android.content.pm.ActivityInfo;
 
           public class MainActivity extends BridgeActivity {
               private PowerManager.WakeLock wakeLock;
-              private boolean isVideoFullscreen = false; // Tracks if video is playing full screen
+              private boolean isVideoFullscreen = false;
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  // Allow Edge-to-Edge rendering around the camera punch-hole cutout
+                  // TRUE PUNCH-HOLE EDGE-TO-EDGE DISPLAY FIX
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                       getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
                   }
+                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
                   
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -166,13 +172,11 @@ jobs:
                       }
                   }
 
-                  // PREMIUM AUDIO ENHANCEMENT: Route audio through HW Decoders (Triggers Dolby Atmos)
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) {
                       setVolumeControlStream(AudioManager.STREAM_MUSIC);
                   }
 
-                  // CPU WakeLock for perfect background streaming
                   PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
                   wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
                   wakeLock.acquire();
@@ -189,7 +193,6 @@ jobs:
                       webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
                       settings.setDomStorageEnabled(true);
 
-                      // TRUE FULLSCREEN VIDEO & PIP INTERCEPTOR
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
                           private View mCustomView;
@@ -207,14 +210,15 @@ jobs:
                               mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
 
-                              // Enter True Immersive Mode (Hides status bar and nav buttons)
-                              getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                              // FORCE LANDSCAPE AUTO-ROTATE
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+
+                              // FULL IMMERSIVE MODE
+                              WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+                              if (controller != null) {
+                                  controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                                  controller.hide(WindowInsetsCompat.Type.systemBars());
+                              }
 
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
@@ -224,6 +228,16 @@ jobs:
                               ((FrameLayout) getWindow().getDecorView()).removeView(mCustomView);
                               mCustomView = null;
                               isVideoFullscreen = false;
+                              
+                              // REVERT TO PORTRAIT
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                              
+                              // RESTORE STATUS BARS
+                              WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+                              if (controller != null) {
+                                  controller.show(WindowInsetsCompat.Type.systemBars());
+                              }
+                              
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) {
                                   mCustomViewCallback.onCustomViewHidden();
@@ -247,7 +261,6 @@ jobs:
                   }
               }
 
-              // TRIGGER PICTURE-IN-PICTURE (PiP) WHEN HOME BUTTON IS PRESSED DURING FULLSCREEN VIDEO
               @Override
               public void onUserLeaveHint() {
                   super.onUserLeaveHint();
@@ -297,10 +310,8 @@ jobs:
           sudo apt-get install -y imagemagick
           mkdir -p assets
           
-          # Download requested logo
           wget -q https://raw.githubusercontent.com/Ayush8481Lab/Ayushgaana/refs/heads/main/app/android-chrome-512x512.png -O assets/icon.png
           
-          # Center the logo dynamically onto a pure black Splash screen
           convert -size 2732x2732 xc:"#000000" assets/icon.png -gravity center -composite assets/splash.png
           
           npx @capacitor/assets generate --android
