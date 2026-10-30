@@ -22,7 +22,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install Capacitor & Premium Plugins
+      - name: Install Capacitor Plugins
         run: |
           npm init -y
           npm install @capacitor/core
@@ -30,12 +30,12 @@ jobs:
           npm install @capgo/capacitor-media-session
           npm install @capacitor/splash-screen
 
-      - name: Initialize Capacitor Config & Offline UI
+      - name: Initialize Capacitor & UI
         run: |
           mkdir -p www
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
-          # Beautiful Offline UI Fallback
+          # Offline UI
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
@@ -49,7 +49,6 @@ jobs:
               h1 { font-size: 24px; margin: 0 0 10px; }
               p { color: #a7a7a7; font-size: 14px; text-align: center; max-width: 80%; }
               button { margin-top: 20px; background: #1DB954; color: #000; border: none; padding: 12px 24px; border-radius: 20px; font-weight: bold; cursor: pointer; transition: transform 0.2s; }
-              button:active { transform: scale(0.95); }
             </style>
           </head>
           <body>
@@ -78,7 +77,6 @@ jobs:
               "SplashScreen": {
                 "launchShowDuration": 3000,
                 "launchAutoHide": true,
-                "launchFadeOutDuration": 1000,
                 "backgroundColor": "#000000",
                 "androidSplashResourceName": "splash",
                 "showSpinner": true,
@@ -91,8 +89,7 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX: Inject PiP, Hardware Acceleration, and Vivo OriginOS Lockscreen/Island bypass metadata
-      - name: Inject Permissions & Vivo Meta-Data
+      - name: Inject Permissions & Vivo Meta-Data (NO XML CRASHES)
         run: |
           node -e "
           const fs = require('fs');
@@ -104,27 +101,21 @@ jobs:
               <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
               <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
-              <uses-permission android:name=\"android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS\" />
           \`;
-          
           const vivoTags = \`
-              <!-- Bypass Vivo OriginOS & Xiaomi Lockscreen limits -->
               <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
               <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
               <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
           \`;
-
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
               xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
-      # NEW: Deep Java Injection for True Edge-to-Edge Punch Hole & Landscape Auto-Rotate
-      - name: Inject Native Premium Engine & Fullscreen Handler
+      - name: Inject Fullscreen PunchHole & Auto-Rotate Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
           package com.music8481.app;
@@ -135,9 +126,6 @@ jobs:
           import android.content.pm.PackageManager;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
-          import androidx.core.view.WindowCompat;
-          import androidx.core.view.WindowInsetsCompat;
-          import androidx.core.view.WindowInsetsControllerCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -158,13 +146,14 @@ jobs:
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  
-                  // TRUE PUNCH-HOLE EDGE-TO-EDGE DISPLAY FIX
+                  // MUST BE CALLED BEFORE super.onCreate TO FIX PUNCH HOLE EDGE-TO-EDGE
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                      getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      WindowManager.LayoutParams layoutParams = new WindowManager.LayoutParams();
+                      layoutParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      getWindow().setAttributes(layoutParams);
                   }
-                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+                  
+                  super.onCreate(savedInstanceState);
                   
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -210,15 +199,16 @@ jobs:
                               mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
 
-                              // FORCE LANDSCAPE AUTO-ROTATE
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                              // FIX: FORCE LANDSCAPE ROTATION ON FULLSCREEN VIDEO
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE);
 
-                              // FULL IMMERSIVE MODE
-                              WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-                              if (controller != null) {
-                                  controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-                                  controller.hide(WindowInsetsCompat.Type.systemBars());
-                              }
+                              getWindow().getDecorView().setSystemUiVisibility(
+                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
 
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
@@ -230,32 +220,13 @@ jobs:
                               isVideoFullscreen = false;
                               
                               // REVERT TO PORTRAIT
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-                              
-                              // RESTORE STATUS BARS
-                              WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-                              if (controller != null) {
-                                  controller.show(WindowInsetsCompat.Type.systemBars());
-                              }
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
                               
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) {
                                   mCustomViewCallback.onCustomViewHidden();
                                   mCustomViewCallback = null;
                               }
-                          }
-
-                          @Override
-                          public void onPermissionRequest(android.webkit.PermissionRequest request) {
-                              if (originalClient != null) originalClient.onPermissionRequest(request);
-                          }
-                          @Override
-                          public boolean onShowFileChooser(WebView webView, android.webkit.ValueCallback<android.net.Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
-                              return originalClient != null && originalClient.onShowFileChooser(webView, filePathCallback, fileChooserParams);
-                          }
-                          @Override
-                          public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
-                              return originalClient != null && originalClient.onConsoleMessage(consoleMessage);
                           }
                       });
                   }
@@ -289,53 +260,28 @@ jobs:
           }
           EOF
 
-      - name: Fix Kotlin Duplicate Classes (Gradle Bug)
-        run: |
-          cat <<EOF >> android/app/build.gradle
-          
-          dependencies {
-              constraints {
-                  implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22") {
-                      because("kotlin-stdlib-jdk7 is now a part of kotlin-stdlib")
-                  }
-                  implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22") {
-                      because("kotlin-stdlib-jdk8 is now a part of kotlin-stdlib")
-                  }
-              }
-          }
-          EOF
-
       - name: Generate App Icon & Splash Screen
         run: |
           sudo apt-get install -y imagemagick
           mkdir -p assets
           
           wget -q https://raw.githubusercontent.com/Ayush8481Lab/Ayushgaana/refs/heads/main/app/android-chrome-512x512.png -O assets/icon.png
-          
           convert -size 2732x2732 xc:"#000000" assets/icon.png -gravity center -composite assets/splash.png
-          
           npx @capacitor/assets generate --android
 
-      - name: Fix Gradle Daemon & Memory Issues (CI Stability)
+      - name: Fix Gradle Build Config
         run: |
           echo "org.gradle.daemon=false" >> android/gradle.properties
           echo "org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
 
-      - name: Generate Android Keystore (For App Signing)
+      - name: Build & Sign APK
         run: |
-          keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music8481, OU=App, O=Music8481, C=IN"
-
-      - name: Build & Auto-Sign Android APK (Release)
-        run: |
+          keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music, OU=App, C=IN"
           cd android
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=${{ github.workspace }}/android.keystore \
-            -Pandroid.injected.signing.store.password=password123 \
-            -Pandroid.injected.signing.key.alias=android \
-            -Pandroid.injected.signing.key.password=password123
+          ./gradlew assembleRelease -Pandroid.injected.signing.store.file=${{ github.workspace }}/android.keystore -Pandroid.injected.signing.store.password=password123 -Pandroid.injected.signing.key.alias=android -Pandroid.injected.signing.key.password=password123
 
-      - name: Upload Independent APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Music8481-Independent-APK
+          name: Music8481-Premium-APK
           path: android/app/build/outputs/apk/release/app-release.apk
