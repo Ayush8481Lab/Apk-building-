@@ -99,10 +99,15 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # 🔥 FIX: Use the actively maintained FFmpegKit fork
+      # 🔥 FIX: Properly wrap the implementation inside a dependencies block
       - name: Inject FFmpegKit & Permissions
         run: |
-          echo "implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.8'" >> android/app/build.gradle
+          cat <<EOF >> android/app/build.gradle
+          
+          dependencies {
+              implementation("dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.8")
+          }
+          EOF
           
           node -e "
           const fs = require('fs');
