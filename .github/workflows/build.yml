@@ -99,7 +99,6 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # 🔥 FIX: Properly wrap the implementation inside a dependencies block
       - name: Inject FFmpegKit & Permissions
         run: |
           cat <<EOF >> android/app/build.gradle
@@ -157,6 +156,7 @@ jobs:
           }
           "
 
+      # 🔥 FIX: Use ReturnCode static methods for API compliance
       - name: Create Native Download Service (FFmpeg Muxer)
         run: |
           cat <<'EOF' > android/app/src/main/java/com/music8481/app/DownloadService.java
@@ -180,6 +180,7 @@ jobs:
           import com.arthenica.ffmpegkit.FFmpegSession;
           import com.arthenica.ffmpegkit.FFprobeKit;
           import com.arthenica.ffmpegkit.MediaInformationSession;
+          import com.arthenica.ffmpegkit.ReturnCode; 
 
           import java.io.File;
           import java.io.FileInputStream;
@@ -281,7 +282,7 @@ jobs:
                                   m3u8, coverFile.getAbsolutePath(), title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
 
                           currentSession = FFmpegKit.executeAsync(cmd, session -> {
-                              if (session.getReturnCode().isValueSuccess()) {
+                              if (ReturnCode.isSuccess(session.getReturnCode())) {
                                   try {
                                       String safeName = tempMp3.getName();
                                       Uri targetUri = null;
@@ -317,7 +318,7 @@ jobs:
                                       notificationManager.notify(notificationId, notificationBuilder.build());
 
                                   } catch (Exception e) { e.printStackTrace(); }
-                              } else if (session.getReturnCode().isCancel()) {
+                              } else if (ReturnCode.isCancel(session.getReturnCode())) {
                                   notificationManager.cancel(notificationId);
                               } else {
                                   notificationBuilder.setContentText("Download Failed").setProgress(0,0,false).setOngoing(false).mActions.clear();
