@@ -5,28 +5,42 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true          # harmless; needed only if wrapper/assets are in LFS
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5        # v4 is deprecated (warning in your log)
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle cache
+      - name: Verify project layout
+        run: |
+          pwd && ls -la
+          find . -maxdepth 3 \( -name 'gradlew' -o -name '*.gradle*' \) -print
+          test -f ./gradlew || { echo "::error::gradlew missing — commit the Gradle wrapper."; exit 1; }
+          test -x ./gradlew || { echo "::error::gradlew not executable — git update-index --chmod=+x gradlew"; exit 1; }
+
+      - name: Gradle cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Build Release APK (arm64-v8a)
-        run: ./gradlew assembleRelease -PtargetAbi=arm64-v8a
+        run: ./gradlew assembleRelease -PtargetAbi=arm64-v8a --no-daemon --stacktrace
 
       - name: Sign APK
         uses: r0adkll/sign-android-release@v1
@@ -42,3 +56,4 @@ jobs:
         with:
           name: app-release-arm64
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
