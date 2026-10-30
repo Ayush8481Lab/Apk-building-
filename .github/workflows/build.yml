@@ -35,6 +35,7 @@ jobs:
           mkdir -p www
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
+          # Beautiful Offline UI Fallback
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
@@ -62,6 +63,7 @@ jobs:
           
           npx cap init Music8481 com.music8481.app --web-dir www
 
+          # FIX: Removed transparent overlay so Portrait mode stays perfectly within safe areas!
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -89,8 +91,8 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX 1: Inject Permissions (Removed annoying battery optimization prompt)
-      - name: Inject Permissions & Vivo Meta-Data
+      # DEEP FIX 1: Lock App to Portrait Globally, Enable PiP, Inject Permissions
+      - name: Inject Permissions & App Locks
         run: |
           node -e "
           const fs = require('fs');
@@ -103,42 +105,26 @@ jobs:
               <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
           \`;
+          
           const vivoTags = \`
               <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
               <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
               <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
           \`;
+
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
+              
+              // LOCK TO PORTRAIT DEFAULT & ALLOW PIP
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:screenOrientation=\"portrait\"');
+              
               xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
-      # DEEP FIX 2: Force Android 15/16 Styles to completely Transparent Edge-to-Edge Punch Hole UI
-      - name: Force Android App Theme to Edge-to-Edge
-        run: |
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/src/main/res/values/styles.xml';
-          if (fs.existsSync(path)) {
-              let xml = fs.readFileSync(path, 'utf8');
-              const edgeToEdge = \`
-                  <item name=\"android:windowLayoutInDisplayCutoutMode\">always</item>
-                  <item name=\"android:statusBarColor\">@android:color/transparent</item>
-                  <item name=\"android:navigationBarColor\">@android:color/transparent</item>
-                  <item name=\"android:windowDrawsSystemBarBackgrounds\">true</item>
-                  <item name=\"android:enforceNavigationBarContrast\">false</item>
-                  <item name=\"android:enforceStatusBarContrast\">false</item>
-              \`;
-              xml = xml.replace('</style>', edgeToEdge + '\n</style>');
-              fs.writeFileSync(path, xml);
-          }
-          "
-
-      # DEEP FIX 3: Android 16 Gesture-Nav PiP & True Cutout Mode Engine
+      # DEEP FIX 2: Advanced Java Engine for Seamless Landscape Video, PiP, and Background Audio
       - name: Inject Native Premium Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
@@ -151,7 +137,6 @@ jobs:
           import android.content.pm.PackageManager;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
-          import androidx.core.view.WindowCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -174,7 +159,6 @@ jobs:
               private boolean isVideoFullscreen = false;
               private boolean isVideoModeActive = false; 
 
-              // Proactively tells Android 12+ OS to auto-enter PiP on swipe-home (Fixes Android 16 Bug)
               private void updatePiPParams(boolean enable) {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder();
@@ -205,19 +189,12 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  // ULTIMATE EDGE-TO-EDGE PUNCH HOLE FIX FOR ANDROID 15/16
-                  getWindow().setStatusBarColor(Color.TRANSPARENT);
-                  getWindow().setNavigationBarColor(Color.TRANSPARENT);
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                      getWindow().setNavigationBarContrastEnforced(false);
-                      getWindow().setStatusBarContrastEnforced(false);
-                  }
+                  // ALWAYS ALLOW DRAWING UNDER PUNCH HOLE (Required for Landscape Fullscreen)
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                       WindowManager.LayoutParams attributes = getWindow().getAttributes();
-                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
                       getWindow().setAttributes(attributes);
                   }
-                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
                   
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -228,8 +205,8 @@ jobs:
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+                  // Silent Background Execution Lock (No Battery Popups Needed)
                   PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-                  // Original optimized background streaming lock
                   wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
                   wakeLock.acquire();
               }
@@ -246,6 +223,8 @@ jobs:
                       settings.setDomStorageEnabled(true);
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
+                      
+                      // Poll for specific iframe video source to trigger PiP capability
                       webView.postDelayed(new Runnable() {
                           @Override
                           public void run() {
@@ -256,7 +235,7 @@ jobs:
                                   "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
                                   "}, 1000);", null);
                           }
-                      }, 3000);
+                      }, 2000);
 
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
@@ -277,12 +256,17 @@ jobs:
                                   public void run() { updatePiPParams(true); }
                               });
 
+                              // 1. FORCE LANDSCAPE
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
+                              // 2. FORCE IMMERSIVE FULLSCREEN (Hides Nav/Status Bar, overlaps punch hole)
                               getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
 
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
@@ -298,7 +282,10 @@ jobs:
                                   public void run() { updatePiPParams(isVideoModeActive); }
                               });
 
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
+                              // 1. REVERT TO PORTRAIT
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                              
+                              // 2. RESTORE NORMAL SAFE-AREA UI
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
                           }
@@ -312,7 +299,7 @@ jobs:
                   }
               }
 
-              // PIP MAGIC: Force Iframe to fill PiP window perfectly
+              // PIP STRETCH HACK: Targets ayushcom.vercel.app and fills the small PiP box seamlessly
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
@@ -342,18 +329,27 @@ jobs:
                   }
               }
 
-              // Legacy PiP Fallback for older Android Versions (Before Android 12)
               @Override
               public void onUserLeaveHint() {
                   super.onUserLeaveHint();
-                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) { super.onBackPressed(); }
+                  } else {
+                      super.onBackPressed();
                   }
               }
 
               @Override
               public void onPause() {
                   super.onPause();
+                  // Keeps audio and video running silently!
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       this.bridge.getWebView().resumeTimers();
                       this.bridge.getWebView().onResume(); 
