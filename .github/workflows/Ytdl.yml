@@ -52,7 +52,6 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
-                  maven { url 'https://jitpack.io' }
               }
           }
           rootProject.name = "YtLive"
@@ -122,12 +121,12 @@ jobs:
               implementation 'androidx.media3:media3-exoplayer-dash:1.4.1'
               implementation 'androidx.media3:media3-ui:1.4.1'
 
-              implementation 'com.github.yausername.youtubedl-android:library:0.17.4'
+              implementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
           }
           EOF
 
           cat > app/proguard-rules.pro <<'EOF'
-          # Intentionally empty for now.
+          # Intentionally empty.
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
@@ -142,6 +141,7 @@ jobs:
                   android:label="@string/app_name"
                   android:supportsRtl="true"
                   android:theme="@style/Theme.Material3.DayNight.NoActionBar"
+                  android:extractNativeLibs="true"
                   android:usesCleartextTraffic="false">
 
                   <activity
