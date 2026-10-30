@@ -99,21 +99,10 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # 🔥 FIXED: Properly inject FFmpegKit into Dependencies Block & Bump minSdk
+      # 🔥 FIX: Use the actively maintained FFmpegKit fork
       - name: Inject FFmpegKit & Permissions
         run: |
-          cat <<EOF >> android/app/build.gradle
-          
-          dependencies {
-              implementation 'com.arthenica:ffmpeg-kit-audio:6.0-2'
-          }
-          EOF
-          
-          if [ -f "android/variables.gradle" ]; then
-              sed -i 's/minSdkVersion = 21/minSdkVersion = 24/g' android/variables.gradle
-              sed -i 's/minSdkVersion = 22/minSdkVersion = 24/g' android/variables.gradle
-              sed -i 's/minSdkVersion = 23/minSdkVersion = 24/g' android/variables.gradle
-          fi
+          echo "implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.8'" >> android/app/build.gradle
           
           node -e "
           const fs = require('fs');
@@ -163,7 +152,6 @@ jobs:
           }
           "
 
-      # 🔥 NATIVE FFMPEG DOWNLOAD SERVICE 
       - name: Create Native Download Service (FFmpeg Muxer)
         run: |
           cat <<'EOF' > android/app/src/main/java/com/music8481/app/DownloadService.java
@@ -260,7 +248,6 @@ jobs:
 
                   executor.execute(() -> {
                       try {
-                          // 1. Download Cover Art to cache
                           File coverFile = new File(getCacheDir(), "cover.jpg");
                           if (imageUrl != null) {
                               URL url = new URL(imageUrl);
@@ -275,7 +262,6 @@ jobs:
                               in.close();
                           }
 
-                          // 2. Probe Duration for Percentage
                           notificationBuilder.setContentText("Probing media stream...");
                           notificationManager.notify(notificationId, notificationBuilder.build());
                           MediaInformationSession mediaInfo = FFprobeKit.getMediaInformation(m3u8);
@@ -285,14 +271,12 @@ jobs:
                           }
                           final long finalDuration = totalDurationMs;
 
-                          // 3. Build FFmpeg Command for ID3 Injection & Muxing
                           File tempMp3 = new File(getCacheDir(), title.replaceAll("[\\\\/:*?\"<>|]", "") + ".mp3");
                           String cmd = String.format("-y -i \"%s\" -i \"%s\" -map 0:a -map 1:v -c:a libmp3lame -b:a 320k -c:v copy -id3v2_version 3 -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"",
                                   m3u8, coverFile.getAbsolutePath(), title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
 
                           currentSession = FFmpegKit.executeAsync(cmd, session -> {
                               if (session.getReturnCode().isValueSuccess()) {
-                                  // 4. Save to Music8481/Music directory
                                   try {
                                       String safeName = tempMp3.getName();
                                       Uri targetUri = null;
@@ -412,7 +396,6 @@ jobs:
                       }
                   }
 
-                  // 🔥 NEW: Native Download Hook
                   @JavascriptInterface
                   public void startNativeDownload(String url) {
                       Intent intent = new Intent(MainActivity.this, DownloadService.class);
@@ -434,7 +417,6 @@ jobs:
                   WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
                   getWindow().getDecorView().setOnApplyWindowInsetsListener((v, insets) -> insets);
 
-                  // Request All Permissions
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.READ_MEDIA_AUDIO}, 101);
                   } else {
@@ -469,7 +451,6 @@ jobs:
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
                       
-                      // 🔥 Inject JS for PiP & VERCEL DOWNLOAD INTERCEPTION
                       webView.postDelayed(() -> {
                           webView.evaluateJavascript(
                               "setInterval(function() {" +
