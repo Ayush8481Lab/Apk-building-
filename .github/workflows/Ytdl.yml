@@ -1,8 +1,8 @@
-name: Build APK with yt-dlp
+name: Build YtLive APK
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,49 +11,314 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          lfs: true          # harmless; needed only if wrapper/assets are in LFS
+      - name: Checkout
+        uses: actions/checkout@v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5        # v4 is deprecated (warning in your log)
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Verify project layout
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Create Android project files
         run: |
-          pwd && ls -la
-          find . -maxdepth 3 \( -name 'gradlew' -o -name '*.gradle*' \) -print
-          test -f ./gradlew || { echo "::error::gradlew missing — commit the Gradle wrapper."; exit 1; }
-          test -x ./gradlew || { echo "::error::gradlew not executable — git update-index --chmod=+x gradlew"; exit 1; }
+          mkdir -p app/src/main/java/com/example/ytlive
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
 
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url 'https://jitpack.io' }
+              }
+          }
+          rootProject.name = "YtLive"
+          include ':app'
+          EOF
 
-      - name: Build Release APK (arm64-v8a)
-        run: ./gradlew assembleRelease -PtargetAbi=arm64-v8a --no-daemon --stacktrace
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+              id 'org.jetbrains.kotlin.android' version '2.0.21' apply false
+          }
+          EOF
 
-      - name: Sign APK
-        uses: r0adkll/sign-android-release@v1
-        with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.KEYSTORE_BASE64 }}
-          alias: ${{ secrets.KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.example.ytlive'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.example.ytlive"
+                  minSdk 24
+                  targetSdk 35
+                  versionCode 1
+                  versionName "1.0"
+                  ndk { abiFilters 'arm64-v8a' }
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+
+              packaging {
+                  jniLibs { useLegacyPackaging = true }
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.13.1'
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+              implementation 'com.google.android.material:material:1.12.0'
+              implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.6'
+              implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+
+              implementation 'androidx.media3:media3-exoplayer:1.4.1'
+              implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
+              implementation 'androidx.media3:media3-exoplayer-dash:1.4.1'
+              implementation 'androidx.media3:media3-ui:1.4.1'
+
+              implementation 'com.github.yausername.youtubedl-android:library:0.17.4'
+          }
+          EOF
+
+          cat > app/proguard-rules.pro <<'EOF'
+          # Intentionally empty for now.
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+              <application
+                  android:allowBackup="true"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.Material3.DayNight.NoActionBar"
+                  android:usesCleartextTraffic="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">YtLive</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:orientation="vertical"
+              android:padding="16dp"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+
+              <EditText
+                  android:id="@+id/urlInput"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:hint="YouTube live URL"
+                  android:inputType="textUri"
+                  android:importantForAutofill="no"
+                  android:autofillHints="" />
+
+              <Button
+                  android:id="@+id/playButton"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="Play" />
+
+              <TextView
+                  android:id="@+id/status"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Idle" />
+
+              <androidx.media3.ui.PlayerView
+                  android:id="@+id/playerView"
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1"
+                  app:use_controller="true" />
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/java/com/example/ytlive/MainActivity.kt <<'EOF'
+          package com.example.ytlive
+
+          import android.os.Bundle
+          import android.util.Log
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.TextView
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.lifecycle.lifecycleScope
+          import androidx.media3.common.MediaItem
+          import androidx.media3.datasource.DefaultHttpDataSource
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.dash.DashMediaSource
+          import androidx.media3.exoplayer.hls.HlsMediaSource
+          import androidx.media3.exoplayer.source.MediaSource
+          import androidx.media3.exoplayer.source.ProgressiveMediaSource
+          import androidx.media3.ui.PlayerView
+          import com.yausername.youtubedl_android.YoutubeDL
+          import com.yausername.youtubedl_android.YoutubeDLRequest
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var player: ExoPlayer
+
+              @Volatile private var ytReady = false
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  val urlInput = findViewById<EditText>(R.id.urlInput)
+                  val playBtn  = findViewById<Button>(R.id.playButton)
+                  val status   = findViewById<TextView>(R.id.status)
+                  val playerView = findViewById<PlayerView>(R.id.playerView)
+
+                  player = ExoPlayer.Builder(this).build()
+                  playerView.player = player
+
+                  playBtn.setOnClickListener {
+                      val url = urlInput.text.toString().trim()
+                      if (url.isEmpty()) {
+                          status.text = "Enter a YouTube URL"
+                          return@setOnClickListener
+                      }
+                      status.text = "Resolving..."
+                      lifecycleScope.launch {
+                          try {
+                              val streamUrl = resolveStreamUrl(url)
+                              status.text = "Playing"
+                              val dataSource = DefaultHttpDataSource.Factory()
+                                  .setUserAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36")
+                                  .setAllowCrossProtocolRedirects(true)
+
+                              val source: MediaSource = when {
+                                  streamUrl.contains(".m3u8") ->
+                                      HlsMediaSource.Factory(dataSource)
+                                          .createMediaSource(MediaItem.fromUri(streamUrl))
+                                  streamUrl.contains(".mpd") ->
+                                      DashMediaSource.Factory(dataSource)
+                                          .createMediaSource(MediaItem.fromUri(streamUrl))
+                                  else ->
+                                      ProgressiveMediaSource.Factory(dataSource)
+                                          .createMediaSource(MediaItem.fromUri(streamUrl))
+                              }
+                              player.setMediaSource(source)
+                              player.prepare()
+                              player.playWhenReady = true
+                          } catch (t: Throwable) {
+                              Log.e("YtLive", "resolve failed", t)
+                              status.text = "Error: ${t.message}"
+                          }
+                      }
+                  }
+              }
+
+              private suspend fun resolveStreamUrl(url: String): String = withContext(Dispatchers.IO) {
+                  if (!ytReady) {
+                      YoutubeDL.getInstance().init(applicationContext)
+                      ytReady = true
+                  }
+                  val req = YoutubeDLRequest(url)
+                  req.addOption("-f", "best[protocol^=m3u8]/best")
+                  req.addOption("--no-playlist")
+                  req.addOption("-g")
+
+                  val response = YoutubeDL.getInstance().execute(req)
+                  response.out.lineSequence()
+                      .map { it.trim() }
+                      .firstOrNull { it.isNotEmpty() }
+                      ?: throw IllegalStateException("yt-dlp returned no URL")
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  player.pause()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  player.release()
+              }
+          }
+          EOF
+
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "--- Project tree ---"
+          find . -type f -not -path './.git/*' | sort
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-arm64
-          path: app/build/outputs/apk/release/*.apk
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
