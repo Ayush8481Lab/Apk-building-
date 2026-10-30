@@ -33,13 +33,24 @@ jobs:
       - name: Initialize Capacitor Config & Offline UI
         run: |
           mkdir -p www
-          echo "<html><body>Loading Music8481...</body></html>" > www/index.html
+          cat <<EOF > www/index.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+            <title>Loading...</title>
+            <style>body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; background: #000; }</style>
+          </head>
+          <body></body>
+          </html>
+          EOF
           
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
           <head>
-            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
             <title>Offline</title>
             <style>
               body { background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
@@ -48,13 +59,12 @@ jobs:
               h1 { font-size: 24px; margin: 0 0 10px; }
               p { color: #a7a7a7; font-size: 14px; text-align: center; max-width: 80%; }
               button { margin-top: 20px; background: #1DB954; color: #000; border: none; padding: 12px 24px; border-radius: 20px; font-weight: bold; cursor: pointer; transition: transform 0.2s; }
-              button:active { transform: scale(0.95); }
             </style>
           </head>
           <body>
             <div class="spinner"></div>
             <h1>You're Offline</h1>
-            <p>Please check your internet connection to stream music.</p>
+            <p>Please check your internet connection.</p>
             <button onclick="window.location.href='https://ayushgaana.vercel.app'">Retry Connection</button>
           </body>
           </html>
@@ -89,71 +99,50 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # SAFE MANIFEST INJECTION – no duplicate attributes, PiP‑ready for Android 8–17
-      - name: Inject Permissions & App Locks
+      - name: Inject Permissions & Vivo Meta-Data
         run: |
           node -e "
           const fs = require('fs');
           const path = 'android/app/src/main/AndroidManifest.xml';
           let xml = fs.readFileSync(path, 'utf8');
-
-          // 1. Add permissions only if they are not already present
-          const perms = [
-            'android.permission.FOREGROUND_SERVICE',
-            'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
-            'android.permission.WAKE_LOCK',
-            'android.permission.POST_NOTIFICATIONS',
-            'android.permission.MODIFY_AUDIO_SETTINGS'
-          ];
-          perms.forEach(perm => {
-            if (!xml.includes('android.permission.' + perm.split('.').pop())) {
-              xml = xml.replace('</manifest>', '    <uses-permission android:name=\"' + perm + '\" />\n</manifest>');
-            }
-          });
-
-          // 2. Add application-level attributes without duplication
-          if (!xml.includes('android:hardwareAccelerated')) {
-            xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
+          const perms = \`
+              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />
+              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />
+              <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
+              <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
+              <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
+          \`;
+          if (!xml.includes('android.permission.WAKE_LOCK')) {
+              xml = xml.replace('<application', perms + '\n    <application');
+              xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
+              fs.writeFileSync(path, xml);
           }
-
-          // 3. Add PiP / orientation / back-callback attributes only if missing
-          //    Capacitor already ships a configChanges attribute, so we must NOT add a second one.
-          const activityAttrs = {
-            'android:supportsPictureInPicture': 'true',
-            'android:resizeableActivity': 'true',
-            'android:screenOrientation': 'portrait',
-            // Disable predictive back on the PiP activity – required on Android 16+
-            'android:enableOnBackInvokedCallback': 'false'
-          };
-
-          // Build the missing attribute string
-          let missingAttrs = '';
-          for (const [attr, value] of Object.entries(activityAttrs)) {
-            if (!xml.includes(attr + '=')) {
-              missingAttrs += ' ' + attr + '=\"' + value + '\"';
-            }
-          }
-
-          // Insert the missing attributes into the first <activity> tag
-          if (missingAttrs) {
-            xml = xml.replace('<activity', '<activity' + missingAttrs);
-          }
-
-          // 4. Add Vivo / lock-screen meta-data only once
-          if (!xml.includes('com.vivo.dynamic.island.support')) {
-            const vivoTags = `
-              <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
-              <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
-              <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
-            `;
-            xml = xml.replace('</application>', vivoTags + '\n    </application>');
-          }
-
-          fs.writeFileSync(path, xml);
           "
 
-      # DEEP FIX: Corrected PiP engine – delays iframe resize, uses robust CSS, and ensures auto-enter works on Android 12+ (including Android 16/17)
-      - name: Inject Native Premium Engine
+      - name: Force Android App Theme to Edge-to-Edge
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = 'android/app/src/main/res/values/styles.xml';
+          if (fs.existsSync(path)) {
+              let xml = fs.readFileSync(path, 'utf8');
+              const edgeToEdge = \`
+                  <item name=\"android:windowLayoutInDisplayCutoutMode\">shortEdges</item>
+                  <item name=\"android:windowTranslucentStatus\">true</item>
+                  <item name=\"android:windowTranslucentNavigation\">true</item>
+                  <item name=\"android:statusBarColor\">@android:color/transparent</item>
+                  <item name=\"android:navigationBarColor\">@android:color/transparent</item>
+                  <item name=\"android:windowDrawsSystemBarBackgrounds\">false</item>
+                  <item name=\"android:windowFullscreen\">true</item>
+                  <item name=\"android:windowContentOverlay\">@null</item>
+              \`;
+              xml = xml.replace(/<\/style>/g, edgeToEdge + '\n</style>');
+              fs.writeFileSync(path, xml);
+          }
+          "
+
+      - name: Inject Native Premium Engine (Punch Hole Nuclear Fix)
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
           package com.music8481.app;
@@ -165,6 +154,9 @@ jobs:
           import android.content.pm.PackageManager;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -172,6 +164,8 @@ jobs:
           import android.webkit.WebChromeClient;
           import android.webkit.JavascriptInterface;
           import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowInsets;
           import android.widget.FrameLayout;
           import android.content.Context;
           import android.os.PowerManager;
@@ -188,14 +182,12 @@ jobs:
               private boolean isVideoModeActive = false; 
 
               private void updatePiPParams(boolean enable) {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder();
                       builder.setAspectRatio(new Rational(16, 9));
-                      builder.setAutoEnterEnabled(enable);
-                      setPictureInPictureParams(builder.build());
-                  } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder();
-                      builder.setAspectRatio(new Rational(16, 9));
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          builder.setAutoEnterEnabled(enable);
+                      }
                       setPictureInPictureParams(builder.build());
                   }
               }
@@ -205,12 +197,7 @@ jobs:
                   public void setVideoMode(boolean isVideo) {
                       if (isVideoModeActive != isVideo) {
                           isVideoModeActive = isVideo;
-                          runOnUiThread(new Runnable() {
-                              @Override
-                              public void run() {
-                                  updatePiPParams(isVideoFullscreen || isVideoModeActive);
-                              }
-                          });
+                          runOnUiThread(() -> updatePiPParams(isVideoFullscreen || isVideoModeActive));
                       }
                   }
               }
@@ -219,12 +206,20 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                      WindowManager.LayoutParams attributes = getWindow().getAttributes();
-                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                      getWindow().setAttributes(attributes);
+                      WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
+                      layoutParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      getWindow().setAttributes(layoutParams);
                   }
                   
+                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+
+                  getWindow().getDecorView().setOnApplyWindowInsetsListener((v, insets) -> {
+                      return insets;
+                  });
+
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                           ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
@@ -249,51 +244,60 @@ jobs:
                       settings.setMediaPlaybackRequiresUserGesture(false); 
                       webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
                       settings.setDomStorageEnabled(true);
+                      
+                      webView.setFitsSystemWindows(false);
+                      webView.setPadding(0,0,0,0);
+                      
+                      if (webView.getParent() instanceof ViewGroup) {
+                          ((ViewGroup) webView.getParent()).setFitsSystemWindows(false);
+                          ((ViewGroup) webView.getParent()).setClipToPadding(false);
+                      }
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
                       
-                      // Poll for the iframe early and often so PiP auto-enter is armed promptly
-                      webView.postDelayed(new Runnable() {
-                          @Override
-                          public void run() {
-                              webView.evaluateJavascript(
-                                  "setInterval(function() {" +
-                                  "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                                  "  var hasVideo = iframe !== null;" +
-                                  "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
-                                  "}, 500);", null);
-                          }
-                      }, 1000);
+                      webView.postDelayed(() -> {
+                          webView.evaluateJavascript(
+                              "setInterval(function() {" +
+                              "  var meta = document.querySelector('meta[name=\"viewport\"]');" +
+                              "  var content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';" +
+                              "  if (meta && meta.content !== content) {" +
+                              "      meta.content = content;" +
+                              "  } else if (!meta) {" +
+                              "      var m = document.createElement('meta');" +
+                              "      m.name = 'viewport';" +
+                              "      m.content = content;" +
+                              "      document.head.appendChild(m);" +
+                              "  }" +
+                              "  document.documentElement.style.padding = '0';" +
+                              "  document.documentElement.style.margin = '0';" +
+                              "  document.body.style.padding = '0';" +
+                              "  document.body.style.margin = '0';" +
+                              "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                              "  var hasVideo = iframe !== null;" +
+                              "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
+                              "}, 500);", null);
+                      }, 2000);
 
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
                           private View mCustomView;
                           private WebChromeClient.CustomViewCallback mCustomViewCallback;
-                          private int mOriginalSystemUiVisibility;
 
                           @Override
                           public void onShowCustomView(View view, CustomViewCallback callback) {
                               if (mCustomView != null) { onHideCustomView(); return; }
                               mCustomView = view;
                               isVideoFullscreen = true;
-                              mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
                               
-                              runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() { updatePiPParams(true); }
-                              });
-
+                              runOnUiThread(() -> updatePiPParams(true));
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
-                              getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                              WindowInsetsControllerCompat windowInsetsController = new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
+                              windowInsetsController.hide(WindowInsetsCompat.Type.systemBars());
+                              windowInsetsController.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
 
+                              mCustomView.setFitsSystemWindows(false);
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
 
@@ -303,14 +307,12 @@ jobs:
                               mCustomView = null;
                               isVideoFullscreen = false;
                               
-                              runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() { updatePiPParams(isVideoModeActive); }
-                              });
-
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                              runOnUiThread(() -> updatePiPParams(isVideoModeActive));
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
                               
-                              getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
+                              WindowInsetsControllerCompat windowInsetsController = new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
+                              windowInsetsController.show(WindowInsetsCompat.Type.systemBars());
+                              
                               if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
                           }
                           @Override
@@ -323,66 +325,51 @@ jobs:
                   }
               }
 
-              // Delayed resize with robust CSS to force iframe to fill PiP window (16:9)
+              // ==========================================
+              // 🔥 UPDATED PERFECT 16:9 IFRAME PiP ENGINE 🔥
+              // ==========================================
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       WebView webView = this.bridge.getWebView();
                       if (isInPictureInPictureMode) {
-                          webView.postDelayed(new Runnable() {
-                              @Override
-                              public void run() {
-                                  webView.evaluateJavascript(
-                                      "(function() {" +
-                                      "  var style = document.createElement('style');" +
-                                      "  style.innerHTML = 'html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }';" +
+                          String js = "var style = document.getElementById('pip-style-fix');" +
+                                      "if (!style) {" +
+                                      "  style = document.createElement('style');" +
+                                      "  style.id = 'pip-style-fix';" +
+                                      "  style.innerHTML = '" +
+                                      "    body.pip-active .pip-ancestor { transform: none !important; contain: none !important; perspective: none !important; filter: none !important; position: static !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; }" +
+                                      "    body.pip-active iframe[src*=\"ayushcom.vercel.app\"] { position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; z-index: 2147483647 !important; background: #000 !important; border: none !important; margin: 0 !important; padding: 0 !important; max-width: 100% !important; max-height: 100% !important; display: block !important; object-fit: cover !important; }" +
+                                      "  ';" +
                                       "  document.head.appendChild(style);" +
-                                      "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                                      "  if (iframe) {" +
-                                      "    iframe.style.position = 'fixed';" +
-                                      "    iframe.style.top = '0'; iframe.style.left = '0';" +
-                                      "    iframe.style.width = '100%'; iframe.style.height = '100%';" +
-                                      "    iframe.style.border = 'none';" +
-                                      "    iframe.style.zIndex = '999999';" +
-                                      "    iframe.setAttribute('data-pip', 'true');" +
+                                      "}" +
+                                      "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                                      "if (iframe) {" +
+                                      "  var el = iframe.parentElement;" +
+                                      "  while (el && el !== document.body && el !== document.documentElement) {" +
+                                      "    el.classList.add('pip-ancestor');" +
+                                      "    el = el.parentElement;" +
                                       "  }" +
-                                      "})();", null);
-                              }
-                          }, 150); // 150 ms delay
+                                      "  document.body.classList.add('pip-active');" +
+                                      "}";
+                          webView.evaluateJavascript(js, null);
                       } else {
-                          webView.evaluateJavascript(
-                              "var iframe = document.querySelector('iframe[data-pip=\"true\"]');" +
-                              "if(iframe) {" +
-                              "  iframe.style.position = '';" +
-                              "  iframe.style.top = ''; iframe.style.left = '';" +
-                              "  iframe.style.width = ''; iframe.style.height = '';" +
-                              "  iframe.style.border = '';" +
-                              "  iframe.style.zIndex = '';" +
-                              "  iframe.removeAttribute('data-pip');" +
-                              "}", null);
+                          String js = "document.body.classList.remove('pip-active');" +
+                                      "var ancestors = document.querySelectorAll('.pip-ancestor');" +
+                                      "for (var i = 0; i < ancestors.length; i++) {" +
+                                      "  ancestors[i].classList.remove('pip-ancestor');" +
+                                      "}";
+                          webView.evaluateJavascript(js, null);
                       }
                   }
               }
 
-              // Android 12+ uses setAutoEnterEnabled; legacy path for Android 8-11
               @Override
               public void onUserLeaveHint() {
                   super.onUserLeaveHint();
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-                      if (isVideoFullscreen || isVideoModeActive) {
-                          try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
-                      }
-                  }
-              }
-
-              // On Android 16+ predictive back is disabled via manifest, so onBackPressed still fires and can start PiP.
-              @Override
-              public void onBackPressed() {
-                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) { super.onBackPressed(); }
-                  } else {
-                      super.onBackPressed();
+                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
                   }
               }
 
