@@ -141,7 +141,6 @@ jobs:
                   android:label="@string/app_name"
                   android:supportsRtl="true"
                   android:theme="@style/Theme.Material3.DayNight.NoActionBar"
-                  android:extractNativeLibs="true"
                   android:usesCleartextTraffic="false">
 
                   <activity
@@ -276,7 +275,6 @@ jobs:
               private lateinit var player: ExoPlayer
               @Volatile private var ytReady = false
 
-              // FIX: cache keyed by (url, maxHeight) — different videos no longer collide
               private data class CacheKey(val url: String, val maxHeight: Int)
               private data class CachedResult(
                   val streams: ResolvedStreams,
@@ -291,9 +289,6 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   setContentView(R.layout.activity_main)
-
-                  // NOTE: yt-dlp is NOT initialized here. First Play tap initializes it.
-                  // Per your request: no init on app open.
 
                   val urlInput = findViewById<EditText>(R.id.urlInput)
                   val qualitySpinner = findViewById<Spinner>(R.id.qualitySpinner)
@@ -369,7 +364,6 @@ jobs:
 
               private fun normalizeYouTubeInput(input: String): String {
                   val trimmed = input.trim()
-                  // Accept bare 11-char YouTube video IDs
                   if (Regex("^[A-Za-z0-9_-]{11}$").matches(trimmed)) {
                       return "https://www.youtube.com/watch?v=$trimmed"
                   }
@@ -387,7 +381,6 @@ jobs:
                   return fresh
               }
 
-              // Single -J call: returns BOTH parsed URLs and raw JSON.
               private suspend fun resolveWithJson(url: String, maxHeight: Int): CachedResult =
                   withContext(Dispatchers.IO) {
                       if (!ytReady) {
@@ -406,7 +399,8 @@ jobs:
                       req.addOption("-J")
 
                       val response = YoutubeDL.getInstance().execute(req)
-                      val jsonStr = response.out.joinToString("\n").trim()
+                      // FIX: response.out is a String, not a List<String>. -J already emits one JSON string.
+                      val jsonStr = response.out.trim()
 
                       Log.d("YtLiveJSON", jsonStr)
 
@@ -415,7 +409,6 @@ jobs:
                       var videoUrl: String? = null
                       var audioUrl: String? = null
 
-                      // When -f bv+ba resolves two streams, yt-dlp puts them here:
                       root.optJSONArray("requested_formats")?.let { rf ->
                           for (i in 0 until rf.length()) {
                               val f = rf.getJSONObject(i)
@@ -430,7 +423,6 @@ jobs:
                           }
                       }
 
-                      // Otherwise scan all formats
                       if (videoUrl == null) {
                           root.optJSONArray("formats")?.let { fs ->
                               var bestVideoH = -1
@@ -452,7 +444,6 @@ jobs:
                           }
                       }
 
-                      // Final fallback: top-level manifest/url (muxed live)
                       if (videoUrl.isNullOrEmpty()) {
                           val top = root.optString("manifest_url", "")
                               .ifEmpty { root.optString("url", "") }
