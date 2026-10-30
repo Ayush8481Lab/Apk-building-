@@ -156,7 +156,7 @@ jobs:
           }
           "
 
-      # 🔥 FIX: Use ReturnCode static methods for API compliance
+      # 🔥 FIX: Adaptive FFmpeg Command & MediaStore Safety
       - name: Create Native Download Service (FFmpeg Muxer)
         run: |
           cat <<'EOF' > android/app/src/main/java/com/music8481/app/DownloadService.java
@@ -255,21 +255,29 @@ jobs:
                   executor.execute(() -> {
                       try {
                           File coverFile = new File(getCacheDir(), "cover.jpg");
-                          if (imageUrl != null) {
-                              URL url = new URL(imageUrl);
-                              HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                              conn.connect();
-                              InputStream in = conn.getInputStream();
-                              FileOutputStream out = new FileOutputStream(coverFile);
-                              byte[] buffer = new byte[4096];
-                              int bytesRead;
-                              while ((bytesRead = in.read(buffer)) != -1) { out.write(buffer, 0, bytesRead); }
-                              out.close();
-                              in.close();
+                          boolean downloadedCover = false;
+                          
+                          if (imageUrl != null && !imageUrl.isEmpty()) {
+                              try {
+                                  URL url = new URL(imageUrl);
+                                  HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                                  conn.setConnectTimeout(5000);
+                                  conn.connect();
+                                  if (conn.getResponseCode() == 200) {
+                                      InputStream in = conn.getInputStream();
+                                      FileOutputStream out = new FileOutputStream(coverFile);
+                                      byte[] buffer = new byte[4096];
+                                      int bytesRead;
+                                      while ((bytesRead = in.read(buffer)) != -1) { out.write(buffer, 0, bytesRead); }
+                                      out.close(); in.close();
+                                      downloadedCover = true;
+                                  }
+                              } catch (Exception ignore) {}
                           }
 
                           notificationBuilder.setContentText("Probing media stream...");
                           notificationManager.notify(notificationId, notificationBuilder.build());
+                          
                           MediaInformationSession mediaInfo = FFprobeKit.getMediaInformation(m3u8);
                           long totalDurationMs = 0;
                           if (mediaInfo.getMediaInformation() != null && mediaInfo.getMediaInformation().getDuration() != null) {
@@ -278,19 +286,29 @@ jobs:
                           final long finalDuration = totalDurationMs;
 
                           File tempMp3 = new File(getCacheDir(), title.replaceAll("[\\\\/:*?\"<>|]", "") + ".mp3");
-                          String cmd = String.format("-y -i \"%s\" -i \"%s\" -map 0:a -map 1:v -c:a libmp3lame -b:a 320k -c:v copy -id3v2_version 3 -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"",
-                                  m3u8, coverFile.getAbsolutePath(), title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
+                          
+                          // DYNAMIC CMD: Only map image stream if cover download actually succeeded. Fixes instant crash.
+                          String cmd;
+                          if (downloadedCover && coverFile.exists()) {
+                              cmd = String.format("-y -i \"%s\" -i \"%s\" -map 0:a -map 1:v -c:a libmp3lame -b:a 320k -c:v copy -id3v2_version 3 -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"",
+                                      m3u8, coverFile.getAbsolutePath(), title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
+                          } else {
+                              cmd = String.format("-y -i \"%s\" -c:a libmp3lame -b:a 320k -id3v2_version 3 -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"",
+                                      m3u8, title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
+                          }
 
                           currentSession = FFmpegKit.executeAsync(cmd, session -> {
                               if (ReturnCode.isSuccess(session.getReturnCode())) {
                                   try {
                                       String safeName = tempMp3.getName();
                                       Uri targetUri = null;
+                                      
                                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                                           ContentValues values = new ContentValues();
                                           values.put(MediaStore.Audio.Media.DISPLAY_NAME, safeName);
                                           values.put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg");
                                           values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Music8481/Music");
+                                          values.put(MediaStore.Audio.Media.IS_PENDING, 1);
                                           targetUri = getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values);
                                       } else {
                                           File musicDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "Music8481/Music");
@@ -306,9 +324,16 @@ jobs:
                                           int len;
                                           while ((len = fis.read(buf)) > 0) os.write(buf, 0, len);
                                           os.close(); fis.close();
+                                          
+                                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                              ContentValues values = new ContentValues();
+                                              values.put(MediaStore.Audio.Media.IS_PENDING, 0);
+                                              getContentResolver().update(targetUri, values, null, null);
+                                          }
                                       }
+                                      
                                       tempMp3.delete();
-                                      coverFile.delete();
+                                      if (coverFile.exists()) coverFile.delete();
 
                                       notificationBuilder.setContentText("Download complete")
                                               .setProgress(0, 0, false)
@@ -343,6 +368,7 @@ jobs:
           }
           EOF
 
+      # 🔥 FIX: Delayed Initial Permissions + On-Click Re-prompt
       - name: Inject Native Interceptor & Premium Engine
         run: |
           cat <<'EOF' > android/app/src/main/java/com/music8481/app/MainActivity.java
@@ -376,6 +402,8 @@ jobs:
           import android.content.pm.ActivityInfo;
           import android.util.Rational;
           import android.content.res.Configuration;
+          import android.os.Handler;
+          import android.os.Looper;
 
           public class MainActivity extends BridgeActivity {
               private PowerManager.WakeLock wakeLock;
@@ -404,9 +432,16 @@ jobs:
 
                   @JavascriptInterface
                   public void startNativeDownload(String url) {
-                      Intent intent = new Intent(MainActivity.this, DownloadService.class);
-                      intent.putExtra("url", url);
-                      ContextCompat.startForegroundService(MainActivity.this, intent);
+                      runOnUiThread(() -> {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                              ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
+                          } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                              ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 101);
+                          }
+                          Intent intent = new Intent(MainActivity.this, DownloadService.class);
+                          intent.putExtra("url", url);
+                          ContextCompat.startForegroundService(MainActivity.this, intent);
+                      });
                   }
               }
 
@@ -423,12 +458,6 @@ jobs:
                   WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
                   getWindow().getDecorView().setOnApplyWindowInsetsListener((v, insets) -> insets);
 
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.READ_MEDIA_AUDIO}, 101);
-                  } else {
-                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE}, 101);
-                  }
-
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
@@ -440,6 +469,20 @@ jobs:
               @Override
               public void onStart() {
                   super.onStart();
+                  
+                  // 🔥 Delay Permissions strictly so they aren't hidden by the Splash Screen
+                  new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                          if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                              ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
+                          }
+                      } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                          if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                              ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 101);
+                          }
+                      }
+                  }, 2500);
+
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       final WebView webView = this.bridge.getWebView();
                       WebSettings settings = webView.getSettings();
