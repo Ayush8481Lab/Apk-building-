@@ -1,4 +1,4 @@
-name: Build Premium Downloader APK
+name: Build Premium WebView APK
 
 on:
   workflow_dispatch:
@@ -34,8 +34,36 @@ jobs:
         run: |
           mkdir -p www
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
+          
+          # Beautiful Offline UI Fallback
+          cat <<EOF > www/error.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Offline</title>
+            <style>
+              body { background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+              .spinner { width: 50px; height: 50px; border: 3px solid rgba(29, 185, 84, 0.3); border-top-color: #1DB954; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 20px; }
+              @keyframes spin { 100% { transform: rotate(360deg); } }
+              h1 { font-size: 24px; margin: 0 0 10px; }
+              p { color: #a7a7a7; font-size: 14px; text-align: center; max-width: 80%; }
+              button { margin-top: 20px; background: #1DB954; color: #000; border: none; padding: 12px 24px; border-radius: 20px; font-weight: bold; cursor: pointer; transition: transform 0.2s; }
+              button:active { transform: scale(0.95); }
+            </style>
+          </head>
+          <body>
+            <div class="spinner"></div>
+            <h1>You're Offline</h1>
+            <p>Please check your internet connection to stream music.</p>
+            <button onclick="window.location.href='https://ayushgaana.vercel.app'">Retry Connection</button>
+          </body>
+          </html>
+          EOF
+          
           npx cap init Music8481 com.music8481.app --web-dir www
 
+          # FIX: Removed transparent overlay so Portrait mode stays perfectly within safe areas!
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -44,7 +72,8 @@ jobs:
             "webDir": "www",
             "server": {
               "url": "https://ayushgaana.vercel.app",
-              "cleartext": true
+              "cleartext": true,
+              "errorPath": "error.html"
             },
             "plugins": {
               "SplashScreen": {
@@ -62,19 +91,9 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # NEW: Inject FFmpeg-Kit into Android Gradle
-      - name: Inject FFmpeg Dependency
-        run: |
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/build.gradle';
-          let gradle = fs.readFileSync(path, 'utf8');
-          gradle = gradle.replace('dependencies {', 'dependencies {\n    implementation \"com.arthenica:ffmpeg-kit-audio:6.0-2\"\n');
-          fs.writeFileSync(path, gradle);
-          "
-
-      # NEW: Inject Read/Write Storage Permissions for Downloading
-      - name: Inject Permissions & Vivo Meta-Data
+      # DEEP FIX 1: Lock App to Portrait Globally, Enable PiP, Inject Permissions
+      # ANDROID 16 FIX: android:enableOnBackInvokedCallback="false" prevents predictive back from killing Activity before PiP fires
+      - name: Inject Permissions & App Locks
         run: |
           node -e "
           const fs = require('fs');
@@ -86,8 +105,6 @@ jobs:
               <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
               <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
-              <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" />
-              <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" />
           \`;
           
           const vivoTags = \`
@@ -99,43 +116,29 @@ jobs:
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
+              
+              // LOCK TO PORTRAIT DEFAULT, ALLOW PIP, AND DISABLE PREDICTIVE BACK (Android 16 PiP fix)
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:screenOrientation=\"portrait\" android:enableOnBackInvokedCallback=\"false\"');
+              
               xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
-      - name: Force Android App Theme to Edge-to-Edge
-        run: |
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/src/main/res/values/styles.xml';
-          if (fs.existsSync(path)) {
-              let xml = fs.readFileSync(path, 'utf8');
-              const edgeToEdge = \`
-                  <item name=\"android:windowLayoutInDisplayCutoutMode\">shortEdges</item>
-                  <item name=\"android:statusBarColor\">@android:color/transparent</item>
-                  <item name=\"android:navigationBarColor\">@android:color/transparent</item>
-                  <item name=\"android:windowDrawsSystemBarBackgrounds\">true</item>
-              \`;
-              xml = xml.replace('</style>', edgeToEdge + '\n</style>');
-              fs.writeFileSync(path, xml);
-          }
-          "
-
-      # NEW: Deep Java Injection for Native FFmpeg Audio, DownloadManager Video, and URL Interceptor
-      - name: Inject Native Premium Downloader Engine
+      # DEEP FIX 2: Advanced Java Engine for Seamless Landscape Video, PiP, and Background Audio
+      # ANDROID 16 FIX: setAutoEnterEnabled on API 31+, onUserLeaveHint gated to API 26-30, onBackPressed kept as back-gesture fallback
+      - name: Inject Native Premium Engine
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
           package com.music8481.app;
 
+          import android.graphics.Color;
           import android.os.Build;
           import android.os.Bundle;
           import android.Manifest;
           import android.content.pm.PackageManager;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
-          import androidx.core.view.WindowCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -153,123 +156,49 @@ jobs:
           import android.util.Rational;
           import android.content.res.Configuration;
 
-          // NATIVE DOWNLOADER IMPORTS
-          import com.arthenica.ffmpegkit.FFmpegKit;
-          import com.arthenica.ffmpegkit.ReturnCode;
-          import android.os.Environment;
-          import java.io.File;
-          import android.app.NotificationManager;
-          import android.app.NotificationChannel;
-          import androidx.core.app.NotificationCompat;
-          import android.app.DownloadManager;
-          import android.net.Uri;
-
           public class MainActivity extends BridgeActivity {
               private PowerManager.WakeLock wakeLock;
               private boolean isVideoFullscreen = false;
-              private boolean isVideoModeActive = false;
+              private boolean isVideoModeActive = false; 
+
+              private void updatePiPParams(boolean enable) {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder();
+                      builder.setAspectRatio(new Rational(16, 9));
+                      builder.setAutoEnterEnabled(enable);
+                      setPictureInPictureParams(builder.build());
+                  } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder();
+                      builder.setAspectRatio(new Rational(16, 9));
+                      setPictureInPictureParams(builder.build());
+                  }
+              }
 
               public class WebAppInterface {
                   @JavascriptInterface
                   public void setVideoMode(boolean isVideo) {
-                      isVideoModeActive = isVideo;
-                  }
-
-                  // TRIGGERS NATIVE FFMPEG M3U8 -> MP3 BUILDER
-                  @JavascriptInterface
-                  public void downloadAudio(String m3u8Url, String title, String artist, String album) {
-                      runOnUiThread(() -> startNativeAudioDownload(m3u8Url, title, artist, album));
-                  }
-
-                  // TRIGGERS NATIVE ANDROID DOWNLOAD MANAGER FOR MP4 VIDEO
-                  @JavascriptInterface
-                  public void downloadVideo(String url, String filename) {
-                      runOnUiThread(() -> startNativeVideoDownload(url, filename));
-                  }
-              }
-
-              // NATIVE VIDEO DOWNLOADER WITH PAUSE/CANCEL NOTIFICATIONS
-              private void startNativeVideoDownload(String url, String filename) {
-                  // Request Storage Permissions
-                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 102);
-                  }
-
-                  // Use Public Movies Directory -> Music8481/Musicvideo
-                  File videoDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "Music8481/Musicvideo");
-                  if (!videoDir.exists()) videoDir.mkdirs();
-
-                  DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
-                  request.setTitle(filename);
-                  request.setDescription("Downloading Video natively...");
-                  // VISIBILITY_VISIBLE_NOTIFY_COMPLETED gives the user a Pause and Cancel button on supported OS versions
-                  request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                  request.setDestinationInExternalPublicDir(Environment.DIRECTORY_MOVIES, "Music8481/Musicvideo/" + filename);
-
-                  DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-                  if (manager != null) manager.enqueue(request);
-              }
-
-              // NATIVE FFMPEG AUDIO PACKER
-              private void startNativeAudioDownload(String m3u8Url, String title, String artist, String album) {
-                  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 102);
-                  }
-
-                  File musicDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "Music8481/Music");
-                  if (!musicDir.exists()) musicDir.mkdirs();
-                  
-                  String cleanTitle = title.replaceAll("[\\\\/:*?\"<>|]", "");
-                  File outputFile = new File(musicDir, cleanTitle + ".mp3");
-
-                  NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-                  String channelId = "download_channel";
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationChannel channel = new NotificationChannel(channelId, "Downloads", NotificationManager.IMPORTANCE_LOW);
-                      notificationManager.createNotificationChannel(channel);
-                  }
-
-                  int notificationId = (int) System.currentTimeMillis();
-                  NotificationCompat.Builder builder = new NotificationCompat.Builder(this, channelId)
-                      .setSmallIcon(android.R.drawable.stat_sys_download)
-                      .setContentTitle("Packing: " + cleanTitle)
-                      .setContentText("Downloading and processing audio natively...")
-                      .setProgress(100, 0, true)
-                      .setOngoing(true);
-                      
-                  notificationManager.notify(notificationId, builder.build());
-
-                  // Execute FFmpeg on Android CPU: Input M3U8 -> Output 320kbps MP3 with ID3 Tags!
-                  String command = String.format("-y -i \"%s\" -c:a libmp3lame -b:a 320k -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"", 
-                      m3u8Url, title, artist, album, outputFile.getAbsolutePath());
-
-                  FFmpegKit.executeAsync(command, session -> {
-                      ReturnCode returnCode = session.getReturnCode();
-                      if (ReturnCode.isSuccess(returnCode)) {
-                          builder.setContentText("Saved to Music/Music8481")
-                                 .setProgress(0, 0, false)
-                                 .setOngoing(false)
-                                 .setSmallIcon(android.R.drawable.stat_sys_download_done);
-                      } else {
-                          builder.setContentText("Download Failed")
-                                 .setProgress(0, 0, false)
-                                 .setOngoing(false);
+                      if (isVideoModeActive != isVideo) {
+                          isVideoModeActive = isVideo;
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  updatePiPParams(isVideoFullscreen || isVideoModeActive);
+                              }
+                          });
                       }
-                      notificationManager.notify(notificationId, builder.build());
-                  });
+                  }
               }
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+                  // ALWAYS ALLOW DRAWING UNDER PUNCH HOLE (Required for Landscape Fullscreen)
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                       WindowManager.LayoutParams attributes = getWindow().getAttributes();
                       attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
                       getWindow().setAttributes(attributes);
                   }
-                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
                   
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -280,6 +209,7 @@ jobs:
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+                  // Silent Background Execution Lock (No Battery Popups Needed)
                   PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
                   wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
                   wakeLock.acquire();
@@ -298,25 +228,14 @@ jobs:
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
                       
-                      // GLOBAL INTERCEPTOR: Watches for clicks on your Vercel URL and hands them to FFmpeg natively!
+                      // Poll for specific iframe video source to trigger PiP capability
                       webView.postDelayed(new Runnable() {
                           @Override
                           public void run() {
                               webView.evaluateJavascript(
-                                  "document.addEventListener('click', function(e) {" +
-                                  "  var a = e.target.closest('a');" +
-                                  "  if (a && a.href && a.href.includes('ayushdownload.vercel.app/api/dl')) {" +
-                                  "      e.preventDefault();" +
-                                  "      var url = new URL(a.href);" +
-                                  "      var m3u8 = url.searchParams.get('url');" +
-                                  "      var title = url.searchParams.get('title') || 'Song';" +
-                                  "      var artist = url.searchParams.get('artist') || 'Artist';" +
-                                  "      var album = url.searchParams.get('album') || 'Album';" +
-                                  "      if (window.AndroidApp) window.AndroidApp.downloadAudio(m3u8, title, artist, album);" +
-                                  "  }" +
-                                  "}, true);" +
                                   "setInterval(function() {" +
-                                  "  var hasVideo = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]') !== null;" +
+                                  "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                                  "  var hasVideo = iframe !== null;" +
                                   "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
                                   "}, 1000);", null);
                           }
@@ -335,13 +254,23 @@ jobs:
                               isVideoFullscreen = true;
                               mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
+                              
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() { updatePiPParams(true); }
+                              });
 
+                              // 1. FORCE LANDSCAPE
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
+                              // 2. FORCE IMMERSIVE FULLSCREEN (Hides Nav/Status Bar, overlaps punch hole)
                               getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
 
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
@@ -351,7 +280,16 @@ jobs:
                               ((FrameLayout) getWindow().getDecorView()).removeView(mCustomView);
                               mCustomView = null;
                               isVideoFullscreen = false;
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
+                              
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() { updatePiPParams(isVideoModeActive); }
+                              });
+
+                              // 1. REVERT TO PORTRAIT
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                              
+                              // 2. RESTORE NORMAL SAFE-AREA UI
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
                           }
@@ -365,6 +303,7 @@ jobs:
                   }
               }
 
+              // PIP STRETCH HACK: Targets ayushcom.vercel.app and fills the small PiP box seamlessly
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
@@ -394,11 +333,14 @@ jobs:
                   }
               }
 
+              // Android 12+ uses setAutoEnterEnabled; only fire legacy path on Android 8-11
               @Override
               public void onUserLeaveHint() {
                   super.onUserLeaveHint();
-                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                      if (isVideoFullscreen || isVideoModeActive) {
+                          try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
+                      }
                   }
               }
 
@@ -406,12 +348,15 @@ jobs:
               public void onBackPressed() {
                   if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) { super.onBackPressed(); }
-                  } else { super.onBackPressed(); }
+                  } else {
+                      super.onBackPressed();
+                  }
               }
 
               @Override
               public void onPause() {
                   super.onPause();
+                  // Keeps audio and video running silently!
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       this.bridge.getWebView().resumeTimers();
                       this.bridge.getWebView().onResume(); 
@@ -451,7 +396,7 @@ jobs:
           convert -size 2732x2732 xc:"#000000" assets/icon.png -gravity center -composite assets/splash.png
           npx @capacitor/assets generate --android
 
-      - name: Fix Gradle Daemon & Memory Issues
+      - name: Fix Gradle Daemon & Memory Issues (CI Stability)
         run: |
           echo "org.gradle.daemon=false" >> android/gradle.properties
           echo "org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
@@ -460,7 +405,7 @@ jobs:
         run: |
           keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music8481, OU=App, O=Music8481, C=IN"
 
-      - name: Build & Auto-Sign Android APK
+      - name: Build & Auto-Sign Android APK (Release)
         run: |
           cd android
           ./gradlew assembleRelease \
@@ -472,5 +417,5 @@ jobs:
       - name: Upload Independent APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Music8481-Premium-APK
+          name: Music8481-Independent-APK
           path: android/app/build/outputs/apk/release/app-release.apk
