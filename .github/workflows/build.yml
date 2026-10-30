@@ -142,7 +142,7 @@ jobs:
           }
           "
 
-      - name: Inject Native Premium Engine (Punch Hole Nuclear Fix)
+      - name: Inject Native Premium Engine & DOM Isolation
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
           package com.music8481.app;
@@ -326,7 +326,7 @@ jobs:
               }
 
               // ==========================================
-              // 🔥 UPDATED PERFECT 16:9 IFRAME PiP ENGINE 🔥
+              // 🔥 DOM-TREE ISOLATION ENGINE FOR PiP 🔥
               // ==========================================
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
@@ -334,32 +334,47 @@ jobs:
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       WebView webView = this.bridge.getWebView();
                       if (isInPictureInPictureMode) {
-                          String js = "var style = document.getElementById('pip-style-fix');" +
-                                      "if (!style) {" +
-                                      "  style = document.createElement('style');" +
-                                      "  style.id = 'pip-style-fix';" +
-                                      "  style.innerHTML = '" +
-                                      "    body.pip-active .pip-ancestor { transform: none !important; contain: none !important; perspective: none !important; filter: none !important; position: static !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; }" +
-                                      "    body.pip-active iframe[src*=\"ayushcom.vercel.app\"] { position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; z-index: 2147483647 !important; background: #000 !important; border: none !important; margin: 0 !important; padding: 0 !important; max-width: 100% !important; max-height: 100% !important; display: block !important; object-fit: cover !important; }" +
-                                      "  ';" +
-                                      "  document.head.appendChild(style);" +
-                                      "}" +
-                                      "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                                      "if (iframe) {" +
-                                      "  var el = iframe.parentElement;" +
-                                      "  while (el && el !== document.body && el !== document.documentElement) {" +
-                                      "    el.classList.add('pip-ancestor');" +
-                                      "    el = el.parentElement;" +
-                                      "  }" +
-                                      "  document.body.classList.add('pip-active');" +
-                                      "}";
+                          String js = 
+                              "var style = document.getElementById('pip-style-fix');" +
+                              "if (!style) {" +
+                              "  style = document.createElement('style');" +
+                              "  style.id = 'pip-style-fix';" +
+                              "  style.innerHTML = '" +
+                              "    body.pip-active { background: #000 !important; overflow: hidden !important; } " +
+                              "    body.pip-active .pip-ancestor { position: static !important; transform: none !important; contain: none !important; perspective: none !important; filter: none !important; backdrop-filter: none !important; clip-path: none !important; mask: none !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; background: transparent !important; width: 100% !important; height: 100% !important; } " +
+                              "    body.pip-active .pip-target-iframe { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; width: 100% !important; height: 100% !important; min-width: 100% !important; min-height: 100% !important; z-index: 2147483647 !important; background: #000 !important; border: none !important; margin: 0 !important; padding: 0 !important; display: block !important; opacity: 1 !important; visibility: visible !important; object-fit: cover !important; } " +
+                              "    body.pip-active .pip-hide-sibling { display: none !important; opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; } " +
+                              "  ';" +
+                              "  document.head.appendChild(style);" +
+                              "}" +
+                              "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                              "if (!iframe) iframe = document.querySelector('iframe');" +
+                              "if (iframe) {" +
+                              "  iframe.classList.add('pip-target-iframe');" +
+                              "  var el = iframe;" +
+                              "  while (el && el !== document.body && el !== document.documentElement) {" +
+                              "    if (el !== iframe) el.classList.add('pip-ancestor');" +
+                              "    if (el.parentElement) {" +
+                              "      var siblings = el.parentElement.children;" +
+                              "      for (var i = 0; i < siblings.length; i++) {" +
+                              "        var sib = siblings[i];" +
+                              "        if (sib !== el && sib.tagName !== 'SCRIPT' && sib.tagName !== 'STYLE' && sib.tagName !== 'LINK') {" +
+                              "          sib.classList.add('pip-hide-sibling');" +
+                              "        }" +
+                              "      }" +
+                              "    }" +
+                              "    el = el.parentElement;" +
+                              "  }" +
+                              "  document.body.classList.add('pip-active');" +
+                              "}";
                           webView.evaluateJavascript(js, null);
                       } else {
-                          String js = "document.body.classList.remove('pip-active');" +
-                                      "var ancestors = document.querySelectorAll('.pip-ancestor');" +
-                                      "for (var i = 0; i < ancestors.length; i++) {" +
-                                      "  ancestors[i].classList.remove('pip-ancestor');" +
-                                      "}";
+                          String js = 
+                              "document.body.classList.remove('pip-active');" +
+                              "var elements = document.querySelectorAll('.pip-target-iframe, .pip-ancestor, .pip-hide-sibling');" +
+                              "for (var i = 0; i < elements.length; i++) {" +
+                              "  elements[i].classList.remove('pip-target-iframe', 'pip-ancestor', 'pip-hide-sibling');" +
+                              "}";
                           webView.evaluateJavascript(js, null);
                       }
                   }
