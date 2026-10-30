@@ -99,10 +99,21 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # 🔥 NEW: Inject FFmpegKit Engine into Gradle
+      # 🔥 FIXED: Properly inject FFmpegKit into Dependencies Block & Bump minSdk
       - name: Inject FFmpegKit & Permissions
         run: |
-          echo "implementation 'com.arthenica:ffmpeg-kit-audio:6.0-2'" >> android/app/build.gradle
+          cat <<EOF >> android/app/build.gradle
+          
+          dependencies {
+              implementation 'com.arthenica:ffmpeg-kit-audio:6.0-2'
+          }
+          EOF
+          
+          if [ -f "android/variables.gradle" ]; then
+              sed -i 's/minSdkVersion = 21/minSdkVersion = 24/g' android/variables.gradle
+              sed -i 's/minSdkVersion = 22/minSdkVersion = 24/g' android/variables.gradle
+              sed -i 's/minSdkVersion = 23/minSdkVersion = 24/g' android/variables.gradle
+          fi
           
           node -e "
           const fs = require('fs');
@@ -123,7 +134,6 @@ jobs:
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
               xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
               
-              // Register Native Download Service
               const service = '<service android:name=\".DownloadService\" android:exported=\"false\" android:foregroundServiceType=\"dataSync\"/>\n</application>';
               xml = xml.replace('</application>', service);
               
