@@ -36,10 +36,9 @@ jobs:
         run: |
           mkdir -p www
           
-          # 1. Create the App loading entry
           echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
-          # 2. NEW: Create a beautiful Offline UI Fallback
+          # Create a beautiful Offline UI Fallback
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
@@ -67,7 +66,7 @@ jobs:
           
           npx cap init Music8481 com.music8481.app --web-dir www
 
-          # 3. Configure App with Error Path and Splash Screen styling
+          # Configure App with Error Path and Splash Screen styling
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -96,6 +95,7 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
+      # DEEP FIX: Inject PiP Support, Hardware Acceleration, and Permissions
       - name: Inject Hardware Acceleration & Permissions
         run: |
           node -e "
@@ -112,12 +112,15 @@ jobs:
           \`;
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
+              
+              // Enable GPU Hardware Acceleration, Large RAM, and Picture-in-Picture Support
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:configChanges=\"screenSize|smallestScreenSize|screenLayout|orientation\"');
               fs.writeFileSync(path, xml);
           }
           "
 
-      # NEW: Deep Java Injection for True Fullscreen Video, Premium Audio Decoders, and Background processing
+      # NEW: Deep Java Injection for PiP, True Edge-to-Edge Punch Hole, Dolby Atmos, and Background Processing
       - name: Inject Native Premium Engine & Fullscreen Handler
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
@@ -139,13 +142,21 @@ jobs:
           import android.content.Context;
           import android.os.PowerManager;
           import android.media.AudioManager;
+          import android.view.WindowManager;
+          import android.app.PictureInPictureParams;
 
           public class MainActivity extends BridgeActivity {
               private PowerManager.WakeLock wakeLock;
+              private boolean isVideoFullscreen = false; // Tracks if video is playing full screen
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+                  
+                  // Allow Edge-to-Edge rendering around the camera punch-hole cutout
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                      getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                  }
                   
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -153,7 +164,7 @@ jobs:
                       }
                   }
 
-                  // PREMIUM AUDIO ENHANCEMENT: Force OS to route audio as High-Fidelity Music (Triggers Dolby Atmos & HW Decoders)
+                  // PREMIUM AUDIO ENHANCEMENT: Route audio through HW Decoders (Triggers Dolby Atmos)
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) {
                       setVolumeControlStream(AudioManager.STREAM_MUSIC);
@@ -173,12 +184,10 @@ jobs:
                       WebSettings settings = webView.getSettings();
                       
                       settings.setMediaPlaybackRequiresUserGesture(false); 
-                      
-                      // PERFORMANCE UPGRADE: Push UI Rendering to the GPU (Fixes low-end device lag)
                       webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
                       settings.setDomStorageEnabled(true);
 
-                      // FIX: TRUE FULLSCREEN VIDEO INTERCEPTOR (Hides Status Bar & Nav Buttons)
+                      // TRUE FULLSCREEN VIDEO & PIP INTERCEPTOR
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
                           private View mCustomView;
@@ -192,10 +201,11 @@ jobs:
                                   return;
                               }
                               mCustomView = view;
+                              isVideoFullscreen = true;
                               mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
 
-                              // Enter True Immersive Mode
+                              // Enter True Immersive Mode (Hides status bar and nav buttons)
                               getWindow().getDecorView().setSystemUiVisibility(
                                       View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
                                       View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
@@ -211,6 +221,7 @@ jobs:
                           public void onHideCustomView() {
                               ((FrameLayout) getWindow().getDecorView()).removeView(mCustomView);
                               mCustomView = null;
+                              isVideoFullscreen = false;
                               getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) {
                                   mCustomViewCallback.onCustomViewHidden();
@@ -218,7 +229,6 @@ jobs:
                               }
                           }
 
-                          // Delegate other functions to Capacitor's original engine safely
                           @Override
                           public void onPermissionRequest(android.webkit.PermissionRequest request) {
                               if (originalClient != null) originalClient.onPermissionRequest(request);
@@ -232,6 +242,16 @@ jobs:
                               return originalClient != null && originalClient.onConsoleMessage(consoleMessage);
                           }
                       });
+                  }
+              }
+
+              // TRIGGER PICTURE-IN-PICTURE (PiP) WHEN HOME BUTTON IS PRESSED DURING FULLSCREEN VIDEO
+              @Override
+              public void onUserLeaveHint() {
+                  super.onUserLeaveHint();
+                  if (isVideoFullscreen && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      PictureInPictureParams params = new PictureInPictureParams.Builder().build();
+                      enterPictureInPictureMode(params);
                   }
               }
 
@@ -270,7 +290,6 @@ jobs:
           }
           EOF
 
-      # NEW: Downloads your exact App Logo and generates an elegant pitch-black Splash Screen around it
       - name: Generate App Icon & Splash Screen
         run: |
           sudo apt-get install -y imagemagick
