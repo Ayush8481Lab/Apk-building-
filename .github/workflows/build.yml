@@ -29,7 +29,7 @@ jobs:
           npm install -D @capacitor/cli @capacitor/android @capacitor/assets
           npm install @capgo/capacitor-media-session
           
-          # NEW: Install Splash Screen Plugin for beautiful loading animations
+          # Install Splash Screen Plugin for beautiful loading animations
           npm install @capacitor/splash-screen
 
       - name: Initialize Capacitor Config & Offline UI
@@ -95,7 +95,7 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      # DEEP FIX: Inject PiP Support, Hardware Acceleration, and Permissions
+      # DEEP FIX: Inject PiP Support, Hardware Acceleration, and Permissions securely!
       - name: Inject Hardware Acceleration & Permissions
         run: |
           node -e "
@@ -113,14 +113,16 @@ jobs:
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
               
-              // Enable GPU Hardware Acceleration, Large RAM, and Picture-in-Picture Support
+              // Enable GPU Hardware Acceleration & Large RAM
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:configChanges=\"screenSize|smallestScreenSize|screenLayout|orientation\"');
+              
+              // FIX: Only inject PiP. Capacitor already defines configChanges natively!
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
+              
               fs.writeFileSync(path, xml);
           }
           "
 
-      # NEW: Deep Java Injection for PiP, True Edge-to-Edge Punch Hole, Dolby Atmos, and Background Processing
       - name: Inject Native Premium Engine & Fullscreen Handler
         run: |
           cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
