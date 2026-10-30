@@ -1,4 +1,4 @@
-name: Build YtLive APK (Speed-Optimized)
+name: Build YtLive APK (JSON + Fast + Per-Video)
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Create Android project files (optimized)
+      - name: Create Android project files
         run: |
           mkdir -p app/src/main/java/com/example/ytlive
           mkdir -p app/src/main/res/layout
@@ -121,7 +121,6 @@ jobs:
               implementation 'androidx.media3:media3-exoplayer-dash:1.4.1'
               implementation 'androidx.media3:media3-ui:1.4.1'
 
-              // Maven Central coordinates – 0.18.1 is confirmed on Maven Central[reference:0]
               implementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
           }
           EOF
@@ -183,30 +182,47 @@ jobs:
                   android:id="@+id/urlInput"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:hint="YouTube URL or video ID"
+                  android:hint="YouTube URL or 11-char video ID"
                   android:inputType="textUri"
                   android:importantForAutofill="no"
                   android:autofillHints="" />
 
-              <Spinner
-                  android:id="@+id/qualitySpinner"
-                  android:layout_width="wrap_content"
+              <LinearLayout
+                  android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:layout_marginTop="8dp"
-                  android:entries="@array/quality_labels" />
+                  android:orientation="horizontal"
+                  android:layout_marginTop="8dp">
 
-              <Button
-                  android:id="@+id/playButton"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="8dp"
-                  android:text="Play" />
+                  <Spinner
+                      android:id="@+id/qualitySpinner"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:entries="@array/quality_labels" />
+
+                  <Button
+                      android:id="@+id/playButton"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:text="Play" />
+
+                  <Button
+                      android:id="@+id/jsonButton"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_marginStart="8dp"
+                      android:text="Show JSON" />
+              </LinearLayout>
 
               <TextView
                   android:id="@+id/status"
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
                   android:layout_marginTop="8dp"
+                  android:fontFamily="monospace"
+                  android:textSize="11sp"
+                  android:maxLines="8"
+                  android:scrollbars="vertical"
                   android:text="Idle" />
 
               <androidx.media3.ui.PlayerView
@@ -221,10 +237,13 @@ jobs:
           cat > app/src/main/java/com/example/ytlive/MainActivity.kt <<'EOF'
           package com.example.ytlive
 
+          import android.app.AlertDialog
           import android.os.Bundle
+          import android.text.method.ScrollingMovementMethod
           import android.util.Log
           import android.widget.Button
           import android.widget.EditText
+          import android.widget.ScrollView
           import android.widget.Spinner
           import android.widget.TextView
           import androidx.appcompat.app.AppCompatActivity
@@ -243,10 +262,13 @@ jobs:
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.launch
           import kotlinx.coroutines.withContext
+          import org.json.JSONObject
 
           data class ResolvedStreams(val videoUrl: String, val audioUrl: String?)
-          enum class Quality(val maxHeight: Int) {
-              Q1080(1080), Q720(720), Q480(480), Q360(360), BEST(9999)
+
+          enum class Quality(val maxHeight: Int, val label: String) {
+              Q1080(1080, "1080p"), Q720(720, "720p"),
+              Q480(480, "480p"), Q360(360, "360p"), BEST(9999, "Best")
           }
 
           class MainActivity : AppCompatActivity() {
@@ -254,28 +276,29 @@ jobs:
               private lateinit var player: ExoPlayer
               @Volatile private var ytReady = false
 
-              private data class CachedStreams(
+              // FIX: cache keyed by (url, maxHeight) — different videos no longer collide
+              private data class CacheKey(val url: String, val maxHeight: Int)
+              private data class CachedResult(
                   val streams: ResolvedStreams,
+                  val json: String,
                   val timestamp: Long
               )
-              private var cache: CachedStreams? = null
+              private val cache = mutableMapOf<CacheKey, CachedResult>()
               private val cacheTtlMs = 5 * 60 * 1000L
+
+              private var lastJson: String = ""
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   setContentView(R.layout.activity_main)
 
-                  // Pre-warm yt-dlp so the first Play tap is fast.
-                  lifecycleScope.launch(Dispatchers.IO) {
-                      if (!ytReady) {
-                          YoutubeDL.getInstance().init(applicationContext)
-                          ytReady = true
-                      }
-                  }
+                  // NOTE: yt-dlp is NOT initialized here. First Play tap initializes it.
+                  // Per your request: no init on app open.
 
                   val urlInput = findViewById<EditText>(R.id.urlInput)
                   val qualitySpinner = findViewById<Spinner>(R.id.qualitySpinner)
                   val playBtn = findViewById<Button>(R.id.playButton)
+                  val jsonBtn = findViewById<Button>(R.id.jsonButton)
                   val status = findViewById<TextView>(R.id.status)
                   val playerView = findViewById<PlayerView>(R.id.playerView)
 
@@ -283,14 +306,20 @@ jobs:
                   playerView.player = player
 
                   playBtn.setOnClickListener {
-                      val url = urlInput.text.toString().trim()
-                      if (url.isEmpty()) { status.text = "Enter a URL"; return@setOnClickListener }
-
+                      val raw = urlInput.text.toString().trim()
+                      if (raw.isEmpty()) {
+                          status.text = "Enter a URL or video ID"
+                          return@setOnClickListener
+                      }
+                      val url = normalizeYouTubeInput(raw)
                       val quality = Quality.entries[qualitySpinner.selectedItemPosition]
-                      status.text = "Resolving (${quality.name})…"
+                      status.text = "Resolving (${quality.label})…"
                       lifecycleScope.launch {
                           try {
-                              val streams = resolveStreamsCached(url, quality.maxHeight)
+                              val result = resolveCached(url, quality.maxHeight)
+                              lastJson = result.json
+                              val streams = result.streams
+
                               val dataSource = DefaultHttpDataSource.Factory()
                                   .setUserAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36")
                                   .setAllowCrossProtocolRedirects(true)
@@ -300,75 +329,152 @@ jobs:
                               player.prepare()
                               player.playWhenReady = true
                               player.seekToDefaultPosition()
-                              status.text = "Playing"
+
+                              val mode = if (streams.audioUrl != null) "merged video+audio" else "muxed"
+                              status.text = buildString {
+                                  appendLine("Playing ($mode)")
+                                  appendLine("Video URL: ${streams.videoUrl}")
+                                  append("Audio URL: ${streams.audioUrl ?: "none"}")
+                              }
                           } catch (t: Throwable) {
                               Log.e("YtLive", "resolve failed", t)
                               status.text = "Error: ${t.message}"
                           }
                       }
                   }
+
+                  jsonBtn.setOnClickListener {
+                      if (lastJson.isEmpty()) {
+                          status.text = "No JSON yet — press Play first"
+                          return@setOnClickListener
+                      }
+                      showJsonDialog(lastJson)
+                  }
               }
 
-              private suspend fun resolveStreamsCached(url: String, maxHeight: Int): ResolvedStreams {
-                  val now = System.currentTimeMillis()
-                  cache?.let {
-                      if (now - it.timestamp < cacheTtlMs) return it.streams
+              private fun showJsonDialog(json: String) {
+                  val scroll = ScrollView(this)
+                  val tv = TextView(this)
+                  tv.text = json
+                  tv.textSize = 10f
+                  tv.setPadding(24, 24, 24, 24)
+                  tv.movementMethod = ScrollingMovementMethod()
+                  scroll.addView(tv)
+                  AlertDialog.Builder(this)
+                      .setTitle("yt-dlp JSON (full)")
+                      .setView(scroll)
+                      .setPositiveButton("Close", null)
+                      .show()
+              }
+
+              private fun normalizeYouTubeInput(input: String): String {
+                  val trimmed = input.trim()
+                  // Accept bare 11-char YouTube video IDs
+                  if (Regex("^[A-Za-z0-9_-]{11}$").matches(trimmed)) {
+                      return "https://www.youtube.com/watch?v=$trimmed"
                   }
-                  val fresh = resolveStreamsWithFallback(url, maxHeight)
-                  cache = CachedStreams(fresh, now)
+                  return trimmed
+              }
+
+              private suspend fun resolveCached(url: String, maxHeight: Int): CachedResult {
+                  val key = CacheKey(url, maxHeight)
+                  val now = System.currentTimeMillis()
+                  cache[key]?.let {
+                      if (now - it.timestamp < cacheTtlMs) return it
+                  }
+                  val fresh = resolveWithJson(url, maxHeight)
+                  cache[key] = fresh
                   return fresh
               }
 
-              private val clientChain = listOf("android", "ios", "tv", "web")
-
-              private suspend fun resolveStreamsWithFallback(url: String, maxHeight: Int): ResolvedStreams {
-                  var lastError: Throwable? = null
-                  for (client in clientChain) {
-                      try {
-                          return resolveStreams(url, maxHeight, client)
-                      } catch (t: Throwable) {
-                          lastError = t
-                          Log.w("YtLive", "client $client failed: ${t.message}")
+              // Single -J call: returns BOTH parsed URLs and raw JSON.
+              private suspend fun resolveWithJson(url: String, maxHeight: Int): CachedResult =
+                  withContext(Dispatchers.IO) {
+                      if (!ytReady) {
+                          YoutubeDL.getInstance().init(applicationContext)
+                          ytReady = true
                       }
+
+                      val req = YoutubeDLRequest(url)
+                      req.addOption("--extractor-args", "youtube:player_client=android")
+                      req.addOption("--no-warnings")
+                      req.addOption("--no-call-home")
+                      req.addOption("--no-cache-dir")
+                      req.addOption("--socket-timeout", "10")
+                      req.addOption("--retries", "1")
+                      req.addOption("-f", "bv[height<=$maxHeight]+ba/b[height<=$maxHeight]/b")
+                      req.addOption("-J")
+
+                      val response = YoutubeDL.getInstance().execute(req)
+                      val jsonStr = response.out.joinToString("\n").trim()
+
+                      Log.d("YtLiveJSON", jsonStr)
+
+                      val root = JSONObject(jsonStr)
+
+                      var videoUrl: String? = null
+                      var audioUrl: String? = null
+
+                      // When -f bv+ba resolves two streams, yt-dlp puts them here:
+                      root.optJSONArray("requested_formats")?.let { rf ->
+                          for (i in 0 until rf.length()) {
+                              val f = rf.getJSONObject(i)
+                              val u = pickUrl(f) ?: continue
+                              val vcodec = f.optString("vcodec", "none")
+                              val acodec = f.optString("acodec", "none")
+                              when {
+                                  vcodec != "none" && acodec == "none" -> videoUrl = u
+                                  vcodec == "none" && acodec != "none" -> audioUrl = u
+                                  vcodec != "none" && acodec != "none" -> videoUrl = u
+                              }
+                          }
+                      }
+
+                      // Otherwise scan all formats
+                      if (videoUrl == null) {
+                          root.optJSONArray("formats")?.let { fs ->
+                              var bestVideoH = -1
+                              var bestAudioBr = -1
+                              for (i in 0 until fs.length()) {
+                                  val f = fs.getJSONObject(i)
+                                  val u = pickUrl(f) ?: continue
+                                  val vcodec = f.optString("vcodec", "none")
+                                  val acodec = f.optString("acodec", "none")
+                                  val h = f.optInt("height", 0)
+                                  val abr = f.optInt("abr", 0)
+                                  if (vcodec != "none" && acodec == "none" && h <= maxHeight && h > bestVideoH) {
+                                      videoUrl = u; bestVideoH = h
+                                  }
+                                  if (vcodec == "none" && acodec != "none" && abr > bestAudioBr) {
+                                      audioUrl = u; bestAudioBr = abr
+                                  }
+                              }
+                          }
+                      }
+
+                      // Final fallback: top-level manifest/url (muxed live)
+                      if (videoUrl.isNullOrEmpty()) {
+                          val top = root.optString("manifest_url", "")
+                              .ifEmpty { root.optString("url", "") }
+                          if (top.isNotEmpty()) videoUrl = top
+                      }
+
+                      if (videoUrl.isNullOrEmpty()) {
+                          throw IllegalStateException("No playable URL found in JSON (see Show JSON)")
+                      }
+
+                      CachedResult(
+                          streams = ResolvedStreams(videoUrl, audioUrl),
+                          json = jsonStr,
+                          timestamp = System.currentTimeMillis()
+                      )
                   }
-                  throw lastError ?: IllegalStateException("All clients failed")
-              }
 
-              private suspend fun resolveStreams(
-                  url: String,
-                  maxHeight: Int,
-                  client: String
-              ): ResolvedStreams = withContext(Dispatchers.IO) {
-                  if (!ytReady) {
-                      YoutubeDL.getInstance().init(applicationContext)
-                      ytReady = true
-                  }
-
-                  val req = YoutubeDLRequest(url)
-                  req.addOption("--extractor-args", "youtube:player_client=$client")
-                  req.addOption("--no-check-formats")
-                  req.addOption("--no-warnings")
-                  req.addOption("--no-call-home")
-                  req.addOption("--no-cache-dir")
-                  req.addOption("--socket-timeout", "5")
-                  req.addOption("--retries", "1")
-
-                  val fmt = "bv[height<=$maxHeight]+ba/b[height<=$maxHeight]/b"
-                  req.addOption("-f", fmt)
-                  req.addOption("-g")
-
-                  val response = YoutubeDL.getInstance().execute(req)
-                  val urls = response.out
-                      .lineSequence()
-                      .map { it.trim() }
-                      .filter { it.isNotEmpty() }
-                      .toList()
-
-                  return@withContext when {
-                      urls.size >= 2 -> ResolvedStreams(urls[0], urls[1])
-                      urls.size == 1 -> ResolvedStreams(urls[0], null)
-                      else -> throw IllegalStateException("yt-dlp returned no URLs")
-                  }
+              private fun pickUrl(f: JSONObject): String? {
+                  f.optString("url", "").takeIf { it.isNotEmpty() }?.let { return it }
+                  f.optString("manifest_url", "").takeIf { it.isNotEmpty() }?.let { return it }
+                  f.optString("fragment_base_url", "").takeIf { it.isNotEmpty() }?.let { return it }
+                  return null
               }
 
               private fun buildMediaSource(
@@ -389,22 +495,14 @@ jobs:
 
                   val videoSource = sourceFor(streams.videoUrl)
                   return if (streams.audioUrl != null) {
-                      val audioSource = sourceFor(streams.audioUrl)
-                      MergingMediaSource(videoSource, audioSource)
+                      MergingMediaSource(videoSource, sourceFor(streams.audioUrl))
                   } else {
                       videoSource
                   }
               }
 
-              override fun onStop() {
-                  super.onStop()
-                  player.pause()
-              }
-
-              override fun onDestroy() {
-                  super.onDestroy()
-                  player.release()
-              }
+              override fun onStop() { super.onStop(); player.pause() }
+              override fun onDestroy() { super.onDestroy(); player.release() }
           }
           EOF
 
