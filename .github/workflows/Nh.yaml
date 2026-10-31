@@ -68,6 +68,7 @@ jobs:
 
           class MyApp extends StatelessWidget {
             const MyApp({super.key});
+
             @override
             Widget build(BuildContext context) {
               return MaterialApp(
@@ -80,6 +81,7 @@ jobs:
 
           class DownloaderPage extends StatefulWidget {
             const DownloaderPage({super.key});
+
             @override
             State<DownloaderPage> createState() => _DownloaderPageState();
           }
@@ -87,6 +89,7 @@ jobs:
           class _DownloaderPageState extends State<DownloaderPage> {
             final _urlController = TextEditingController();
             final _downloader = YoutubeDownloader();
+
             List<VideoQuality> _qualities = [];
             VideoQuality? _selectedQuality;
             bool _isLoading = false;
@@ -107,23 +110,27 @@ jobs:
 
             Future<void> _fetchQualities() async {
               final url = _urlController.text.trim();
+
               if (url.isEmpty) {
                 _showSnack('Please enter a YouTube URL or video ID.');
                 return;
               }
+
               setState(() {
                 _isLoading = true;
                 _status = 'Fetching qualities...';
                 _qualities = [];
                 _selectedQuality = null;
               });
+
               try {
                 final qualities = await _downloader.getQualities(url);
+
                 setState(() {
-                  _qualities = qualities.where((q) => q.fps != 0).toList();
+                  _qualities = qualities;
                   _isLoading = false;
                   _status = _qualities.isEmpty
-                      ? 'No video qualities found.'
+                      ? 'No compatible H.264/AVC qualities found.'
                       : 'Select a quality to download.';
                 });
               } catch (e) {
@@ -139,12 +146,15 @@ jobs:
                 _showSnack('Please select a quality first.');
                 return;
               }
+
               final url = _urlController.text.trim();
+
               setState(() {
                 _isLoading = true;
                 _status = 'Downloading & merging...';
                 _progress = 0.0;
               });
+
               try {
                 await for (final progress in _downloader.downloadVideo(
                   _selectedQuality!,
@@ -152,9 +162,11 @@ jobs:
                 )) {
                   setState(() {
                     _progress = progress.progress;
-                    _status = '${progress.status} (${(progress.progress * 100).toStringAsFixed(1)}%)';
+                    _status =
+                        '${progress.status} (${(progress.progress * 100).toStringAsFixed(1)}%)';
                   });
                 }
+
                 setState(() {
                   _isLoading = false;
                   _status = 'Download complete! File saved.';
@@ -168,7 +180,9 @@ jobs:
             }
 
             void _showSnack(String msg) {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(msg)),
+              );
             }
 
             @override
@@ -180,7 +194,9 @@ jobs:
             @override
             Widget build(BuildContext context) {
               return Scaffold(
-                appBar: AppBar(title: const Text('YouTube Downloader & Muxer')),
+                appBar: AppBar(
+                  title: const Text('YouTube Downloader & Muxer'),
+                ),
                 body: Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: SingleChildScrollView(
@@ -208,12 +224,16 @@ jobs:
                               border: OutlineInputBorder(),
                             ),
                             items: _qualities.map((q) {
-                              return DropdownMenuItem(
+                              return DropdownMenuItem<VideoQuality>(
                                 value: q,
-                                child: Text('${q.qualityLabel ?? 'Unknown'} (${q.formatCode})'),
+                                child: Text(
+                                  '${q.quality} • ${q.codec} • ${q.container}',
+                                ),
                               );
                             }).toList(),
-                            onChanged: (val) => setState(() => _selectedQuality = val),
+                            onChanged: (val) {
+                              setState(() => _selectedQuality = val);
+                            },
                           ),
                         const SizedBox(height: 20),
                         if (_selectedQuality != null)
@@ -224,9 +244,14 @@ jobs:
                           ),
                         const SizedBox(height: 30),
                         if (_isLoading)
-                          LinearProgressIndicator(value: _progress == 0 ? null : _progress),
+                          LinearProgressIndicator(
+                            value: _progress == 0 ? null : _progress,
+                          ),
                         const SizedBox(height: 10),
-                        Text(_status, textAlign: TextAlign.center),
+                        Text(
+                          _status,
+                          textAlign: TextAlign.center,
+                        ),
                       ],
                     ),
                   ),
@@ -236,20 +261,23 @@ jobs:
           }
           EOF
 
-      - name: Overwrite AndroidManifest.xml (permissions)
+      - name: Overwrite AndroidManifest.xml
         run: |
           cat > android/app/src/main/AndroidManifest.xml << 'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.example.youtube_muxer_app">
+
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
               <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
               <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
               <application
                   android:label="YT Muxer"
                   android:icon="@mipmap/ic_launcher">
+
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -258,14 +286,17 @@ jobs:
                       android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
                       android:hardwareAccelerated="true"
                       android:windowSoftInputMode="adjustResize">
+
                       <meta-data
                           android:name="io.flutter.embedding.android.NormalTheme"
                           android:resource="@style/NormalTheme" />
+
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
+
                   <meta-data
                       android:name="flutterEmbedding"
                       android:value="2" />
