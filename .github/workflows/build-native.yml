@@ -1,1817 +1,286 @@
-name: Build Music8481 Native APK
+name: Build YouTube Muxer APK
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # Allows you to run it manually from the Actions tab
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle 8.10.2
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
         with:
-          gradle-version: '8.10.2'
-          validate-wrappers: false
+          channel: 'stable'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: ''
+      - name: Generate Flutter project
+        run: flutter create --project-name youtube_muxer_app .
 
-      - name: Install SDK packages
+      - name: Overwrite pubspec.yaml
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          cat > pubspec.yaml << 'EOF'
+          name: youtube_muxer_app
+          description: YouTube downloader with audio/video muxing.
+          publish_to: 'none'
+          version: 1.0.0+1
 
-      - name: Generate Gradle + Resources
+          environment:
+            sdk: '>=3.0.0 <4.0.0'
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            flutter_erfan_youtube_muxer_2025: ^1.0.0
+            permission_handler: ^11.3.0
+            cupertino_icons: ^1.0.8
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^4.0.0
+
+          flutter:
+            uses-material-design: true
+          EOF
+
+      - name: Overwrite main.dart
         run: |
-          set -e
-          mkdir -p native/app/src/main/java/com/music8481/app
-          mkdir -p native/app/src/main/res/values
-          mkdir -p native/app/src/main/res/mipmap-mdpi
-          mkdir -p native/app/src/main/res/mipmap-hdpi
-          mkdir -p native/app/src/main/res/mipmap-xhdpi
-          mkdir -p native/app/src/main/res/mipmap-xxhdpi
-          mkdir -p native/app/src/main/res/mipmap-xxxhdpi
+          cat > lib/main.dart << 'EOF'
+          import 'package:flutter/material.dart';
+          import 'package:flutter_erfan_youtube_muxer_2025/youtube_video_downloader.dart';
+          import 'package:permission_handler/permission_handler.dart';
 
-          cat <<'EOF' > native/settings.gradle.kts
-          pluginManagement {
-              repositories { google(); mavenCentral(); gradlePluginPortal() }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories { google(); mavenCentral() }
-          }
-          rootProject.name = "Music8481"
-          include(":app")
-          EOF
-
-          cat <<'EOF' > native/build.gradle.kts
-          plugins {
-              id("com.android.application") version "8.7.3" apply false
-              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
-              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
-              id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21" apply false
-          }
-          EOF
-
-          cat <<'EOF' > native/gradle.properties
-          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8
-          org.gradle.daemon=false
-          org.gradle.parallel=true
-          org.gradle.caching=true
-          android.useAndroidX=true
-          android.nonTransitiveRClass=true
-          kotlin.code.style=official
-          EOF
-
-          cat <<'EOF' > native/app/build.gradle.kts
-          plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-              id("org.jetbrains.kotlin.plugin.compose")
-              id("org.jetbrains.kotlin.plugin.serialization")
+          void main() {
+            runApp(const MyApp());
           }
 
-          android {
-              namespace = "com.music8481.app"
-              compileSdk = 35
-              defaultConfig {
-                  applicationId = "com.music8481.app"
-                  minSdk = 24
-                  targetSdk = 35
-                  versionCode = 2
-                  versionName = "2.0"
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'YT Muxer',
+                theme: ThemeData(primarySwatch: Colors.red),
+                home: const DownloaderPage(),
+              );
+            }
+          }
+
+          class DownloaderPage extends StatefulWidget {
+            const DownloaderPage({super.key});
+            @override
+            State<DownloaderPage> createState() => _DownloaderPageState();
+          }
+
+          class _DownloaderPageState extends State<DownloaderPage> {
+            final _urlController = TextEditingController();
+            final _downloader = YoutubeDownloader();
+            List<VideoQuality> _qualities = [];
+            VideoQuality? _selectedQuality;
+            bool _isLoading = false;
+            String _status = 'Paste a YouTube link to start';
+            double _progress = 0.0;
+
+            @override
+            void initState() {
+              super.initState();
+              _requestPermissions();
+            }
+
+            Future<void> _requestPermissions() async {
+              await Permission.storage.request();
+              await Permission.videos.request();
+              await Permission.audio.request();
+            }
+
+            Future<void> _fetchQualities() async {
+              final url = _urlController.text.trim();
+              if (url.isEmpty) {
+                _showSnack('Please enter a YouTube URL or video ID.');
+                return;
               }
-              signingConfigs {
-                  create("release") {
-                      storeFile = rootProject.file("release.keystore")
-                      storePassword = "music8481"
-                      keyAlias = "music8481"
-                      keyPassword = "music8481"
-                  }
+              setState(() {
+                _isLoading = true;
+                _status = 'Fetching qualities...';
+                _qualities = [];
+                _selectedQuality = null;
+              });
+              try {
+                final qualities = await _downloader.getQualities(url);
+                setState(() {
+                  _qualities = qualities.where((q) => q.fps != 0).toList();
+                  _isLoading = false;
+                  _status = _qualities.isEmpty
+                      ? 'No video qualities found.'
+                      : 'Select a quality to download.';
+                });
+              } catch (e) {
+                setState(() {
+                  _isLoading = false;
+                  _status = 'Error: ${e.toString()}';
+                });
               }
-              buildTypes {
-                  release {
-                      isMinifyEnabled = false
-                      signingConfig = signingConfigs.getByName("release")
-                  }
+            }
+
+            Future<void> _downloadSelected() async {
+              if (_selectedQuality == null) {
+                _showSnack('Please select a quality first.');
+                return;
               }
-              buildFeatures { compose = true }
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
+              final url = _urlController.text.trim();
+              setState(() {
+                _isLoading = true;
+                _status = 'Downloading & merging...';
+                _progress = 0.0;
+              });
+              try {
+                await for (final progress in _downloader.downloadVideo(
+                  _selectedQuality!,
+                  url,
+                )) {
+                  setState(() {
+                    _progress = progress.progress;
+                    _status = '${progress.status} (${(progress.progress * 100).toStringAsFixed(1)}%)';
+                  });
+                  if (progress.status == DownloadStatus.completed) break;
+                }
+                setState(() {
+                  _isLoading = false;
+                  _status = 'Download complete! File saved.';
+                });
+              } catch (e) {
+                setState(() {
+                  _isLoading = false;
+                  _status = 'Download failed: ${e.toString()}';
+                });
               }
-              kotlinOptions { jvmTarget = "17" }
-              packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-          }
+            }
 
-          dependencies {
-              val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
-              implementation(composeBom)
-              implementation("androidx.compose.ui:ui")
-              implementation("androidx.compose.ui:ui-graphics")
-              implementation("androidx.compose.material3:material3")
-              implementation("androidx.compose.material:material-icons-extended")
-              implementation("androidx.compose.foundation:foundation")
-              implementation("androidx.activity:activity-compose:1.9.3")
-              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+            void _showSnack(String msg) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+            }
 
-              val media3 = "1.5.0"
-              implementation("androidx.media3:media3-exoplayer:$media3")
-              implementation("androidx.media3:media3-exoplayer-hls:$media3")
-              implementation("androidx.media3:media3-session:$media3")
-              implementation("androidx.media3:media3-datasource-okhttp:$media3")
+            @override
+            void dispose() {
+              _urlController.dispose();
+              super.dispose();
+            }
 
-              implementation("com.squareup.retrofit2:retrofit:2.11.0")
-              implementation("com.squareup.retrofit2:converter-kotlinx-serialization:2.11.0")
-              implementation("com.squareup.okhttp3:okhttp:4.12.0")
-              implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-              implementation("io.coil-kt:coil-compose:2.7.0")
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: const Text('YouTube Downloader & Muxer')),
+                body: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        TextField(
+                          controller: _urlController,
+                          decoration: const InputDecoration(
+                            labelText: 'YouTube URL or Video ID',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        ElevatedButton(
+                          onPressed: _isLoading ? null : _fetchQualities,
+                          child: const Text('Fetch Qualities'),
+                        ),
+                        const SizedBox(height: 20),
+                        if (_qualities.isNotEmpty)
+                          DropdownButtonFormField<VideoQuality>(
+                            value: _selectedQuality,
+                            decoration: const InputDecoration(
+                              labelText: 'Select Quality',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: _qualities.map((q) {
+                              return DropdownMenuItem(
+                                value: q,
+                                child: Text('${q.qualityLabel ?? 'Unknown'} (${q.formatCode})'),
+                              );
+                            }).toList(),
+                            onChanged: (val) => setState(() => _selectedQuality = val),
+                          ),
+                        const SizedBox(height: 20),
+                        if (_selectedQuality != null)
+                          ElevatedButton.icon(
+                            onPressed: _isLoading ? null : _downloadSelected,
+                            icon: const Icon(Icons.download),
+                            label: const Text('Download & Merge'),
+                          ),
+                        const SizedBox(height: 30),
+                        if (_isLoading)
+                          LinearProgressIndicator(value: _progress == 0 ? null : _progress),
+                        const SizedBox(height: 10),
+                        Text(_status, textAlign: TextAlign.center),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }
           }
           EOF
 
-          cat <<'EOF' > native/app/proguard-rules.pro
-          -keep class com.music8481.app.** { *; }
-          -dontwarn org.jetbrains.annotations.**
-          EOF
-
-          cat <<'EOF' > native/app/src/main/AndroidManifest.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+      - name: Overwrite AndroidManifest.xml (permissions)
+        run: |
+          cat > android/app/src/main/AndroidManifest.xml << 'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.example.youtube_muxer_app">
               <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-              <uses-permission android:name="android.permission.WAKE_LOCK" />
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
               <application
-                  android:allowBackup="true"
-                  android:icon="@mipmap/ic_launcher"
-                  android:label="@string/app_name"
-                  android:supportsRtl="true"
-                  android:usesCleartextTraffic="true"
-                  android:theme="@style/Theme.Music8481">
+                  android:label="YT Muxer"
+                  android:icon="@mipmap/ic_launcher">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:launchMode="singleTask"
-                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      android:launchMode="singleTop"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                          android:name="io.flutter.embedding.android.NormalTheme"
+                          android:resource="@style/NormalTheme" />
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
-                  <service
-                      android:name=".PlaybackService"
-                      android:foregroundServiceType="mediaPlayback"
-                      android:exported="true">
-                      <intent-filter>
-                          <action android:name="androidx.media3.session.MediaSessionService" />
-                      </intent-filter>
-                  </service>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
               </application>
           </manifest>
           EOF
 
-          cat <<'EOF' > native/app/src/main/res/values/strings.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources><string name="app_name">Music8481</string></resources>
-          EOF
+      - name: Install dependencies
+        run: flutter pub get
 
-          cat <<'EOF' > native/app/src/main/res/values/themes.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <style name="Theme.Music8481" parent="android:Theme.Material.NoActionBar">
-                  <item name="android:statusBarColor">@android:color/transparent</item>
-                  <item name="android:navigationBarColor">@android:color/transparent</item>
-                  <item name="android:windowLightStatusBar">false</item>
-                  <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
-              </style>
-          </resources>
-          EOF
+      - name: Build release APK
+        run: flutter build apk --release
 
-      - name: Generate Data + API layer
-        run: |
-          set -e
-
-          cat <<'EOF' > native/app/src/main/java/com/music8481/app/Models.kt
-          package com.music8481.app
-
-          import android.net.Uri
-          import androidx.media3.common.MediaItem
-          import androidx.media3.common.MediaMetadata
-          import kotlinx.serialization.SerialName
-          import kotlinx.serialization.Serializable
-          import kotlinx.serialization.json.Json
-          import kotlinx.serialization.json.JsonArray
-          import kotlinx.serialization.json.JsonElement
-          import kotlinx.serialization.json.JsonObject
-          import kotlinx.serialization.json.decodeFromJsonElement
-
-          @Serializable
-          data class Song(
-              @SerialName("track_id") val trackId: String? = null,
-              @SerialName("entity_id") val entityId: String? = null,
-              val id: String? = null,
-              @SerialName("track_title") val trackTitle: String? = null,
-              val name: String? = null,
-              val title: String? = null,
-              @SerialName("artwork_large") val artworkLarge: String? = null,
-              @SerialName("artwork_web") val artworkWeb: String? = null,
-              val artwork: String? = null,
-              val atw: String? = null,
-              @SerialName("entity_type") val entityType: String? = null,
-              val seokey: String? = null,
-              @SerialName("entity_info") val entityInfo: List<EntityInfo>? = null,
-              val artists: List<Artist>? = null,
-              val singers: List<Artist>? = null
-          ) {
-              val songId: String get() = trackId ?: id ?: entityId ?: ""
-              val displayTitle: String get() = trackTitle ?: name ?: title ?: "Unknown"
-
-              val imageUrl: String
-                  get() = (artworkLarge ?: artworkWeb ?: artwork ?: atw ?: "")
-                      .replace(Regex("size_[ms]"), "size_l")
-                      .replace("150x150", "500x500")
-                      .replace("50x50", "500x500")
-
-              val displayArtists: String
-                  get() {
-                      entityInfo?.firstOrNull { it.key == "artist" || it.key == "singers" }?.value?.let { v ->
-                          try {
-                              val arr = v as? JsonArray
-                              val names = arr?.mapNotNull { (it as? JsonObject)?.get("name")?.toString()?.trim('"') }
-                              if (!names.isNullOrEmpty()) return names.joinToString(", ")
-                          } catch (_: Exception) {}
-                      }
-                      val list = artists ?: singers ?: emptyList()
-                      return list.mapNotNull { it.name }.joinToString(", ").ifEmpty { "Unknown Artist" }
-                  }
-
-              fun toMediaItem(): MediaItem = MediaItem.Builder()
-                  .setMediaId(songId)
-                  .setUri(Uri.parse("music8481://resolve/$songId"))
-                  .setMediaMetadata(
-                      MediaMetadata.Builder()
-                          .setTitle(displayTitle)
-                          .setArtist(displayArtists)
-                          .setArtworkUri(imageUrl.takeIf { it.isNotEmpty() }?.let { Uri.parse(it) })
-                          .build()
-                  )
-                  .build()
-          }
-
-          @Serializable
-          data class EntityInfo(val key: String? = null, val value: JsonElement? = null)
-
-          @Serializable
-          data class Artist(val name: String? = null, val id: String? = null, val seokey: String? = null)
-
-          @Serializable
-          data class HomeResponse(val data: JsonElement? = null) {
-              fun getSongs(): List<Song> {
-                  val d = data ?: return emptyList()
-                  val json = Json { ignoreUnknownKeys = true; isLenient = true }
-                  return try {
-                      when {
-                          d is JsonObject && d.containsKey("entities") ->
-                              json.decodeFromJsonElement<List<Song>>(d["entities"]!!)
-                          d is JsonObject && d.containsKey("tracks") ->
-                              json.decodeFromJsonElement<List<Song>>(d["tracks"]!!)
-                          d is JsonArray ->
-                              json.decodeFromJsonElement<List<Song>>(d)
-                          else -> emptyList()
-                      }
-                  } catch (_: Exception) { emptyList() }
-              }
-          }
-
-          @Serializable
-          data class StreamResponse(
-              @SerialName("hls_url") val hlsUrl: String? = null,
-              val url: String? = null,
-              val data: StreamData? = null
-          ) {
-              val resolvedUrl: String?
-                  get() = hlsUrl ?: data?.hlsUrl ?: data?.url ?: url
-          }
-
-          @Serializable
-          data class StreamData(
-              @SerialName("hlsUrl") val hlsUrl: String? = null,
-              val url: String? = null
-          )
-          EOF
-
-          cat <<'EOF' > native/app/src/main/java/com/music8481/app/Api.kt
-          package com.music8481.app
-
-          import kotlinx.serialization.json.Json
-          import okhttp3.MediaType.Companion.toMediaType
-          import okhttp3.OkHttpClient
-          import retrofit2.Retrofit
-          import retrofit2.converter.kotlinx.serialization.asConverterFactory
-          import retrofit2.http.GET
-          import retrofit2.http.Query
-          import java.util.concurrent.TimeUnit
-
-          interface GaanaApi {
-              @GET("home/showcase")
-              suspend fun getShowcase(@Query("userlanguage") lang: String): HomeResponse
-
-              @GET("home/smartfeed/765")
-              suspend fun getTrending(
-                  @Query("view") view: String = "all",
-                  @Query("userlanguage") lang: String
-              ): HomeResponse
-
-              @GET("home/section-data")
-              suspend fun getSection(
-                  @Query("seokey") seokey: String,
-                  @Query("view") view: String = "all",
-                  @Query("userlanguage") lang: String
-              ): HomeResponse
-          }
-
-          interface StreamApi {
-              @GET("api/stream")
-              suspend fun getStream(@Query("id") trackId: String): StreamResponse
-          }
-
-          object ApiClient {
-              private const val BYPASS_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m"
-
-              private val okHttp: OkHttpClient = OkHttpClient.Builder()
-                  .addInterceptor { chain ->
-                      val req = chain.request().newBuilder()
-                          .addHeader("x-vercel-protection-bypass", BYPASS_SECRET)
-                          .addHeader("User-Agent", "Music8481-Android/2.0")
-                          .build()
-                      chain.proceed(req)
-                  }
-                  .connectTimeout(20, TimeUnit.SECONDS)
-                  .readTimeout(30, TimeUnit.SECONDS)
-                  .build()
-
-              private val json = Json { ignoreUnknownKeys = true; isLenient = true }
-              private val contentType = "application/json".toMediaType()
-
-              val vercelApi: GaanaApi = Retrofit.Builder()
-                  .baseUrl("https://gaanaayush.vercel.app/api/superserch/")
-                  .client(okHttp)
-                  .addConverterFactory(json.asConverterFactory(contentType))
-                  .build().create(GaanaApi::class.java)
-
-              val cfApi: GaanaApi = Retrofit.Builder()
-                  .baseUrl("https://gaanaayush.wonder945177.workers.dev/api/superserch/")
-                  .client(okHttp)
-                  .addConverterFactory(json.asConverterFactory(contentType))
-                  .build().create(GaanaApi::class.java)
-
-              val streamApi: StreamApi = Retrofit.Builder()
-                  .baseUrl("https://ayushgaana.vercel.app/")
-                  .client(okHttp)
-                  .addConverterFactory(json.asConverterFactory(contentType))
-                  .build().create(StreamApi::class.java)
-          }
-          EOF
-
-      - name: Generate Playback engine
-        run: |
-          set -e
-
-          cat <<'EOF' > native/app/src/main/java/com/music8481/app/PlaybackService.kt
-          package com.music8481.app
-
-          import android.net.Uri
-          import androidx.media3.common.AudioAttributes
-          import androidx.media3.common.C
-          import androidx.media3.datasource.DefaultHttpDataSource
-          import androidx.media3.datasource.ResolvingDataSource
-          import androidx.media3.exoplayer.ExoPlayer
-          import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-          import androidx.media3.session.MediaSession
-          import androidx.media3.session.MediaSessionService
-          import kotlinx.coroutines.runBlocking
-          import java.io.IOException
-
-          class PlaybackService : MediaSessionService() {
-              private var mediaSession: MediaSession? = null
-
-              override fun onCreate() {
-                  super.onCreate()
-
-                  val dataSourceFactory = ResolvingDataSource.Factory(
-                      DefaultHttpDataSource.Factory()
-                          .setUserAgent("Music8481-Android/2.0")
-                          .setAllowCrossProtocolRedirects(true),
-                      { dataSpec ->
-                          val songId = dataSpec.uri.lastPathSegment ?: throw IOException("No song ID")
-                          val url = UrlResolver.get(songId)
-                              ?: runBlocking { PlayerManager.fetchAndCacheUrl(songId) }
-                              ?: throw IOException("Failed to resolve stream for $songId")
-                          dataSpec.withUri(Uri.parse(url))
-                      }
-                  )
-
-                  val player = ExoPlayer.Builder(this)
-                      .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
-                      .setAudioAttributes(
-                          AudioAttributes.Builder()
-                              .setUsage(C.USAGE_MEDIA)
-                              .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                              .build(),
-                          true
-                      )
-                      .setHandleAudioBecomingNoisy(true)
-                      .setWakeMode(C.WAKE_MODE_NETWORK)
-                      .build()
-
-                  mediaSession = MediaSession.Builder(this, player).build()
-              }
-
-              override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = mediaSession
-
-              override fun onDestroy() {
-                  mediaSession?.run {
-                      player.release()
-                      release()
-                      mediaSession = null
-                  }
-                  super.onDestroy()
-              }
-          }
-          EOF
-
-          cat <<'EOF' > native/app/src/main/java/com/music8481/app/PlayerManager.kt
-          package com.music8481.app
-
-          import android.content.ComponentName
-          import android.content.Context
-          import androidx.media3.common.Player
-          import androidx.media3.session.MediaController
-          import androidx.media3.session.SessionToken
-          import com.google.common.util.concurrent.MoreExecutors
-          import kotlinx.coroutines.CoroutineScope
-          import kotlinx.coroutines.Dispatchers
-          import kotlinx.coroutines.SupervisorJob
-          import kotlinx.coroutines.async
-          import kotlinx.coroutines.awaitAll
-          import kotlinx.coroutines.delay
-          import kotlinx.coroutines.flow.MutableStateFlow
-          import kotlinx.coroutines.flow.StateFlow
-          import kotlinx.coroutines.flow.asStateFlow
-          import kotlinx.coroutines.launch
-          import kotlinx.coroutines.withContext
-          import java.util.concurrent.ConcurrentHashMap
-
-          data class PlayerState(
-              val isPlaying: Boolean = false,
-              val isBuffering: Boolean = false,
-              val currentSong: Song? = null,
-              val positionMs: Long = 0L,
-              val durationMs: Long = 0L,
-              val bufferedMs: Long = 0L,
-              val shuffle: Boolean = false,
-              val repeatMode: Int = Player.REPEAT_MODE_OFF,
-              val currentIndex: Int = 0,
-              val queueSize: Int = 0
-          )
-
-          object UrlResolver {
-              private val cache = ConcurrentHashMap<String, String>()
-              fun get(id: String): String? = cache[id]
-              fun put(id: String, url: String) { cache[id] = url }
-              fun clear() = cache.clear()
-          }
-
-          object PlayerManager {
-              private var controller: MediaController? = null
-              private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-              private val _state = MutableStateFlow(PlayerState())
-              val state: StateFlow<PlayerState> = _state.asStateFlow()
-
-              private var songsQueue: List<Song> = emptyList()
-
-              suspend fun fetchAndCacheUrl(songId: String): String? {
-                  UrlResolver.get(songId)?.let { return it }
-                  return try {
-                      val res = ApiClient.streamApi.getStream(songId)
-                      val url = res.resolvedUrl
-                      if (url != null) { UrlResolver.put(songId, url); url } else null
-                  } catch (_: Exception) { null }
-              }
-
-              fun connect(context: Context) {
-                  if (controller != null) return
-                  try {
-                      val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-                      val future = MediaController.Builder(context.applicationContext, token).buildAsync()
-                      future.addListener({
-                          controller = try { future.get() } catch (_: Exception) { null }
-                          controller?.addListener(object : Player.Listener {
-                              override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
-                                  prefetchAhead()
-                                  updateState()
-                              }
-                              override fun onIsPlayingChanged(isPlaying: Boolean) = updateState()
-                              override fun onPlaybackStateChanged(playbackState: Int) = updateState()
-                              override fun onMediaMetadataChanged(mediaMetadata: androidx.media3.common.MediaMetadata) = updateState()
-                              override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) = updateState()
-                              override fun onRepeatModeChanged(repeatMode: Int) = updateState()
-                          })
-                          scope.launch {
-                              while (true) { if (controller?.isPlaying == true) updateState(); delay(500) }
-                          }
-                          updateState()
-                      }, MoreExecutors.directExecutor())
-                  } catch (_: Exception) { }
-              }
-
-              private fun prefetchAhead() {
-                  val c = controller ?: return
-                  val idx = c.currentMediaItemIndex
-                  if (idx < 0) return
-                  scope.launch {
-                      (1..3).forEach { offset ->
-                          val i = idx + offset
-                          songsQueue.getOrNull(i)?.let { song ->
-                              launch { fetchAndCacheUrl(song.songId) }
-                          }
-                      }
-                  }
-              }
-
-              private fun updateState() {
-                  val c = controller ?: return
-                  val song = c.currentMediaItem?.mediaId?.let { id -> songsQueue.firstOrNull { it.songId == id } }
-                  _state.value = PlayerState(
-                      isPlaying = c.isPlaying,
-                      isBuffering = c.playbackState == Player.STATE_BUFFERING,
-                      currentSong = song,
-                      positionMs = c.currentPosition.coerceAtLeast(0),
-                      durationMs = c.duration.coerceAtLeast(0),
-                      bufferedMs = c.bufferedPosition.coerceAtLeast(0),
-                      shuffle = c.shuffleModeEnabled,
-                      repeatMode = c.repeatMode,
-                      currentIndex = c.currentMediaItemIndex,
-                      queueSize = c.mediaItemCount
-                  )
-              }
-
-              fun play(songs: List<Song>, startIndex: Int) {
-                  if (songs.isEmpty()) return
-                  songsQueue = songs
-                  val safeIndex = startIndex.coerceIn(0, songs.size - 1)
-                  scope.launch {
-                      try {
-                          val current = songs[safeIndex]
-                          fetchAndCacheUrl(current.songId)
-                          withContext(Dispatchers.Main) {
-                              val items = songs.map { it.toMediaItem() }
-                              controller?.setMediaItems(items, safeIndex, 0L)
-                              controller?.prepare()
-                              controller?.play()
-                          }
-                          val others = songs.filterIndexed { i, _ -> i != safeIndex }
-                          others.map { song -> async { fetchAndCacheUrl(song.songId) } }.awaitAll()
-                      } catch (_: Exception) { }
-                  }
-              }
-
-              fun togglePlayPause() {
-                  try { controller?.let { if (it.isPlaying) it.pause() else it.play() } } catch (_: Exception) {}
-              }
-              fun next() { try { controller?.seekToNextMediaItem() } catch (_: Exception) {} }
-              fun previous() { try { controller?.seekToPreviousMediaItem() } catch (_: Exception) {} }
-              fun seekTo(ms: Long) { try { controller?.seekTo(ms) } catch (_: Exception) {} }
-              fun setShuffle(on: Boolean) { try { controller?.shuffleModeEnabled = on } catch (_: Exception) {} }
-              fun cycleRepeat() {
-                  try {
-                      controller?.let { c ->
-                          c.repeatMode = when (c.repeatMode) {
-                              Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                              Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                              else -> Player.REPEAT_MODE_OFF
-                          }
-                      }
-                  } catch (_: Exception) {}
-              }
-          }
-          EOF
-
-      - name: Generate HomeViewModel
-        run: |
-          set -e
-
-          cat <<'EOF' > native/app/src/main/java/com/music8481/app/HomeViewModel.kt
-          package com.music8481.app
-
-          import androidx.lifecycle.ViewModel
-          import androidx.lifecycle.viewModelScope
-          import kotlinx.coroutines.flow.MutableStateFlow
-          import kotlinx.coroutines.flow.StateFlow
-          import kotlinx.coroutines.flow.asStateFlow
-          import kotlinx.coroutines.flow.update
-          import kotlinx.coroutines.launch
-
-          data class HomeSection(val key: String, val title: String, val songs: List<Song>)
-
-          class HomeViewModel : ViewModel() {
-              private val _sections = MutableStateFlow<List<HomeSection>>(emptyList())
-              val sections: StateFlow<List<HomeSection>> = _sections.asStateFlow()
-
-              private val _isLoading = MutableStateFlow(false)
-              val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
-              private val _hasError = MutableStateFlow(false)
-              val hasError: StateFlow<Boolean> = _hasError.asStateFlow()
-
-              private data class SectionConfig(
-                  val key: String,
-                  val title: String,
-                  val fetch: suspend (String) -> HomeResponse
-              )
-
-              private val configs = listOf(
-                  SectionConfig("showcase", "Top Picks") { lang -> ApiClient.vercelApi.getShowcase(lang) },
-                  SectionConfig("trending", "Trending Songs") { lang -> ApiClient.vercelApi.getTrending(lang = lang) },
-                  SectionConfig("top_charts", "Top Charts") { lang -> ApiClient.cfApi.getSection("top-charts", lang = lang) },
-                  SectionConfig("top_playlists", "Top Playlists") { lang -> ApiClient.cfApi.getSection("top-playlists-1", lang = lang) },
-                  SectionConfig("90s", "Back to 90s") { lang -> ApiClient.cfApi.getSection("90s-2000s", lang = lang) },
-                  SectionConfig("bhakti", "Bhakti") { lang -> ApiClient.cfApi.getSection("bhakti", lang = lang) },
-                  SectionConfig("romance", "Romance") { lang -> ApiClient.cfApi.getSection("romance", lang = lang) },
-                  SectionConfig("star_gallery", "Star Gallery") { lang -> ApiClient.cfApi.getSection("star-gallery", lang = lang) },
-                  SectionConfig("city_charts", "City Top Charts") { lang -> ApiClient.cfApi.getSection("city-top-charts", lang = lang) },
-                  SectionConfig("top_search", "Top Searched Artists") { lang -> ApiClient.cfApi.getSection("top-searched-artists", lang = lang) },
-                  SectionConfig("just_arrived", "Just Arrived") { lang -> ApiClient.cfApi.getSection("just-arrived", lang = lang) },
-                  SectionConfig("mehfil", "Mehfil-e-ghazal") { lang -> ApiClient.cfApi.getSection("mehfil-e-ghazal", lang = lang) }
-              )
-
-              private val language = "hindi"
-              private var nextIndex = 0
-
-              init { loadNext(2) }
-
-              fun loadMore() { if (nextIndex < configs.size) loadNext(1) }
-
-              fun retry() {
-                  if (_sections.value.isEmpty()) {
-                      nextIndex = 0
-                      _hasError.value = false
-                      loadNext(2)
-                  }
-              }
-
-              private fun loadNext(count: Int) {
-                  if (_isLoading.value) return
-                  viewModelScope.launch {
-                      _isLoading.value = true
-                      try {
-                          repeat(count) {
-                              val idx = nextIndex
-                              if (idx >= configs.size) return@repeat
-                              val cfg = configs[idx]
-                              val songs = runCatching { cfg.fetch(language).getSongs() }.getOrDefault(emptyList())
-                              if (songs.isNotEmpty()) {
-                                  _sections.update { current ->
-                                      if (current.any { it.key == cfg.key }) current
-                                      else current + HomeSection(cfg.key, cfg.title, songs)
-                                  }
-                              }
-                              nextIndex++
-                          }
-                          if (_sections.value.isEmpty()) _hasError.value = true
-                      } catch (_: Exception) {
-                          _hasError.value = _sections.value.isEmpty()
-                      } finally {
-                          _isLoading.value = false
-                      }
-                  }
-              }
-          }
-          EOF
-
-      # ═══════════════════════════════════════════════════════════
-      # UPDATED MainActivity — LIQUID GLASS UI + CRASH FIX
-      # ═══════════════════════════════════════════════════════════
-      - name: Generate MainActivity (Liquid Glass UI)
-        run: |
-          set -e
-
-          cat <<'EOF' > native/app/src/main/java/com/music8481/app/MainActivity.kt
-          package com.music8481.app
-
-          import android.Manifest
-          import android.content.pm.PackageManager
-          import android.os.Build
-          import android.os.Bundle
-          import androidx.activity.ComponentActivity
-          import androidx.activity.compose.setContent
-          import androidx.activity.result.contract.ActivityResultContracts
-          import androidx.compose.animation.AnimatedVisibility
-          import androidx.compose.animation.core.LinearEasing
-          import androidx.compose.animation.core.RepeatMode
-          import androidx.compose.animation.core.animateFloat
-          import androidx.compose.animation.core.infiniteRepeatable
-          import androidx.compose.animation.core.rememberInfiniteTransition
-          import androidx.compose.animation.core.tween
-          import androidx.compose.animation.fadeIn
-          import androidx.compose.animation.fadeOut
-          import androidx.compose.animation.slideInVertically
-          import androidx.compose.animation.slideOutVertically
-          import androidx.compose.foundation.Canvas
-          import androidx.compose.foundation.background
-          import androidx.compose.foundation.border
-          import androidx.compose.foundation.clickable
-          import androidx.compose.foundation.layout.*
-          import androidx.compose.foundation.lazy.LazyColumn
-          import androidx.compose.foundation.lazy.LazyRow
-          import androidx.compose.foundation.lazy.itemsIndexed
-          import androidx.compose.foundation.lazy.rememberLazyListState
-          import androidx.compose.foundation.shape.CircleShape
-          import androidx.compose.foundation.shape.RoundedCornerShape
-          import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.*
-          import androidx.compose.material3.*
-          import androidx.compose.runtime.*
-          import androidx.compose.runtime.snapshotFlow
-          import androidx.compose.ui.Alignment
-          import androidx.compose.ui.Modifier
-          import androidx.compose.ui.draw.clip
-          import androidx.compose.ui.draw.shadow
-          import androidx.compose.ui.geometry.Offset
-          import androidx.compose.ui.graphics.Brush
-          import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.layout.ContentScale
-          import androidx.compose.ui.text.font.FontWeight
-          import androidx.compose.ui.text.style.TextOverflow
-          import androidx.compose.ui.unit.dp
-          import androidx.compose.ui.unit.sp
-          import androidx.core.view.WindowCompat
-          import androidx.lifecycle.compose.collectAsStateWithLifecycle
-          import androidx.lifecycle.viewmodel.compose.viewModel
-          import coil.compose.AsyncImage
-          import kotlinx.coroutines.flow.distinctUntilChanged
-
-          // ═══════════════ COLORS ═══════════════
-          private val BgDeep = Color(0xFF070B14)
-          private val AccentGreen = Color(0xFF1DB954)
-          private val AccentPurple = Color(0xFF8B5CF6)
-          private val AccentPink = Color(0xFFEC4899)
-          private val AccentCyan = Color(0xFF06B6D4)
-          private val AccentOrange = Color(0xFFF97316)
-
-          class MainActivity : ComponentActivity() {
-              private val notifPerm = registerForActivityResult(
-                  ActivityResultContracts.RequestPermission()
-              ) { }
-
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  WindowCompat.setDecorFitsSystemWindows(window, false)
-                  PlayerManager.connect(applicationContext)
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                      if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                          try { notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) } catch (_: Exception) {}
-                      }
-                  }
-                  setContent {
-                      Music8481Theme { AppRoot() }
-                  }
-              }
-          }
-
-          @Composable
-          fun Music8481Theme(content: @Composable () -> Unit) {
-              MaterialTheme(
-                  colorScheme = darkColorScheme(
-                      primary = AccentGreen,
-                      onPrimary = Color.Black,
-                      background = BgDeep,
-                      onBackground = Color.White,
-                      surface = Color.Transparent,
-                      onSurface = Color.White
-                  ),
-                  content = content
-              )
-          }
-
-          // ═══════════════ PREMIUM ANIMATED BACKGROUND ═══════════════
-          @Composable
-          fun PremiumBackground(modifier: Modifier = Modifier) {
-              val transition = rememberInfiniteTransition(label = "bg")
-              val shift by transition.animateFloat(
-                  initialValue = 0f, targetValue = 1f,
-                  animationSpec = infiniteRepeatable(
-                      animation = tween(22000, easing = LinearEasing),
-                      repeatMode = RepeatMode.Reverse
-                  ),
-                  label = "shift"
-              )
-
-              Canvas(modifier = modifier.fillMaxSize()) {
-                  drawRect(Color(0xFF070B14))
-
-                  drawCircle(
-                      brush = Brush.radialGradient(
-                          colors = listOf(AccentPurple.copy(alpha = 0.55f), Color.Transparent),
-                          center = Offset(size.width * (0.15f + shift * 0.15f), size.height * 0.12f),
-                          radius = size.width * 1.0f
-                      ),
-                      radius = size.width * 1.0f,
-                      center = Offset(size.width * (0.15f + shift * 0.15f), size.height * 0.12f)
-                  )
-
-                  drawCircle(
-                      brush = Brush.radialGradient(
-                          colors = listOf(AccentPink.copy(alpha = 0.50f), Color.Transparent),
-                          center = Offset(size.width * (0.90f - shift * 0.10f), size.height * 0.25f),
-                          radius = size.width * 0.85f
-                      ),
-                      radius = size.width * 0.85f,
-                      center = Offset(size.width * (0.90f - shift * 0.10f), size.height * 0.25f)
-                  )
-
-                  drawCircle(
-                      brush = Brush.radialGradient(
-                          colors = listOf(AccentCyan.copy(alpha = 0.45f), Color.Transparent),
-                          center = Offset(size.width * 0.35f, size.height * (0.60f + shift * 0.10f)),
-                          radius = size.width * 1.1f
-                      ),
-                      radius = size.width * 1.1f,
-                      center = Offset(size.width * 0.35f, size.height * (0.60f + shift * 0.10f))
-                  )
-
-                  drawCircle(
-                      brush = Brush.radialGradient(
-                          colors = listOf(AccentOrange.copy(alpha = 0.35f), Color.Transparent),
-                          center = Offset(size.width * 0.85f, size.height * (0.88f - shift * 0.05f)),
-                          radius = size.width * 0.7f
-                      ),
-                      radius = size.width * 0.7f,
-                      center = Offset(size.width * 0.85f, size.height * (0.88f - shift * 0.05f))
-                  )
-
-                  // Subtle bottom vignette for content legibility
-                  drawRect(
-                      brush = Brush.verticalGradient(
-                          colors = listOf(Color.Transparent, BgDeep.copy(alpha = 0.85f)),
-                          startY = size.height * 0.5f,
-                          endY = size.height
-                      )
-                  )
-              }
-          }
-
-          // ═══════════════ GLASS MODIFIERS ═══════════════
-          fun Modifier.glassSurface(
-              radius: androidx.compose.ui.unit.Dp = 20.dp,
-              alpha: Float = 0.10f
-          ): Modifier = this
-              .clip(RoundedCornerShape(radius))
-              .background(
-                  Brush.linearGradient(
-                      listOf(
-                          Color.White.copy(alpha = alpha * 1.4f),
-                          Color.White.copy(alpha = alpha * 0.5f)
-                      )
-                  )
-              )
-              .border(
-                  width = 1.dp,
-                  brush = Brush.linearGradient(
-                      listOf(
-                          Color.White.copy(alpha = 0.28f),
-                          Color.White.copy(alpha = 0.08f)
-                      )
-                  ),
-                  shape = RoundedCornerShape(radius)
-              )
-
-          // ═══════════════ APP ROOT ═══════════════
-          @Composable
-          fun AppRoot() {
-              val playerState by PlayerManager.state.collectAsStateWithLifecycle()
-              var showPlayer by remember { mutableStateOf(false) }
-
-              Box(Modifier.fillMaxSize().background(BgDeep)) {
-                  PremiumBackground()
-
-                  HomeScreen(
-                      modifier = Modifier.fillMaxSize(),
-                      onSongClick = { song, allSongs ->
-                          try {
-                              val idx = allSongs.indexOfFirst { it.songId == song.songId }
-                              PlayerManager.play(allSongs, if (idx < 0) 0 else idx)
-                              showPlayer = true
-                          } catch (_: Exception) {}
-                      }
-                  )
-
-                  if (playerState.currentSong != null && !showPlayer) {
-                      MiniPlayer(
-                          playerState = playerState,
-                          modifier = Modifier
-                              .align(Alignment.BottomCenter)
-                              .padding(horizontal = 12.dp, vertical = 10.dp),
-                          onClick = { showPlayer = true }
-                      )
-                  }
-
-                  AnimatedVisibility(
-                      visible = showPlayer && playerState.currentSong != null,
-                      enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                      exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-                  ) {
-                      PlayerScreen(playerState = playerState, onClose = { showPlayer = false })
-                  }
-              }
-          }
-
-          // ═══════════════ HOME SCREEN ═══════════════
-          @Composable
-          fun HomeScreen(
-              modifier: Modifier = Modifier,
-              viewModel: HomeViewModel = viewModel(),
-              onSongClick: (Song, List<Song>) -> Unit
-          ) {
-              val sections by viewModel.sections.collectAsStateWithLifecycle()
-              val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
-              val hasError by viewModel.hasError.collectAsStateWithLifecycle()
-              val listState = rememberLazyListState()
-
-              LaunchedEffect(listState) {
-                  snapshotFlow {
-                      val info = listState.layoutInfo
-                      val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-                      last >= info.totalItemsCount - 2 && info.totalItemsCount > 0
-                  }.distinctUntilChanged().collect { nearEnd ->
-                      if (nearEnd) viewModel.loadMore()
-                  }
-              }
-
-              LazyColumn(
-                  state = listState,
-                  modifier = modifier.fillMaxSize(),
-                  contentPadding = PaddingValues(bottom = 140.dp)
-              ) {
-                  item(key = "header") { Header() }
-                  item(key = "search") { SearchBar() }
-
-                  sections.forEach { section ->
-                      item(key = "section_${section.key}") {
-                          SectionRow(section = section, onSongClick = onSongClick)
-                      }
-                  }
-
-                  if (isLoading && sections.isEmpty()) {
-                      item(key = "loading_first") { LoadingSkeletonRow() }
-                  }
-                  if (isLoading && sections.isNotEmpty()) {
-                      item(key = "loading_more") { LoadingRow() }
-                  }
-                  if (hasError && sections.isEmpty() && !isLoading) {
-                      item(key = "error") { ErrorState(onRetry = { viewModel.retry() }) }
-                  }
-              }
-          }
-
-          @Composable
-          private fun Header() {
-              Row(
-                  modifier = Modifier
-                      .fillMaxWidth()
-                      .windowInsetsPadding(WindowInsets.statusBars)
-                      .padding(horizontal = 20.dp, vertical = 18.dp),
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  Box(
-                      modifier = Modifier
-                          .size(44.dp)
-                          .shadow(16.dp, CircleShape)
-                          .clip(CircleShape)
-                          .background(
-                              Brush.linearGradient(
-                                  listOf(AccentPurple, AccentPink, AccentOrange)
-                              )
-                          ),
-                      contentAlignment = Alignment.Center
-                  ) {
-                      Icon(
-                          Icons.Default.MusicNote,
-                          contentDescription = null,
-                          tint = Color.White,
-                          modifier = Modifier.size(24.dp)
-                      )
-                  }
-                  Spacer(Modifier.width(14.dp))
-                  Column {
-                      Text(
-                          "Music@8481",
-                          color = Color.White,
-                          fontSize = 26.sp,
-                          fontWeight = FontWeight.Black,
-                          letterSpacing = (-0.5).sp
-                      )
-                      Text(
-                          "Your sound. Your way.",
-                          color = Color.White.copy(alpha = 0.55f),
-                          fontSize = 11.sp,
-                          fontWeight = FontWeight.Medium,
-                          letterSpacing = 0.5.sp
-                      )
-                  }
-              }
-          }
-
-          @Composable
-          private fun SearchBar() {
-              Row(
-                  modifier = Modifier
-                      .padding(horizontal = 20.dp, vertical = 4.dp)
-                      .fillMaxWidth()
-                      .height(52.dp)
-                      .glassSurface(radius = 26.dp, alpha = 0.09f)
-                      .padding(horizontal = 18.dp),
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  Icon(
-                      Icons.Default.Search,
-                      contentDescription = null,
-                      tint = Color.White.copy(alpha = 0.55f),
-                      modifier = Modifier.size(20.dp)
-                  )
-                  Spacer(Modifier.width(12.dp))
-                  Text(
-                      "Search songs, artists, podcasts...",
-                      color = Color.White.copy(alpha = 0.45f),
-                      fontSize = 14.sp,
-                      fontWeight = FontWeight.Medium
-                  )
-              }
-          }
-
-          @Composable
-          private fun SectionRow(section: HomeSection, onSongClick: (Song, List<Song>) -> Unit) {
-              Column(Modifier.padding(vertical = 12.dp)) {
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .padding(horizontal = 20.dp, vertical = 6.dp),
-                      verticalAlignment = Alignment.CenterVertically,
-                      horizontalArrangement = Arrangement.SpaceBetween
-                  ) {
-                      Row(verticalAlignment = Alignment.CenterVertically) {
-                          Box(
-                              modifier = Modifier
-                                  .size(width = 4.dp, height = 22.dp)
-                                  .clip(RoundedCornerShape(2.dp))
-                                  .background(
-                                      Brush.verticalGradient(listOf(AccentPink, AccentPurple))
-                                  )
-                          )
-                          Spacer(Modifier.width(10.dp))
-                          Text(
-                              section.title,
-                              color = Color.White,
-                              fontSize = 21.sp,
-                              fontWeight = FontWeight.Black,
-                              letterSpacing = (-0.3).sp
-                          )
-                      }
-                      Box(
-                          modifier = Modifier
-                              .clip(RoundedCornerShape(20.dp))
-                              .background(Color.White.copy(alpha = 0.08f))
-                              .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
-                              .padding(horizontal = 12.dp, vertical = 6.dp)
-                      ) {
-                          Text(
-                              "View All",
-                              color = Color.White.copy(alpha = 0.85f),
-                              fontSize = 11.sp,
-                              fontWeight = FontWeight.Bold
-                          )
-                      }
-                  }
-                  Spacer(Modifier.height(6.dp))
-                  LazyRow(
-                      contentPadding = PaddingValues(horizontal = 20.dp),
-                      horizontalArrangement = Arrangement.spacedBy(14.dp)
-                  ) {
-                      itemsIndexed(section.songs) { _, song ->
-                          SongCard(song) { onSongClick(song, section.songs) }
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          private fun SongCard(song: Song, onClick: () -> Unit) {
-              Column(
-                  modifier = Modifier
-                      .width(148.dp)
-                      .clickable { onClick() }
-              ) {
-                  Box(
-                      modifier = Modifier
-                          .size(148.dp)
-                          .shadow(20.dp, RoundedCornerShape(20.dp))
-                          .clip(RoundedCornerShape(20.dp))
-                          .background(Color.White.copy(alpha = 0.06f))
-                          .border(
-                              1.dp,
-                              Brush.linearGradient(
-                                  listOf(
-                                      Color.White.copy(alpha = 0.25f),
-                                      Color.White.copy(alpha = 0.05f)
-                                  )
-                              ),
-                              RoundedCornerShape(20.dp)
-                          )
-                  ) {
-                      if (song.imageUrl.isNotEmpty()) {
-                          AsyncImage(
-                              model = song.imageUrl,
-                              contentDescription = song.displayTitle,
-                              modifier = Modifier.fillMaxSize(),
-                              contentScale = ContentScale.Crop
-                          )
-                      } else {
-                          Box(
-                              modifier = Modifier
-                                  .fillMaxSize()
-                                  .background(
-                                      Brush.linearGradient(
-                                          listOf(AccentPurple, AccentPink, AccentOrange)
-                                      )
-                                  ),
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(
-                                  Icons.Default.MusicNote,
-                                  contentDescription = null,
-                                  tint = Color.White.copy(alpha = 0.7f),
-                                  modifier = Modifier.size(48.dp)
-                              )
-                          }
-                      }
-                      // Bottom gradient overlay for depth
-                      Box(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .height(60.dp)
-                              .align(Alignment.BottomCenter)
-                              .background(
-                                  Brush.verticalGradient(
-                                      listOf(Color.Transparent, Color.Black.copy(alpha = 0.45f))
-                                  )
-                              )
-                      )
-                      // Play button pill
-                      Box(
-                          modifier = Modifier
-                              .align(Alignment.BottomEnd)
-                              .padding(10.dp)
-                              .size(34.dp)
-                              .shadow(8.dp, CircleShape)
-                              .clip(CircleShape)
-                              .background(AccentGreen),
-                          contentAlignment = Alignment.Center
-                      ) {
-                          Icon(
-                              Icons.Default.PlayArrow,
-                              contentDescription = null,
-                              tint = Color.Black,
-                              modifier = Modifier.size(20.dp)
-                          )
-                      }
-                  }
-                  Spacer(Modifier.height(10.dp))
-                  Text(
-                      song.displayTitle,
-                      modifier = Modifier.padding(horizontal = 2.dp),
-                      color = Color.White,
-                      fontSize = 13.sp,
-                      fontWeight = FontWeight.Bold,
-                      maxLines = 1,
-                      overflow = TextOverflow.Ellipsis
-                  )
-                  Spacer(Modifier.height(2.dp))
-                  Text(
-                      song.displayArtists,
-                      modifier = Modifier.padding(horizontal = 2.dp),
-                      color = Color.White.copy(alpha = 0.55f),
-                      fontSize = 11.sp,
-                      fontWeight = FontWeight.Medium,
-                      maxLines = 1,
-                      overflow = TextOverflow.Ellipsis
-                  )
-              }
-          }
-
-          @Composable
-          private fun LoadingRow() {
-              Row(
-                  modifier = Modifier.fillMaxWidth().padding(24.dp),
-                  horizontalArrangement = Arrangement.Center,
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  CircularProgressIndicator(
-                      color = AccentPink,
-                      modifier = Modifier.size(22.dp),
-                      strokeWidth = 2.5.dp
-                  )
-                  Spacer(Modifier.width(12.dp))
-                  Text(
-                      "Loading more...",
-                      color = Color.White.copy(alpha = 0.6f),
-                      fontSize = 13.sp,
-                      fontWeight = FontWeight.Medium
-                  )
-              }
-          }
-
-          @Composable
-          private fun LoadingSkeletonRow() {
-              Column(Modifier.padding(vertical = 12.dp)) {
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .padding(horizontal = 20.dp, vertical = 6.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      Box(
-                          modifier = Modifier
-                              .size(width = 4.dp, height = 22.dp)
-                              .clip(RoundedCornerShape(2.dp))
-                              .background(Color.White.copy(alpha = 0.15f))
-                      )
-                      Spacer(Modifier.width(10.dp))
-                      Box(
-                          modifier = Modifier
-                              .height(20.dp)
-                              .width(140.dp)
-                              .clip(RoundedCornerShape(6.dp))
-                              .background(Color.White.copy(alpha = 0.10f))
-                      )
-                  }
-                  Spacer(Modifier.height(6.dp))
-                  Row(
-                      modifier = Modifier.padding(horizontal = 20.dp),
-                      horizontalArrangement = Arrangement.spacedBy(14.dp)
-                  ) {
-                      repeat(3) {
-                          Column(modifier = Modifier.width(148.dp)) {
-                              Box(
-                                  modifier = Modifier
-                                      .size(148.dp)
-                                      .clip(RoundedCornerShape(20.dp))
-                                      .background(Color.White.copy(alpha = 0.07f))
-                              )
-                              Spacer(Modifier.height(10.dp))
-                              Box(
-                                  modifier = Modifier
-                                      .fillMaxWidth(0.8f)
-                                      .height(12.dp)
-                                      .clip(RoundedCornerShape(4.dp))
-                                      .background(Color.White.copy(alpha = 0.07f))
-                              )
-                              Spacer(Modifier.height(6.dp))
-                              Box(
-                                  modifier = Modifier
-                                      .fillMaxWidth(0.5f)
-                                      .height(10.dp)
-                                      .clip(RoundedCornerShape(4.dp))
-                                      .background(Color.White.copy(alpha = 0.05f))
-                              )
-                          }
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          private fun ErrorState(onRetry: () -> Unit) {
-              Column(
-                  modifier = Modifier
-                      .fillMaxWidth()
-                      .padding(horizontal = 20.dp, vertical = 40.dp)
-                      .glassSurface(radius = 24.dp, alpha = 0.08f)
-                      .padding(24.dp),
-                  horizontalAlignment = Alignment.CenterHorizontally
-              ) {
-                  Icon(
-                      Icons.Default.CloudOff,
-                      contentDescription = null,
-                      tint = Color.White.copy(alpha = 0.6f),
-                      modifier = Modifier.size(48.dp)
-                  )
-                  Spacer(Modifier.height(16.dp))
-                  Text(
-                      "Couldn't load music",
-                      color = Color.White,
-                      fontSize = 18.sp,
-                      fontWeight = FontWeight.Bold
-                  )
-                  Spacer(Modifier.height(6.dp))
-                  Text(
-                      "Check your connection and try again",
-                      color = Color.White.copy(alpha = 0.55f),
-                      fontSize = 13.sp
-                  )
-                  Spacer(Modifier.height(20.dp))
-                  Box(
-                      modifier = Modifier
-                          .clip(RoundedCornerShape(24.dp))
-                          .background(
-                              Brush.linearGradient(listOf(AccentPurple, AccentPink))
-                          )
-                          .clickable { onRetry() }
-                          .padding(horizontal = 32.dp, vertical = 12.dp)
-                  ) {
-                      Text(
-                          "Retry",
-                          color = Color.White,
-                          fontSize = 14.sp,
-                          fontWeight = FontWeight.Bold
-                      )
-                  }
-              }
-          }
-
-          // ═══════════════ MINI PLAYER ═══════════════
-          @Composable
-          fun MiniPlayer(playerState: PlayerState, modifier: Modifier = Modifier, onClick: () -> Unit) {
-              val song = playerState.currentSong ?: return
-              val progress = if (playerState.durationMs > 0)
-                  playerState.positionMs.toFloat() / playerState.durationMs else 0f
-
-              Column(
-                  modifier = modifier
-                      .fillMaxWidth()
-                      .navigationBarsPadding()
-                      .shadow(24.dp, RoundedCornerShape(20.dp))
-                      .clip(RoundedCornerShape(20.dp))
-                      .background(
-                          Brush.linearGradient(
-                              listOf(
-                                  Color.White.copy(alpha = 0.14f),
-                                  Color.White.copy(alpha = 0.06f)
-                              )
-                          )
-                      )
-                      .border(
-                          1.dp,
-                          Brush.linearGradient(
-                              listOf(
-                                  Color.White.copy(alpha = 0.30f),
-                                  Color.White.copy(alpha = 0.08f)
-                              )
-                          ),
-                          RoundedCornerShape(20.dp)
-                      )
-                      .clickable { onClick() }
-              ) {
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .padding(horizontal = 12.dp, vertical = 10.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      Box(
-                          modifier = Modifier
-                              .size(46.dp)
-                              .clip(RoundedCornerShape(12.dp))
-                              .background(Color.White.copy(alpha = 0.08f))
-                      ) {
-                          if (song.imageUrl.isNotEmpty()) {
-                              AsyncImage(
-                                  model = song.imageUrl,
-                                  contentDescription = null,
-                                  modifier = Modifier.fillMaxSize(),
-                                  contentScale = ContentScale.Crop
-                              )
-                          } else {
-                              Box(
-                                  modifier = Modifier
-                                      .fillMaxSize()
-                                      .background(
-                                          Brush.linearGradient(listOf(AccentPurple, AccentPink))
-                                      )
-                              )
-                          }
-                      }
-                      Spacer(Modifier.width(12.dp))
-                      Column(Modifier.weight(1f)) {
-                          Text(
-                              song.displayTitle,
-                              color = Color.White,
-                              fontSize = 14.sp,
-                              fontWeight = FontWeight.Bold,
-                              maxLines = 1,
-                              overflow = TextOverflow.Ellipsis
-                          )
-                          Spacer(Modifier.height(2.dp))
-                          Text(
-                              song.displayArtists,
-                              color = Color.White.copy(alpha = 0.60f),
-                              fontSize = 12.sp,
-                              fontWeight = FontWeight.Medium,
-                              maxLines = 1,
-                              overflow = TextOverflow.Ellipsis
-                          )
-                      }
-                      Spacer(Modifier.width(10.dp))
-                      Box(
-                          modifier = Modifier
-                              .size(44.dp)
-                              .clip(CircleShape)
-                              .background(Color.White)
-                              .clickable { PlayerManager.togglePlayPause() },
-                          contentAlignment = Alignment.Center
-                      ) {
-                          if (playerState.isBuffering) {
-                              CircularProgressIndicator(
-                                  color = Color.Black,
-                                  modifier = Modifier.size(20.dp),
-                                  strokeWidth = 2.5.dp
-                              )
-                          } else {
-                              Icon(
-                                  if (playerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                  contentDescription = null,
-                                  tint = Color.Black,
-                                  modifier = Modifier.size(24.dp)
-                              )
-                          }
-                      }
-                  }
-                  // Progress bar
-                  Box(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .height(3.dp)
-                          .background(Color.White.copy(alpha = 0.08f))
-                  ) {
-                      Box(
-                          modifier = Modifier
-                              .fillMaxHeight()
-                              .fillMaxWidth(progress.coerceIn(0f, 1f))
-                              .background(
-                                  Brush.horizontalGradient(
-                                      listOf(AccentPurple, AccentPink, AccentOrange)
-                                  )
-                              )
-                      )
-                  }
-              }
-          }
-
-          // ═══════════════ FULL PLAYER ═══════════════
-          @Composable
-          fun PlayerScreen(playerState: PlayerState, onClose: () -> Unit) {
-              val song = playerState.currentSong ?: return
-              val progress = if (playerState.durationMs > 0)
-                  playerState.positionMs.toFloat() / playerState.durationMs else 0f
-
-              Box(Modifier.fillMaxSize().background(BgDeep)) {
-                  // Blurred album art background
-                  if (song.imageUrl.isNotEmpty()) {
-                      AsyncImage(
-                          model = song.imageUrl,
-                          contentDescription = null,
-                          modifier = Modifier.fillMaxSize(),
-                          contentScale = ContentScale.Crop,
-                          alpha = 0.22f
-                      )
-                  }
-                  // Gradient overlay
-                  Box(
-                      modifier = Modifier
-                          .fillMaxSize()
-                          .background(
-                              Brush.verticalGradient(
-                                  listOf(
-                                      BgDeep.copy(alpha = 0.55f),
-                                      BgDeep.copy(alpha = 0.85f),
-                                      BgDeep
-                                  )
-                              )
-                          )
-                  )
-                  // Ambient blobs
-                  PremiumBackground()
-
-                  Column(
-                      Modifier
-                          .fillMaxSize()
-                          .windowInsetsPadding(WindowInsets.statusBars)
-                          .navigationBarsPadding()
-                  ) {
-                      // Top bar
-                      Row(
-                          modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-                          verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          Box(
-                              modifier = Modifier
-                                  .size(42.dp)
-                                  .clip(CircleShape)
-                                  .background(Color.White.copy(alpha = 0.10f))
-                                  .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape)
-                                  .clickable { onClose() },
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White, modifier = Modifier.size(26.dp))
-                          }
-                          Spacer(Modifier.weight(1f))
-                          Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                              Text(
-                                  "NOW PLAYING",
-                                  color = Color.White.copy(alpha = 0.55f),
-                                  fontSize = 10.sp,
-                                  fontWeight = FontWeight.Bold,
-                                  letterSpacing = 1.5.sp
-                              )
-                              Text(
-                                  "From your library",
-                                  color = Color.White.copy(alpha = 0.85f),
-                                  fontSize = 12.sp,
-                                  fontWeight = FontWeight.Medium
-                              )
-                          }
-                          Spacer(Modifier.weight(1f))
-                          Box(
-                              modifier = Modifier
-                                  .size(42.dp)
-                                  .clip(CircleShape)
-                                  .background(Color.White.copy(alpha = 0.10f))
-                                  .border(1.dp, Color.White.copy(alpha = 0.15f), CircleShape),
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(Icons.Default.MoreVert, null, tint = Color.White, modifier = Modifier.size(22.dp))
-                          }
-                      }
-
-                      Spacer(Modifier.height(20.dp))
-
-                      // Album art with glass frame
-                      Box(
-                          modifier = Modifier
-                              .padding(horizontal = 28.dp)
-                              .fillMaxWidth()
-                              .aspectRatio(1f)
-                              .shadow(40.dp, RoundedCornerShape(28.dp))
-                              .clip(RoundedCornerShape(28.dp))
-                              .background(Color.White.copy(alpha = 0.06f))
-                              .border(
-                                  2.dp,
-                                  Brush.linearGradient(
-                                      listOf(
-                                          Color.White.copy(alpha = 0.35f),
-                                          Color.White.copy(alpha = 0.08f)
-                                      )
-                                  ),
-                                  RoundedCornerShape(28.dp)
-                              )
-                      ) {
-                          if (song.imageUrl.isNotEmpty()) {
-                              AsyncImage(
-                                  model = song.imageUrl,
-                                  contentDescription = null,
-                                  modifier = Modifier.fillMaxSize(),
-                                  contentScale = ContentScale.Crop
-                              )
-                          } else {
-                              Box(
-                                  modifier = Modifier
-                                      .fillMaxSize()
-                                      .background(
-                                          Brush.linearGradient(
-                                              listOf(AccentPurple, AccentPink, AccentOrange)
-                                          )
-                                      ),
-                                  contentAlignment = Alignment.Center
-                              ) {
-                                  Icon(
-                                      Icons.Default.MusicNote, null,
-                                      tint = Color.White.copy(alpha = 0.8f),
-                                      modifier = Modifier.size(80.dp)
-                                  )
-                              }
-                          }
-                      }
-
-                      Spacer(Modifier.height(30.dp))
-
-                      // Song info
-                      Column(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .padding(horizontal = 28.dp)
-                      ) {
-                          Text(
-                              song.displayTitle,
-                              color = Color.White,
-                              fontSize = 26.sp,
-                              fontWeight = FontWeight.Black,
-                              letterSpacing = (-0.5).sp,
-                              maxLines = 1,
-                              overflow = TextOverflow.Ellipsis
-                          )
-                          Spacer(Modifier.height(4.dp))
-                          Text(
-                              song.displayArtists,
-                              color = Color.White.copy(alpha = 0.65f),
-                              fontSize = 15.sp,
-                              fontWeight = FontWeight.Medium,
-                              maxLines = 1,
-                              overflow = TextOverflow.Ellipsis
-                          )
-                      }
-
-                      Spacer(Modifier.weight(1f))
-
-                      // Progress bar
-                      Column(modifier = Modifier.padding(horizontal = 28.dp)) {
-                          Slider(
-                              value = progress.coerceIn(0f, 1f),
-                              onValueChange = { v ->
-                                  try { PlayerManager.seekTo((v * playerState.durationMs).toLong()) } catch (_: Exception) {}
-                              },
-                              colors = SliderDefaults.colors(
-                                  thumbColor = Color.White,
-                                  activeTrackColor = AccentPink,
-                                  inactiveTrackColor = Color.White.copy(alpha = 0.20f)
-                              )
-                          )
-                          Row(
-                              modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                              horizontalArrangement = Arrangement.SpaceBetween
-                          ) {
-                              Text(
-                                  formatMs(playerState.positionMs),
-                                  color = Color.White.copy(alpha = 0.60f),
-                                  fontSize = 11.sp,
-                                  fontWeight = FontWeight.Medium
-                              )
-                              Text(
-                                  formatMs(playerState.durationMs),
-                                  color = Color.White.copy(alpha = 0.60f),
-                                  fontSize = 11.sp,
-                                  fontWeight = FontWeight.Medium
-                              )
-                          }
-                      }
-
-                      Spacer(Modifier.height(16.dp))
-
-                      // Controls
-                      Row(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .padding(horizontal = 32.dp),
-                          horizontalArrangement = Arrangement.SpaceBetween,
-                          verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          Box(
-                              modifier = Modifier
-                                  .size(46.dp)
-                                  .clip(CircleShape)
-                                  .clickable { PlayerManager.setShuffle(!playerState.shuffle) },
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(
-                                  Icons.Default.Shuffle, null,
-                                  tint = if (playerState.shuffle) AccentPink else Color.White.copy(alpha = 0.75f),
-                                  modifier = Modifier.size(24.dp)
-                              )
-                          }
-                          Box(
-                              modifier = Modifier
-                                  .size(56.dp)
-                                  .clip(CircleShape)
-                                  .clickable { PlayerManager.previous() },
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(Icons.Default.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(38.dp))
-                          }
-
-                          // Main play button — gradient with glow
-                          Box(
-                              modifier = Modifier
-                                  .size(84.dp)
-                                  .shadow(28.dp, CircleShape)
-                                  .clip(CircleShape)
-                                  .background(
-                                      Brush.linearGradient(
-                                          listOf(AccentPurple, AccentPink, AccentOrange)
-                                      )
-                                  )
-                                  .clickable { PlayerManager.togglePlayPause() },
-                              contentAlignment = Alignment.Center
-                          ) {
-                              if (playerState.isBuffering) {
-                                  CircularProgressIndicator(
-                                      color = Color.White,
-                                      modifier = Modifier.size(32.dp),
-                                      strokeWidth = 3.dp
-                                  )
-                              } else {
-                                  Icon(
-                                      if (playerState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                      contentDescription = null,
-                                      tint = Color.White,
-                                      modifier = Modifier.size(42.dp)
-                                  )
-                              }
-                          }
-
-                          Box(
-                              modifier = Modifier
-                                  .size(56.dp)
-                                  .clip(CircleShape)
-                                  .clickable { PlayerManager.next() },
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(Icons.Default.SkipNext, null, tint = Color.White, modifier = Modifier.size(38.dp))
-                          }
-                          Box(
-                              modifier = Modifier
-                                  .size(46.dp)
-                                  .clip(CircleShape)
-                                  .clickable { PlayerManager.cycleRepeat() },
-                              contentAlignment = Alignment.Center
-                          ) {
-                              Icon(
-                                  Icons.Default.Repeat, null,
-                                  tint = if (playerState.repeatMode != androidx.media3.common.Player.REPEAT_MODE_OFF) AccentPink else Color.White.copy(alpha = 0.75f),
-                                  modifier = Modifier.size(24.dp)
-                              )
-                          }
-                      }
-
-                      Spacer(Modifier.height(48.dp))
-                  }
-              }
-          }
-
-          private fun formatMs(ms: Long): String {
-              if (ms <= 0) return "0:00"
-              val totalSec = ms / 1000
-              val m = totalSec / 60
-              val s = totalSec % 60
-              return "$m:${if (s < 10) "0$s" else s}"
-          }
-          EOF
-
-      - name: Generate launcher icons
-        run: |
-          set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq imagemagick
-          for pair in "48:mdpi" "72:hdpi" "96:xhdpi" "144:xxhdpi" "192:xxxhdpi"; do
-            size="${pair%%:*}"; density="${pair##*:}"
-            convert -size "${size}x${size}" \
-              gradient:'#8B5CF6-#EC4899' \
-              -gravity center -fill white -pointsize $((size/2)) -font DejaVu-Sans-Bold \
-              -annotate +0+0 "M" \
-              "native/app/src/main/res/mipmap-${density}/ic_launcher.png"
-          done
-
-      - name: Generate signing keystore
-        run: |
-          cd native
-          keytool -genkeypair -v -keystore release.keystore \
-            -alias music8481 -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass music8481 -keypass music8481 \
-            -dname "CN=Music8481, O=Music, C=IN" 2>&1 | tail -5
-
-      - name: Build Release APK
-        run: |
-          cd native
-          gradle assembleRelease --no-daemon --stacktrace
-
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Music8481-Native-APK-v2-LiquidGlass
-          path: native/app/build/outputs/apk/release/*.apk
-          retention-days: 30
+          name: release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
