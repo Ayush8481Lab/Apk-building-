@@ -3,7 +3,7 @@ name: Build YouTube Muxer APK
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # Allows you to run it manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   build:
@@ -58,10 +58,11 @@ jobs:
         run: |
           cat > lib/main.dart << 'EOF'
           import 'package:flutter/material.dart';
-          import 'package:flutter_erfan_youtube_muxer_2025/youtube_video_downloader.dart';
+          import 'package:flutter_erfan_youtube_muxer_2025/flutter_erfan_youtube_muxer_2025.dart';
           import 'package:permission_handler/permission_handler.dart';
 
           void main() {
+            WidgetsFlutterBinding.ensureInitialized();
             runApp(const MyApp());
           }
 
@@ -153,7 +154,6 @@ jobs:
                     _progress = progress.progress;
                     _status = '${progress.status} (${(progress.progress * 100).toStringAsFixed(1)}%)';
                   });
-                  if (progress.status == DownloadStatus.completed) break;
                 }
                 setState(() {
                   _isLoading = false;
