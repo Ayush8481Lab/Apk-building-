@@ -33,24 +33,14 @@ jobs:
       - name: Initialize Capacitor Config & Offline UI
         run: |
           mkdir -p www
-          cat <<EOF > www/index.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-            <title>Loading...</title>
-            <style>body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; background: #000; }</style>
-          </head>
-          <body></body>
-          </html>
-          EOF
+          echo "<html><body>Loading Music8481...</body></html>" > www/index.html
           
+          # Beautiful Offline UI Fallback
           cat <<EOF > www/error.html
           <!DOCTYPE html>
           <html lang="en">
           <head>
-            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Offline</title>
             <style>
               body { background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
@@ -59,12 +49,13 @@ jobs:
               h1 { font-size: 24px; margin: 0 0 10px; }
               p { color: #a7a7a7; font-size: 14px; text-align: center; max-width: 80%; }
               button { margin-top: 20px; background: #1DB954; color: #000; border: none; padding: 12px 24px; border-radius: 20px; font-weight: bold; cursor: pointer; transition: transform 0.2s; }
+              button:active { transform: scale(0.95); }
             </style>
           </head>
           <body>
             <div class="spinner"></div>
             <h1>You're Offline</h1>
-            <p>Please check your internet connection.</p>
+            <p>Please check your internet connection to stream music.</p>
             <button onclick="window.location.href='https://ayushgaana.vercel.app'">Retry Connection</button>
           </body>
           </html>
@@ -72,6 +63,7 @@ jobs:
           
           npx cap init Music8481 com.music8481.app --web-dir www
 
+          # FIX: Removed transparent overlay so Portrait mode stays perfectly within safe areas!
           rm capacitor.config.ts || true
           cat <<EOF > capacitor.config.json
           {
@@ -99,279 +91,43 @@ jobs:
       - name: Add Native Android Platform
         run: npx cap add android
 
-      - name: Inject FFmpegKit & Permissions
+      # DEEP FIX 1: Lock App to Portrait Globally, Enable PiP, Inject Permissions
+      - name: Inject Permissions & App Locks
         run: |
-          cat <<EOF >> android/app/build.gradle
-          
-          dependencies {
-              implementation("dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.8")
-          }
-          EOF
-          
           node -e "
           const fs = require('fs');
           const path = 'android/app/src/main/AndroidManifest.xml';
           let xml = fs.readFileSync(path, 'utf8');
           const perms = \`
               <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />
-              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_DATA_SYNC\" />
               <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />
               <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
               <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
               <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
-              <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" />
-              <uses-permission android:name=\"android.permission.READ_EXTERNAL_STORAGE\" />
           \`;
+          
+          const vivoTags = \`
+              <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
+              <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
+              <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
+          \`;
+
           if (!xml.includes('android.permission.WAKE_LOCK')) {
               xml = xml.replace('<application', perms + '\n    <application');
               xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\"');
               
-              const service = '<service android:name=\".DownloadService\" android:exported=\"false\" android:foregroundServiceType=\"dataSync\"/>\n</application>';
-              xml = xml.replace('</application>', service);
+              // LOCK TO PORTRAIT DEFAULT & ALLOW PIP
+              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:screenOrientation=\"portrait\"');
               
+              xml = xml.replace('</application>', vivoTags + '\n    </application>');
               fs.writeFileSync(path, xml);
           }
           "
 
-      - name: Force Android App Theme to Edge-to-Edge
+      # DEEP FIX 2: Advanced Java Engine for Seamless Landscape Video, PiP, and Background Audio
+      - name: Inject Native Premium Engine
         run: |
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/src/main/res/values/styles.xml';
-          if (fs.existsSync(path)) {
-              let xml = fs.readFileSync(path, 'utf8');
-              const edgeToEdge = \`
-                  <item name=\"android:windowLayoutInDisplayCutoutMode\">shortEdges</item>
-                  <item name=\"android:windowTranslucentStatus\">true</item>
-                  <item name=\"android:windowTranslucentNavigation\">true</item>
-                  <item name=\"android:statusBarColor\">@android:color/transparent</item>
-                  <item name=\"android:navigationBarColor\">@android:color/transparent</item>
-                  <item name=\"android:windowDrawsSystemBarBackgrounds\">false</item>
-                  <item name=\"android:windowFullscreen\">true</item>
-                  <item name=\"android:windowContentOverlay\">@null</item>
-              \`;
-              xml = xml.replace(/<\/style>/g, edgeToEdge + '\n</style>');
-              fs.writeFileSync(path, xml);
-          }
-          "
-
-      # 🔥 FIX: Adaptive FFmpeg Command & MediaStore Safety
-      - name: Create Native Download Service (FFmpeg Muxer)
-        run: |
-          cat <<'EOF' > android/app/src/main/java/com/music8481/app/DownloadService.java
-          package com.music8481.app;
-
-          import android.app.Notification;
-          import android.app.NotificationChannel;
-          import android.app.NotificationManager;
-          import android.app.PendingIntent;
-          import android.app.Service;
-          import android.content.ContentValues;
-          import android.content.Intent;
-          import android.net.Uri;
-          import android.os.Build;
-          import android.os.Environment;
-          import android.os.IBinder;
-          import android.provider.MediaStore;
-          import androidx.core.app.NotificationCompat;
-
-          import com.arthenica.ffmpegkit.FFmpegKit;
-          import com.arthenica.ffmpegkit.FFmpegSession;
-          import com.arthenica.ffmpegkit.FFprobeKit;
-          import com.arthenica.ffmpegkit.MediaInformationSession;
-          import com.arthenica.ffmpegkit.ReturnCode; 
-
-          import java.io.File;
-          import java.io.FileInputStream;
-          import java.io.FileOutputStream;
-          import java.io.InputStream;
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.URL;
-          import java.util.concurrent.ExecutorService;
-          import java.util.concurrent.Executors;
-
-          public class DownloadService extends Service {
-              private static final String CHANNEL_ID = "DOWNLOAD_CHANNEL";
-              private NotificationManager notificationManager;
-              private NotificationCompat.Builder notificationBuilder;
-              private FFmpegSession currentSession = null;
-              private ExecutorService executor = Executors.newSingleThreadExecutor();
-
-              @Override
-              public void onCreate() {
-                  super.onCreate();
-                  notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Music Downloads", NotificationManager.IMPORTANCE_LOW);
-                      notificationManager.createNotificationChannel(channel);
-                  }
-              }
-
-              @Override
-              public int onStartCommand(Intent intent, int flags, int startId) {
-                  if (intent != null && "CANCEL_DOWNLOAD".equals(intent.getAction())) {
-                      if (currentSession != null) {
-                          FFmpegKit.cancel(currentSession.getSessionId());
-                      }
-                      stopForeground(true);
-                      stopSelf();
-                      return START_NOT_STICKY;
-                  }
-
-                  String downloadUrl = intent.getStringExtra("url");
-                  if (downloadUrl != null) {
-                      Uri parsedUri = Uri.parse(downloadUrl);
-                      String m3u8 = parsedUri.getQueryParameter("url");
-                      String title = parsedUri.getQueryParameter("title");
-                      if (title == null) title = "Unknown_Song";
-                      String artist = parsedUri.getQueryParameter("artist");
-                      if (artist == null) artist = "Unknown Artist";
-                      String album = parsedUri.getQueryParameter("album");
-                      if (album == null) album = "Unknown Album";
-                      String imageUrl = parsedUri.getQueryParameter("imageUrl");
-
-                      startNativeDownload(m3u8, title, artist, album, imageUrl, startId);
-                  }
-                  return START_NOT_STICKY;
-              }
-
-              private void startNativeDownload(String m3u8, String title, String artist, String album, String imageUrl, int notificationId) {
-                  Intent cancelIntent = new Intent(this, DownloadService.class);
-                  cancelIntent.setAction("CANCEL_DOWNLOAD");
-                  PendingIntent cancelPendingIntent = PendingIntent.getService(this, 0, cancelIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-
-                  notificationBuilder = new NotificationCompat.Builder(this, CHANNEL_ID)
-                          .setContentTitle("Downloading: " + title)
-                          .setContentText("Initializing engine...")
-                          .setSmallIcon(android.R.drawable.stat_sys_download)
-                          .setOngoing(true)
-                          .setOnlyAlertOnce(true)
-                          .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelPendingIntent);
-
-                  startForeground(notificationId, notificationBuilder.build());
-
-                  executor.execute(() -> {
-                      try {
-                          File coverFile = new File(getCacheDir(), "cover.jpg");
-                          boolean downloadedCover = false;
-                          
-                          if (imageUrl != null && !imageUrl.isEmpty()) {
-                              try {
-                                  URL url = new URL(imageUrl);
-                                  HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                                  conn.setConnectTimeout(5000);
-                                  conn.connect();
-                                  if (conn.getResponseCode() == 200) {
-                                      InputStream in = conn.getInputStream();
-                                      FileOutputStream out = new FileOutputStream(coverFile);
-                                      byte[] buffer = new byte[4096];
-                                      int bytesRead;
-                                      while ((bytesRead = in.read(buffer)) != -1) { out.write(buffer, 0, bytesRead); }
-                                      out.close(); in.close();
-                                      downloadedCover = true;
-                                  }
-                              } catch (Exception ignore) {}
-                          }
-
-                          notificationBuilder.setContentText("Probing media stream...");
-                          notificationManager.notify(notificationId, notificationBuilder.build());
-                          
-                          MediaInformationSession mediaInfo = FFprobeKit.getMediaInformation(m3u8);
-                          long totalDurationMs = 0;
-                          if (mediaInfo.getMediaInformation() != null && mediaInfo.getMediaInformation().getDuration() != null) {
-                              totalDurationMs = (long) (Double.parseDouble(mediaInfo.getMediaInformation().getDuration()) * 1000);
-                          }
-                          final long finalDuration = totalDurationMs;
-
-                          File tempMp3 = new File(getCacheDir(), title.replaceAll("[\\\\/:*?\"<>|]", "") + ".mp3");
-                          
-                          // DYNAMIC CMD: Only map image stream if cover download actually succeeded. Fixes instant crash.
-                          String cmd;
-                          if (downloadedCover && coverFile.exists()) {
-                              cmd = String.format("-y -i \"%s\" -i \"%s\" -map 0:a -map 1:v -c:a libmp3lame -b:a 320k -c:v copy -id3v2_version 3 -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"",
-                                      m3u8, coverFile.getAbsolutePath(), title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
-                          } else {
-                              cmd = String.format("-y -i \"%s\" -c:a libmp3lame -b:a 320k -id3v2_version 3 -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\" \"%s\"",
-                                      m3u8, title.replace("\"", "'"), artist.replace("\"", "'"), album.replace("\"", "'"), tempMp3.getAbsolutePath());
-                          }
-
-                          currentSession = FFmpegKit.executeAsync(cmd, session -> {
-                              if (ReturnCode.isSuccess(session.getReturnCode())) {
-                                  try {
-                                      String safeName = tempMp3.getName();
-                                      Uri targetUri = null;
-                                      
-                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                          ContentValues values = new ContentValues();
-                                          values.put(MediaStore.Audio.Media.DISPLAY_NAME, safeName);
-                                          values.put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg");
-                                          values.put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/Music8481/Music");
-                                          values.put(MediaStore.Audio.Media.IS_PENDING, 1);
-                                          targetUri = getContentResolver().insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values);
-                                      } else {
-                                          File musicDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "Music8481/Music");
-                                          if (!musicDir.exists()) musicDir.mkdirs();
-                                          File dest = new File(musicDir, safeName);
-                                          targetUri = Uri.fromFile(dest);
-                                      }
-
-                                      if (targetUri != null) {
-                                          OutputStream os = getContentResolver().openOutputStream(targetUri);
-                                          FileInputStream fis = new FileInputStream(tempMp3);
-                                          byte[] buf = new byte[8192];
-                                          int len;
-                                          while ((len = fis.read(buf)) > 0) os.write(buf, 0, len);
-                                          os.close(); fis.close();
-                                          
-                                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                              ContentValues values = new ContentValues();
-                                              values.put(MediaStore.Audio.Media.IS_PENDING, 0);
-                                              getContentResolver().update(targetUri, values, null, null);
-                                          }
-                                      }
-                                      
-                                      tempMp3.delete();
-                                      if (coverFile.exists()) coverFile.delete();
-
-                                      notificationBuilder.setContentText("Download complete")
-                                              .setProgress(0, 0, false)
-                                              .setOngoing(false)
-                                              .mActions.clear();
-                                      notificationBuilder.setSmallIcon(android.R.drawable.stat_sys_download_done);
-                                      notificationManager.notify(notificationId, notificationBuilder.build());
-
-                                  } catch (Exception e) { e.printStackTrace(); }
-                              } else if (ReturnCode.isCancel(session.getReturnCode())) {
-                                  notificationManager.cancel(notificationId);
-                              } else {
-                                  notificationBuilder.setContentText("Download Failed").setProgress(0,0,false).setOngoing(false).mActions.clear();
-                                  notificationManager.notify(notificationId, notificationBuilder.build());
-                              }
-                              stopForeground(false);
-                          }, log -> {}, statistics -> {
-                              if (finalDuration > 0) {
-                                  int percentage = (int) ((statistics.getTime() * 100) / finalDuration);
-                                  notificationBuilder.setProgress(100, percentage, false)
-                                          .setContentText("Downloading... " + percentage + "%");
-                              } else {
-                                  notificationBuilder.setProgress(0, 0, true)
-                                          .setContentText("Downloading... " + (statistics.getTime() / 1000) + "s");
-                              }
-                              notificationManager.notify(notificationId, notificationBuilder.build());
-                          });
-                      } catch (Exception e) { e.printStackTrace(); stopForeground(true); }
-                  });
-              }
-              @Override public IBinder onBind(Intent intent) { return null; }
-          }
-          EOF
-
-      # 🔥 FIX: Delayed Initial Permissions + On-Click Re-prompt
-      - name: Inject Native Interceptor & Premium Engine
-        run: |
-          cat <<'EOF' > android/app/src/main/java/com/music8481/app/MainActivity.java
+          cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
           package com.music8481.app;
 
           import android.graphics.Color;
@@ -379,12 +135,8 @@ jobs:
           import android.os.Bundle;
           import android.Manifest;
           import android.content.pm.PackageManager;
-          import android.content.Intent;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
-          import androidx.core.view.WindowCompat;
-          import androidx.core.view.WindowInsetsCompat;
-          import androidx.core.view.WindowInsetsControllerCompat;
           import com.getcapacitor.BridgeActivity;
           
           import android.webkit.WebView;
@@ -392,7 +144,6 @@ jobs:
           import android.webkit.WebChromeClient;
           import android.webkit.JavascriptInterface;
           import android.view.View;
-          import android.view.ViewGroup;
           import android.widget.FrameLayout;
           import android.content.Context;
           import android.os.PowerManager;
@@ -402,8 +153,6 @@ jobs:
           import android.content.pm.ActivityInfo;
           import android.util.Rational;
           import android.content.res.Configuration;
-          import android.os.Handler;
-          import android.os.Looper;
 
           public class MainActivity extends BridgeActivity {
               private PowerManager.WakeLock wakeLock;
@@ -426,22 +175,13 @@ jobs:
                   public void setVideoMode(boolean isVideo) {
                       if (isVideoModeActive != isVideo) {
                           isVideoModeActive = isVideo;
-                          runOnUiThread(() -> updatePiPParams(isVideoFullscreen || isVideoModeActive));
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  updatePiPParams(isVideoFullscreen || isVideoModeActive);
+                              }
+                          });
                       }
-                  }
-
-                  @JavascriptInterface
-                  public void startNativeDownload(String url) {
-                      runOnUiThread(() -> {
-                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                              ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
-                          } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                              ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 101);
-                          }
-                          Intent intent = new Intent(MainActivity.this, DownloadService.class);
-                          intent.putExtra("url", url);
-                          ContextCompat.startForegroundService(MainActivity.this, intent);
-                      });
                   }
               }
 
@@ -449,18 +189,23 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+                  // ALWAYS ALLOW DRAWING UNDER PUNCH HOLE (Required for Landscape Fullscreen)
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                      WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
-                      layoutParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                      getWindow().setAttributes(layoutParams);
+                      WindowManager.LayoutParams attributes = getWindow().getAttributes();
+                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      getWindow().setAttributes(attributes);
                   }
-                  WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
-                  getWindow().getDecorView().setOnApplyWindowInsetsListener((v, insets) -> insets);
+                  
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
+                      }
+                  }
 
                   AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
                   if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+                  // Silent Background Execution Lock (No Battery Popups Needed)
                   PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
                   wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
                   wakeLock.acquire();
@@ -469,20 +214,6 @@ jobs:
               @Override
               public void onStart() {
                   super.onStart();
-                  
-                  // 🔥 Delay Permissions strictly so they aren't hidden by the Splash Screen
-                  new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                          if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                              ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
-                          }
-                      } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                          if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                              ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 101);
-                          }
-                      }
-                  }, 2500);
-
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       final WebView webView = this.bridge.getWebView();
                       WebSettings settings = webView.getSettings();
@@ -490,66 +221,53 @@ jobs:
                       settings.setMediaPlaybackRequiresUserGesture(false); 
                       webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
                       settings.setDomStorageEnabled(true);
-                      webView.setFitsSystemWindows(false);
-                      webView.setPadding(0,0,0,0);
-                      
-                      if (webView.getParent() instanceof ViewGroup) {
-                          ((ViewGroup) webView.getParent()).setFitsSystemWindows(false);
-                          ((ViewGroup) webView.getParent()).setClipToPadding(false);
-                      }
 
                       webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
                       
-                      webView.postDelayed(() -> {
-                          webView.evaluateJavascript(
-                              "setInterval(function() {" +
-                              "  var meta = document.querySelector('meta[name=\"viewport\"]');" +
-                              "  var content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';" +
-                              "  if (meta && meta.content !== content) meta.content = content;" +
-                              "  else if (!meta) { var m = document.createElement('meta'); m.name = 'viewport'; m.content = content; document.head.appendChild(m); }" +
-                              "  document.documentElement.style.padding = '0'; document.body.style.padding = '0';" +
-                              "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                              "  if (window.AndroidApp) window.AndroidApp.setVideoMode(iframe !== null);" +
-                              "}, 500);" +
-                              
-                              "/* VERCEL INTERCEPTOR */" +
-                              "document.addEventListener('click', function(e) {" +
-                              "  var a = e.target.closest('a');" +
-                              "  if (a && a.href && a.href.includes('ayushdownload.vercel.app/api/dl')) {" +
-                              "      e.preventDefault();" +
-                              "      if (window.AndroidApp) window.AndroidApp.startNativeDownload(a.href);" +
-                              "  }" +
-                              "}, true);" +
-                              "var originalOpen = window.open;" +
-                              "window.open = function(url) {" +
-                              "  if (url && typeof url === 'string' && url.includes('ayushdownload.vercel.app/api/dl')) {" +
-                              "      if (window.AndroidApp) window.AndroidApp.startNativeDownload(url);" +
-                              "      return null;" +
-                              "  }" +
-                              "  return originalOpen.apply(this, arguments);" +
-                              "};", null);
+                      // Poll for specific iframe video source to trigger PiP capability
+                      webView.postDelayed(new Runnable() {
+                          @Override
+                          public void run() {
+                              webView.evaluateJavascript(
+                                  "setInterval(function() {" +
+                                  "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                                  "  var hasVideo = iframe !== null;" +
+                                  "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
+                                  "}, 1000);", null);
+                          }
                       }, 2000);
 
                       final WebChromeClient originalClient = webView.getWebChromeClient();
                       webView.setWebChromeClient(new WebChromeClient() {
                           private View mCustomView;
                           private WebChromeClient.CustomViewCallback mCustomViewCallback;
+                          private int mOriginalSystemUiVisibility;
 
                           @Override
                           public void onShowCustomView(View view, CustomViewCallback callback) {
                               if (mCustomView != null) { onHideCustomView(); return; }
                               mCustomView = view;
                               isVideoFullscreen = true;
+                              mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
                               mCustomViewCallback = callback;
                               
-                              runOnUiThread(() -> updatePiPParams(true));
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() { updatePiPParams(true); }
+                              });
+
+                              // 1. FORCE LANDSCAPE
                               setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
 
-                              WindowInsetsControllerCompat windowInsetsController = new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
-                              windowInsetsController.hide(WindowInsetsCompat.Type.systemBars());
-                              windowInsetsController.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                              // 2. FORCE IMMERSIVE FULLSCREEN (Hides Nav/Status Bar, overlaps punch hole)
+                              getWindow().getDecorView().setSystemUiVisibility(
+                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
+                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
 
-                              mCustomView.setFitsSystemWindows(false);
                               ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
                           }
 
@@ -559,48 +277,54 @@ jobs:
                               mCustomView = null;
                               isVideoFullscreen = false;
                               
-                              runOnUiThread(() -> updatePiPParams(isVideoModeActive));
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() { updatePiPParams(isVideoModeActive); }
+                              });
+
+                              // 1. REVERT TO PORTRAIT
+                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
                               
-                              WindowInsetsControllerCompat windowInsetsController = new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
-                              windowInsetsController.show(WindowInsetsCompat.Type.systemBars());
-                              
+                              // 2. RESTORE NORMAL SAFE-AREA UI
+                              getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
                               if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
                           }
+                          @Override
+                          public void onPermissionRequest(android.webkit.PermissionRequest request) { if (originalClient != null) originalClient.onPermissionRequest(request); }
+                          @Override
+                          public boolean onShowFileChooser(WebView webView, android.webkit.ValueCallback<android.net.Uri[]> filePathCallback, FileChooserParams fileChooserParams) { return originalClient != null && originalClient.onShowFileChooser(webView, filePathCallback, fileChooserParams); }
+                          @Override
+                          public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) { return originalClient != null && originalClient.onConsoleMessage(consoleMessage); }
                       });
                   }
               }
 
+              // PIP STRETCH HACK: Targets ayushcom.vercel.app and fills the small PiP box seamlessly
               @Override
               public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
                   super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
                   if (this.bridge != null && this.bridge.getWebView() != null) {
                       WebView webView = this.bridge.getWebView();
                       if (isInPictureInPictureMode) {
-                          String js = 
-                              "var style = document.getElementById('pip-style-fix');" +
-                              "if (!style) {" +
-                              "  style = document.createElement('style'); style.id = 'pip-style-fix';" +
-                              "  style.innerHTML = 'body.pip-active { background: #000 !important; overflow: hidden !important; } body.pip-active .pip-ancestor { position: static !important; transform: none !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; background: transparent !important; width: 100% !important; height: 100% !important; } body.pip-active .pip-target-iframe { position: fixed !important; top: 0 !important; left: 0 !important; width: 100% !important; height: 100% !important; z-index: 2147483647 !important; background: #000 !important; display: block !important; object-fit: cover !important; } body.pip-active .pip-hide-sibling { display: none !important; opacity: 0 !important; pointer-events: none !important; } ';" +
-                              "  document.head.appendChild(style);" +
-                              "}" +
-                              "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]') || document.querySelector('iframe');" +
-                              "if (iframe) {" +
-                              "  iframe.classList.add('pip-target-iframe');" +
-                              "  var el = iframe;" +
-                              "  while (el && el !== document.body && el !== document.documentElement) {" +
-                              "    if (el !== iframe) el.classList.add('pip-ancestor');" +
-                              "    if (el.parentElement) {" +
-                              "      var siblings = el.parentElement.children;" +
-                              "      for (var i = 0; i < siblings.length; i++) { var sib = siblings[i]; if (sib !== el && !['SCRIPT','STYLE','LINK'].includes(sib.tagName)) sib.classList.add('pip-hide-sibling'); }" +
-                              "    }" +
-                              "    el = el.parentElement;" +
-                              "  }" +
-                              "  document.body.classList.add('pip-active');" +
-                              "}";
-                          webView.evaluateJavascript(js, null);
+                          webView.evaluateJavascript(
+                              "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
+                              "if(iframe) {" +
+                              "  iframe.style.position = 'fixed';" +
+                              "  iframe.style.top = '0'; iframe.style.left = '0';" +
+                              "  iframe.style.width = '100vw'; iframe.style.height = '100vh';" +
+                              "  iframe.style.zIndex = '999999';" +
+                              "  iframe.setAttribute('data-pip', 'true');" +
+                              "}", null);
                       } else {
-                          webView.evaluateJavascript("document.body.classList.remove('pip-active'); var elements = document.querySelectorAll('.pip-target-iframe, .pip-ancestor, .pip-hide-sibling'); for (var i = 0; i < elements.length; i++) elements[i].classList.remove('pip-target-iframe', 'pip-ancestor', 'pip-hide-sibling');", null);
+                          webView.evaluateJavascript(
+                              "var iframe = document.querySelector('iframe[data-pip=\"true\"]');" +
+                              "if(iframe) {" +
+                              "  iframe.style.position = '';" +
+                              "  iframe.style.top = ''; iframe.style.left = '';" +
+                              "  iframe.style.width = '100%'; iframe.style.height = '100%';" +
+                              "  iframe.style.zIndex = '';" +
+                              "  iframe.removeAttribute('data-pip');" +
+                              "}", null);
                       }
                   }
               }
@@ -608,15 +332,28 @@ jobs:
               @Override
               public void onUserLeaveHint() {
                   super.onUserLeaveHint();
-                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) { super.onBackPressed(); }
+                  } else {
+                      super.onBackPressed();
                   }
               }
 
               @Override
               public void onPause() {
                   super.onPause();
-                  if (this.bridge != null && this.bridge.getWebView() != null) { this.bridge.getWebView().resumeTimers(); this.bridge.getWebView().onResume(); }
+                  // Keeps audio and video running silently!
+                  if (this.bridge != null && this.bridge.getWebView() != null) {
+                      this.bridge.getWebView().resumeTimers();
+                      this.bridge.getWebView().onResume(); 
+                  }
               }
 
               @Override
