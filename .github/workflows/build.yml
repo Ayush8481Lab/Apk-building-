@@ -1,39 +1,28 @@
 name: Build Web APK
 
 # =====================================================================
-#  WebView APK builder + LOCAL STREAM PROXY
+#  WebView APK  +  LOCAL VIDEO-ONLY PROXY (127.0.0.1:8481)
 #
-#  - Opens BASE_URL + INITIAL_PATH inside the app (desktop mode)
-#  - Runs a LOCAL HTTP server on 127.0.0.1:8481 inside the app:
-#        GET /Strem?path=/example/new&token=new
-#      -> proxies to  STREAM_BASE + /example/new?token=new
-#      Returns the real bytes (MPD / DASH / HLS / MP4 / WebM / TS /
-#      m4s / key files etc.) with full CORS + Range support.
-#  - So the web app loaded from BASE_URL can do:
-#        <video src="http://localhost:8481/Strem?path=/example/new&token=new">
-#        fetch("http://localhost:8481/Strem?path=/example/new&token=new")
-#      and playback works exactly as if served from the real domain.
-#  - Full-screen video, notch-safe layout, block list (Block.json),
-#    debug APK uploaded as artifact — same as before.
+#  Input: ONE domain (e.g. Ayush8481.com)
 #
-#  HOW TO USE
-#   1. Save as .github/workflows/build-apk.yml
-#   2. Edit the "env" block below  (or run manually from the Actions
-#      tab → "Run workflow" and fill in the inputs)
-#   3. Download the APK from the run's "Artifacts" section
+#  Endpoints exposed by the in-app proxy:
+#    GET  /Strem?path=/xyz/abx[&token=..][&src=..]
+#          → fetches Ayush8481.com/xyz/abx, extracts the video URL
+#            (mpd / m3u8 / mp4) + DRM license URL, returns a minimal
+#            HTML page that plays ONLY the video (no site UI).
+#    GET  /S/<host>/<path>       → CORS/Range proxy for any media URL
+#    GET  /health                → "OK"
+#
+#  The WebView loads Ayush8481.com normally. A small floating
+#  "▶ Video only" button is auto-injected when a <video> is present;
+#  tap it → opens the video-only player.
 # =====================================================================
 
 on:
   workflow_dispatch:
     inputs:
       base_url:
-        description: "Base domain / web-app URL (e.g. https://example.com)"
-        required: false
-      initial_path:
-        description: "Initial path appended to BASE_URL (e.g. /example/new?token=new) — leave empty to open BASE_URL as-is"
-        required: false
-      stream_base:
-        description: "Domain the /Strem proxy fetches from (leave empty to use BASE_URL)"
+        description: "Domain only (e.g. Ayush8481.com) — protocol auto-added"
         required: false
       app_name:
         description: "App name"
@@ -48,34 +37,14 @@ permissions:
   contents: read
 
 env:
-  # ---------------------------------------------------------------
-  # >>> BASE DOMAIN / WEB-APP URL <<<
-  # ---------------------------------------------------------------
-  BASE_URL: ${{ github.event.inputs.base_url || 'https://hotstar.com' }}
+  # >>> THE ONLY THING YOU EDIT <<<
+  BASE_URL: ${{ github.event.inputs.base_url || 'hotstar.com' }}
 
-  # >>> INITIAL PATH appended to BASE_URL when the app opens <<<
-  #     Example: /example/new?token=new
-  #     Result : https://example.com/example/new?token=new
-  #     Leave empty to open BASE_URL as-is.
-  INITIAL_PATH: ${{ github.event.inputs.initial_path || '/example/new?token=new' }}
+  APP_NAME: ${{ github.event.inputs.app_name || 'VideoOnly' }}
+  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.efuch.webapp' }}
 
-  # >>> APP NAME <<<
-  APP_NAME: ${{ github.event.inputs.app_name || 'Veryhotstar' }}
-
-  # >>> PACKAGE NAME <<<
-  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.exahot.webapp' }}
-
-  # >>> WHERE THE /Strem PROXY FETCHES STREAMS FROM <<<
-  #     Leave empty to use BASE_URL.
-  STREAM_BASE: ${{ github.event.inputs.stream_base || '' }}
-
-  # >>> BLOCK LIST API <<<
   BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
-
-  # >>> OPTIONAL PNG ICON <<<
-  ICON_URL: 'https://static.vecteezy.com/system/resources/previews/056/505/637/non_2x/jiohotstar-app-icon-on-transparent-background-free-png.png'
-
-  # >>> LOCAL PROXY PORT <<<
+  ICON_URL:  'https://static.vecteezy.com/system/resources/previews/056/505/637/non_2x/jiohotstar-app-icon-on-transparent-background-free-png.png'
   PROXY_PORT: '8481'
 
 jobs:
@@ -86,14 +55,11 @@ jobs:
     steps:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+        with: { distribution: temurin, java-version: '17' }
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
+        with: { gradle-version: '8.7' }
 
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
@@ -106,7 +72,6 @@ jobs:
           mkdir -p app/src/main/java/$PKG_PATH
           mkdir -p app/src/main/res/drawable
 
-          # ---------- optional icon ----------
           if [ -n "$ICON_URL" ]; then
             curl -fsSL "$ICON_URL" -o app/src/main/res/drawable/ic_launcher.png || true
           fi
@@ -116,7 +81,6 @@ jobs:
             export ICON_REF="@android:drawable/sym_def_app_icon"
           fi
 
-          # ---------- settings.gradle ----------
           cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -128,20 +92,15 @@ jobs:
           include ':app'
           EOF
 
-          # ---------- root build.gradle ----------
           cat > build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application' version '8.5.2' apply false
-          }
+          plugins { id 'com.android.application' version '8.5.2' apply false }
           EOF
 
-          # ---------- gradle.properties ----------
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2g
           android.useAndroidX=false
           EOF
 
-          # ---------- app/build.gradle ----------
           cat > app/build.gradle <<'EOF'
           plugins { id 'com.android.application' }
           android {
@@ -162,7 +121,6 @@ jobs:
           }
           EOF
 
-          # ---------- AndroidManifest.xml ----------
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -189,7 +147,6 @@ jobs:
           </manifest>
           EOF
 
-          # ---------- MainActivity.java ----------
           cat > app/src/main/java/$PKG_PATH/MainActivity.java <<'EOF'
           package __PKG__;
 
@@ -222,6 +179,7 @@ jobs:
 
           import java.io.BufferedReader;
           import java.io.ByteArrayInputStream;
+          import java.io.ByteArrayOutputStream;
           import java.io.IOException;
           import java.io.InputStream;
           import java.io.InputStreamReader;
@@ -231,23 +189,24 @@ jobs:
           import java.net.ServerSocket;
           import java.net.Socket;
           import java.net.URL;
+          import java.util.ArrayList;
           import java.util.Collections;
           import java.util.HashMap;
           import java.util.HashSet;
+          import java.util.List;
           import java.util.Locale;
           import java.util.Map;
           import java.util.Set;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
 
           public class MainActivity extends Activity {
 
-              // ---------- injected by the GitHub workflow ----------
-              private static final String BASE_URL         = "__BASE_URL__";
-              private static final String INITIAL_PATH     = "__INITIAL_PATH__";
-              private static final String BLOCK_API        = "__BLOCK_API__";
-              private static final String STREAM_BASE_CFG  = "__STREAM_BASE__";
-              private static final int    PROXY_PORT       = __PROXY_PORT__;
+              private static final String BASE_URL_CFG   = "__BASE_URL__";
+              private static final String BLOCK_API      = "__BLOCK_API__";
+              private static final int    PROXY_PORT     = __PROXY_PORT__;
+              private static final String TAG            = "WebApp";
 
-              private static final String TAG = "WebApp";
               private static final String DESKTOP_UA =
                       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
                       + "Chrome/124.0.0.0 Safari/537.36";
@@ -263,9 +222,26 @@ jobs:
                       + "a();new MutationObserver(a).observe(document.documentElement,"
                       + "{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();";
 
-              private FrameLayout frame;
-              private FrameLayout content;
-              private FrameLayout fullscreenContainer;
+              // Injects a floating "Video only" button when a <video> exists
+              private static final String INJECT_JS =
+                  "(function(){if(window.__vo){return;}window.__vo=1;"
+                + "function find(){var v=document.querySelector('video');"
+                + "var b=document.getElementById('__vo_btn');"
+                + "if(v&&!b){b=document.createElement('div');b.id='__vo_btn';b.textContent='\\u25B6 Video only';"
+                + "b.style.cssText='position:fixed;top:12px;right:12px;z-index:2147483647;"
+                + "background:#e50914;color:#fff;padding:10px 18px;border-radius:22px;"
+                + "font:bold 14px system-ui,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.5);"
+                + "cursor:pointer;user-select:none;';"
+                + "b.onclick=function(){var p=location.pathname+location.search;"
+                + "var s='';var vv=document.querySelector('video');"
+                + "if(vv){s=vv.currentSrc||vv.src||'';if(s.indexOf('blob:')===0||s.indexOf('data:')===0)s='';}"
+                + "var u='http://localhost:__PORT__/Strem?path='+encodeURIComponent(p);"
+                + "if(s)u+='&src='+encodeURIComponent(s);location.href=u;};"
+                + "document.body.appendChild(b);}"
+                + "else if(!v&&b){b.remove();}}"
+                + "setInterval(find,1500);find();})();";
+
+              private FrameLayout frame, content, fullscreenContainer;
               private WebView web;
               private SharedPreferences prefs;
 
@@ -276,25 +252,22 @@ jobs:
               private final Set<String> blockDomains = Collections.synchronizedSet(new HashSet<String>());
               private final Set<String> blockUrls    = Collections.synchronizedSet(new HashSet<String>());
 
-              // Local proxy
               private ServerSocket proxyServerSocket;
-              private volatile String lastToken = null;
 
-              // -----------------------------------------------------------
-              //  CONFIG HELPERS
-              // -----------------------------------------------------------
-              private String initialUrl() {
-                  if (INITIAL_PATH == null || INITIAL_PATH.isEmpty()) return BASE_URL;
-                  if (INITIAL_PATH.startsWith("/")) return BASE_URL + INITIAL_PATH;
-                  return BASE_URL + "/" + INITIAL_PATH;
+              // ------------------------------------------------------------------
+              //  BASE URL helpers
+              // ------------------------------------------------------------------
+              private String baseUrl() {
+                  String b = BASE_URL_CFG == null ? "" : BASE_URL_CFG.trim();
+                  if (b.isEmpty()) b = "https://example.com";
+                  if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b;
+                  while (b.endsWith("/")) b = b.substring(0, b.length() - 1);
+                  return b;
               }
 
-              private String streamBase() {
-                  String s = (STREAM_BASE_CFG == null || STREAM_BASE_CFG.isEmpty())
-                          ? BASE_URL : STREAM_BASE_CFG;
-                  if (!s.startsWith("http://") && !s.startsWith("https://")) s = "https://" + s;
-                  while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
-                  return s;
+              private String baseHost() {
+                  try { return Uri.parse(baseUrl()).getHost(); }
+                  catch (Exception e) { return ""; }
               }
 
               @Override
@@ -316,17 +289,14 @@ jobs:
 
                   frame = new FrameLayout(this);
                   frame.setBackgroundColor(Color.BLACK);
-
                   content = new FrameLayout(this);
                   web = new WebView(this);
                   content.addView(web, new FrameLayout.LayoutParams(
                           FrameLayout.LayoutParams.MATCH_PARENT,
                           FrameLayout.LayoutParams.MATCH_PARENT));
-
                   fullscreenContainer = new FrameLayout(this);
                   fullscreenContainer.setBackgroundColor(Color.BLACK);
                   fullscreenContainer.setVisibility(View.GONE);
-
                   frame.addView(content, new FrameLayout.LayoutParams(
                           FrameLayout.LayoutParams.MATCH_PARENT,
                           FrameLayout.LayoutParams.MATCH_PARENT));
@@ -334,16 +304,13 @@ jobs:
                           FrameLayout.LayoutParams.MATCH_PARENT,
                           FrameLayout.LayoutParams.MATCH_PARENT));
                   setContentView(frame);
-
                   applyNormalSystemUi();
 
                   frame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
                       @Override
                       public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
-                          int l = in.getSystemWindowInsetLeft();
-                          int t = in.getSystemWindowInsetTop();
-                          int r = in.getSystemWindowInsetRight();
-                          int b = in.getSystemWindowInsetBottom();
+                          int l = in.getSystemWindowInsetLeft(), t = in.getSystemWindowInsetTop();
+                          int r = in.getSystemWindowInsetRight(), b = in.getSystemWindowInsetBottom();
                           if (Build.VERSION.SDK_INT >= 28) {
                               DisplayCutout dc = in.getDisplayCutout();
                               if (dc != null) {
@@ -364,7 +331,6 @@ jobs:
                   s.setJavaScriptEnabled(true);
                   s.setDomStorageEnabled(true);
                   s.setDatabaseEnabled(true);
-                  // IMPORTANT for localhost:8481 over HTTPS page
                   s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
                   s.setMediaPlaybackRequiresUserGesture(false);
                   s.setUserAgentString(DESKTOP_UA);
@@ -374,16 +340,12 @@ jobs:
                   s.setBuiltInZoomControls(true);
                   s.setDisplayZoomControls(false);
                   s.setTextZoom(100);
-                  if (Build.VERSION.SDK_INT >= 19) {
-                      WebView.setWebContentsDebuggingEnabled(true);
-                  }
+                  if (Build.VERSION.SDK_INT >= 19) WebView.setWebContentsDebuggingEnabled(true);
 
                   web.setWebChromeClient(new WebChromeClient() {
-                      @Override
-                      public void onShowCustomView(View view, CustomViewCallback callback) {
-                          if (customView != null) { callback.onCustomViewHidden(); return; }
-                          customView = view;
-                          customCallback = callback;
+                      @Override public void onShowCustomView(View view, CustomViewCallback cb) {
+                          if (customView != null) { cb.onCustomViewHidden(); return; }
+                          customView = view; customCallback = cb;
                           fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
                                   FrameLayout.LayoutParams.MATCH_PARENT,
                                   FrameLayout.LayoutParams.MATCH_PARENT));
@@ -404,22 +366,22 @@ jobs:
                           super.onPageStarted(v, url, f);
                           v.evaluateJavascript(VIEWPORT_JS, null);
                       }
-                      @Override public void onPageCommitVisible(WebView v, String url) {
-                          super.onPageCommitVisible(v, url);
-                          v.evaluateJavascript(VIEWPORT_JS, null);
-                      }
                       @Override public void onPageFinished(WebView v, String url) {
                           super.onPageFinished(v, url);
                           v.evaluateJavascript(VIEWPORT_JS, null);
+                          String inject = INJECT_JS.replace("__PORT__", String.valueOf(PROXY_PORT));
+                          v.evaluateJavascript(inject, null);
                       }
                       @Override public WebResourceResponse shouldInterceptRequest(
                               WebView view, WebResourceRequest request) {
                           String url = request.getUrl().toString();
-                          // Never block our own local proxy
+                          // Log media/license URLs so the user can see them in logcat
+                          if (isMediaUrl(url))   Log.d(TAG, "[MEDIA DETECTED] " + url);
+                          if (isLicenseUrl(url)) Log.d(TAG, "[LICENSE DETECTED] " + url);
+                          // Never block our own proxy
                           if (url.startsWith("http://localhost:" + PROXY_PORT)
-                                  || url.startsWith("http://127.0.0.1:" + PROXY_PORT)) {
+                                  || url.startsWith("http://127.0.0.1:" + PROXY_PORT))
                               return super.shouldInterceptRequest(view, request);
-                          }
                           if (isBlocked(url)) {
                               Log.d(TAG, "BLOCKED: " + url);
                               return new WebResourceResponse("text/plain", "UTF-8",
@@ -428,8 +390,7 @@ jobs:
                           }
                           return super.shouldInterceptRequest(view, request);
                       }
-                      @Override public boolean shouldOverrideUrlLoading(
-                              WebView view, WebResourceRequest request) {
+                      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                           String url = request.getUrl().toString();
                           if (isBlocked(url)) { Log.d(TAG, "BLOCKED NAV: " + url); return true; }
                           String scheme = request.getUrl().getScheme();
@@ -440,36 +401,29 @@ jobs:
                       }
                   });
 
-                  // Start local stream proxy
                   startProxyServer();
 
-                  // Block list + initial load
                   String cached = prefs.getString("json", null);
                   final boolean hadCache = cached != null && parse(cached);
-                  if (hadCache) web.loadUrl(initialUrl());
+                  if (hadCache) web.loadUrl(baseUrl());
 
                   new Thread(new Runnable() {
                       @Override public void run() {
                           String json = download(BLOCK_API);
-                          if (json != null && parse(json)) {
-                              prefs.edit().putString("json", json).apply();
-                          }
-                          if (!hadCache) {
-                              runOnUiThread(new Runnable() {
-                                  @Override public void run() { web.loadUrl(initialUrl()); }
-                              });
-                          }
+                          if (json != null && parse(json)) prefs.edit().putString("json", json).apply();
+                          if (!hadCache) runOnUiThread(new Runnable() {
+                              @Override public void run() { web.loadUrl(baseUrl()); }
+                          });
                       }
                   }).start();
               }
 
-              // =================================================================
-              //  LOCAL STREAM PROXY  (127.0.0.1:8481)
-              // =================================================================
+              // ============================================================
+              //  PROXY SERVER
+              // ============================================================
               private void startProxyServer() {
                   try {
-                      proxyServerSocket = new ServerSocket(
-                              PROXY_PORT, 50, InetAddress.getByName("127.0.0.1"));
+                      proxyServerSocket = new ServerSocket(PROXY_PORT, 50, InetAddress.getByName("127.0.0.1"));
                       Thread t = new Thread(new Runnable() {
                           @Override public void run() {
                               while (!proxyServerSocket.isClosed()) {
@@ -478,8 +432,7 @@ jobs:
                                       Thread h = new Thread(new Runnable() {
                                           @Override public void run() { handleProxyClient(client); }
                                       });
-                                      h.setDaemon(true);
-                                      h.start();
+                                      h.setDaemon(true); h.start();
                                   } catch (IOException e) {
                                       if (!proxyServerSocket.isClosed()) Log.e(TAG, "accept", e);
                                       break;
@@ -487,18 +440,16 @@ jobs:
                               }
                           }
                       });
-                      t.setDaemon(true);
-                      t.start();
-                      Log.d(TAG, "Proxy server on 127.0.0.1:" + PROXY_PORT);
+                      t.setDaemon(true); t.start();
+                      Log.d(TAG, "Proxy on 127.0.0.1:" + PROXY_PORT);
                   } catch (IOException e) {
-                      Log.e(TAG, "Failed to start proxy server", e);
+                      Log.e(TAG, "Proxy start failed", e);
                   }
               }
 
               private void stopProxyServer() {
                   try {
-                      if (proxyServerSocket != null && !proxyServerSocket.isClosed())
-                          proxyServerSocket.close();
+                      if (proxyServerSocket != null && !proxyServerSocket.isClosed()) proxyServerSocket.close();
                   } catch (IOException ignored) { }
               }
 
@@ -508,8 +459,7 @@ jobs:
                       client.setSoTimeout(120000);
                       InputStream in = client.getInputStream();
                       OutputStream out = client.getOutputStream();
-                      BufferedReader reader = new BufferedReader(
-                              new InputStreamReader(in, "UTF-8"));
+                      BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
 
                       String requestLine = reader.readLine();
                       if (requestLine == null || requestLine.isEmpty()) { client.close(); return; }
@@ -532,134 +482,48 @@ jobs:
                               }
                           }
                       }
+                      byte[] reqBody = null;
                       if (contentLength > 0) {
-                          byte[] body = new byte[contentLength];
+                          reqBody = new byte[contentLength];
                           int read = 0;
                           while (read < contentLength) {
-                              int r = in.read(body, read, contentLength - read);
+                              int r = in.read(reqBody, read, contentLength - read);
                               if (r < 0) break;
                               read += r;
                           }
                       }
 
-                      // -------- CORS preflight --------
                       if ("OPTIONS".equals(method)) {
                           writeHttpResponse(out, 204, "No Content", null, new byte[0]);
-                          client.close();
-                          return;
+                          client.close(); return;
                       }
 
                       Uri uri = Uri.parse(rawTarget);
                       String path = uri.getPath() == null ? "" : uri.getPath();
 
-                      // -------- health --------
                       if (path.equals("/health") || path.equals("/")) {
-                          writeHttpResponse(out, 200, "OK", "text/plain",
-                                  "OK".getBytes("UTF-8"));
-                          client.close();
-                          return;
+                          writeHttpResponse(out, 200, "OK", "text/plain", "OK".getBytes("UTF-8"));
+                          client.close(); return;
                       }
 
-                      String targetUrl;
                       if (path.equals("/Strem") || path.startsWith("/Strem/")) {
-                          String streamPath = uri.getQueryParameter("path");
-                          String token      = uri.getQueryParameter("token");
-                          if (token != null && !token.isEmpty()) lastToken = token;
-
-                          if (streamPath == null || streamPath.isEmpty()) {
-                              writeHttpResponse(out, 400, "Bad Request", "text/plain",
-                                      "Missing path".getBytes("UTF-8"));
-                              client.close();
-                              return;
-                          }
-                          if (streamPath.startsWith("http://") || streamPath.startsWith("https://")) {
-                              targetUrl = streamPath;
-                          } else {
-                              if (!streamPath.startsWith("/")) streamPath = "/" + streamPath;
-                              targetUrl = streamBase() + streamPath;
-                          }
-                          if (token != null && !token.isEmpty() && !targetUrl.contains("token=")) {
-                              targetUrl += (targetUrl.contains("?") ? "&" : "?") + "token=" + token;
-                          }
-                      } else {
-                          // Fallback: proxy any other path to STREAM_BASE + path
-                          // (needed when a DASH manifest uses relative segment URLs)
-                          targetUrl = streamBase() + path;
-                          if (uri.getQuery() != null && !uri.getQuery().isEmpty()) {
-                              targetUrl += "?" + uri.getQuery();
-                          }
-                          if (lastToken != null && !targetUrl.contains("token=")) {
-                              targetUrl += (targetUrl.contains("?") ? "&" : "?")
-                                      + "token=" + lastToken;
-                          }
+                          handleStrem(uri, out);
+                          client.close(); return;
                       }
 
-                      Log.d(TAG, "PROXY " + method + " " + targetUrl);
-
-                      conn = (HttpURLConnection) new URL(targetUrl).openConnection();
-                      conn.setRequestMethod("HEAD".equals(method) ? "HEAD" : "GET");
-                      conn.setConnectTimeout(15000);
-                      conn.setReadTimeout(120000);
-                      conn.setInstanceFollowRedirects(true);
-
-                      String range = reqHeaders.get("range");
-                      if (range != null) conn.setRequestProperty("Range", range);
-                      String accept = reqHeaders.get("accept");
-                      if (accept != null) conn.setRequestProperty("Accept", accept);
-                      String ua = reqHeaders.get("user-agent");
-                      conn.setRequestProperty("User-Agent", ua != null ? ua : DESKTOP_UA);
-                      conn.setRequestProperty("Referer", BASE_URL);
-
-                      int code = conn.getResponseCode();
-                      String contentType = conn.getContentType();
-                      if (contentType == null || contentType.isEmpty())
-                          contentType = guessContentType(targetUrl);
-
-                      String cl     = conn.getHeaderField("Content-Length");
-                      String cr     = conn.getHeaderField("Content-Range");
-                      String ar     = conn.getHeaderField("Accept-Ranges");
-
-                      StringBuilder head = new StringBuilder();
-                      head.append("HTTP/1.1 ").append(code).append(' ')
-                              .append(safe(conn.getResponseMessage())).append("\r\n");
-                      head.append("Access-Control-Allow-Origin: *\r\n");
-                      head.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n");
-                      head.append("Access-Control-Allow-Headers: *\r\n");
-                      head.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n");
-                      head.append("Content-Type: ").append(contentType).append("\r\n");
-                      if (cl != null) head.append("Content-Length: ").append(cl).append("\r\n");
-                      if (cr != null) head.append("Content-Range: ").append(cr).append("\r\n");
-                      head.append("Accept-Ranges: ").append(ar != null ? ar : "bytes").append("\r\n");
-                      head.append("Cache-Control: no-cache\r\n");
-                      head.append("Connection: close\r\n\r\n");
-                      out.write(head.toString().getBytes("UTF-8"));
-
-                      if (!"HEAD".equals(method) && code >= 200 && code < 300) {
-                          InputStream bodyIn = conn.getInputStream();
-                          byte[] buf = new byte[16384];
-                          int n;
-                          while ((n = bodyIn.read(buf)) > 0) {
-                              out.write(buf, 0, n);
-                              out.flush();
-                          }
-                          bodyIn.close();
-                      } else if (!"HEAD".equals(method) && code >= 400) {
-                          InputStream err = conn.getErrorStream();
-                          if (err != null) {
-                              byte[] buf = new byte[4096];
-                              int n;
-                              while ((n = err.read(buf)) > 0) out.write(buf, 0, n);
-                              err.close();
-                          }
+                      if (path.startsWith("/S/")) {
+                          handleMediaProxy(method, path.substring(3), uri.getQuery(), reqHeaders, reqBody, out);
+                          client.close(); return;
                       }
-                      out.flush();
+
+                      writeHttpResponse(out, 404, "Not Found", "text/plain", "Not Found".getBytes("UTF-8"));
                       client.close();
+
                   } catch (Exception e) {
                       Log.e(TAG, "handleProxyClient", e);
                       try {
                           OutputStream out = client.getOutputStream();
-                          writeHttpResponse(out, 502, "Bad Gateway", "text/plain",
-                                  "Proxy error".getBytes("UTF-8"));
+                          writeHttpResponse(out, 502, "Bad Gateway", "text/plain", "Proxy error".getBytes("UTF-8"));
                       } catch (IOException ignored) { }
                       try { client.close(); } catch (IOException ignored) { }
                   } finally {
@@ -667,17 +531,453 @@ jobs:
                   }
               }
 
+              // ------------------------------------------------------------
+              //  /Strem  →  build the video-only player page
+              // ------------------------------------------------------------
+              private void handleStrem(Uri uri, OutputStream out) throws IOException {
+                  String streamPath = uri.getQueryParameter("path");
+                  String token      = uri.getQueryParameter("token");
+                  String clientSrc  = uri.getQueryParameter("src");
+
+                  if (streamPath == null) streamPath = "/";
+                  if (!streamPath.startsWith("/")) streamPath = "/" + streamPath;
+
+                  String pageUrl = baseUrl() + streamPath;
+                  if (token != null && !token.isEmpty() && !pageUrl.contains("token="))
+                      pageUrl += (pageUrl.contains("?") ? "&" : "?") + "token=" + token;
+
+                  Log.d(TAG, "STREM fetch: " + pageUrl);
+
+                  String mediaUrl = null;
+                  String mediaType = null;
+                  String licenseUrl = null;
+
+                  // 1) If client-side JS already gave us the video src, use it
+                  if (clientSrc != null && !clientSrc.isEmpty()) {
+                      mediaUrl = absoluteOrBase(clientSrc);
+                      mediaType = detectType(mediaUrl);
+                      Log.d(TAG, "STREM using client src: " + mediaUrl);
+                  }
+
+                  // 2) Otherwise fetch the page and extract
+                  if (mediaUrl == null) {
+                      String html = fetchText(pageUrl);
+                      if (html != null) {
+                          List<String> found = extractMediaUrls(html, pageUrl);
+                          licenseUrl = extractLicenseUrl(html, pageUrl);
+                          if (!found.isEmpty()) {
+                              mediaUrl = found.get(0);
+                              mediaType = detectType(mediaUrl);
+                              Log.d(TAG, "STREM extracted: " + mediaUrl);
+                          }
+                      }
+                  } else {
+                      // best-effort license extraction still from page
+                      String html = fetchText(pageUrl);
+                      if (html != null) licenseUrl = extractLicenseUrl(html, pageUrl);
+                  }
+
+                  if (licenseUrl != null) Log.d(TAG, "[LICENSE] " + licenseUrl);
+                  else Log.d(TAG, "[LICENSE] not found in page HTML (may be set at runtime — check logcat)");
+
+                  // Proxy the media & license URLs
+                  String proxiedMedia = mediaUrl != null ? proxyMediaUrl(mediaUrl) : null;
+                  String proxiedLicense = licenseUrl != null ? proxyLicenseUrl(licenseUrl) : null;
+
+                  String html = buildPlayerHtml(proxiedMedia, mediaType, proxiedLicense);
+                  byte[] body = html.getBytes("UTF-8");
+                  OutputStream o = out;
+                  StringBuilder sb = new StringBuilder();
+                  sb.append("HTTP/1.1 200 OK\r\n");
+                  sb.append("Access-Control-Allow-Origin: *\r\n");
+                  sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n");
+                  sb.append("Access-Control-Allow-Headers: *\r\n");
+                  sb.append("Content-Type: text/html; charset=utf-8\r\n");
+                  sb.append("Content-Length: ").append(body.length).append("\r\n");
+                  sb.append("Cache-Control: no-store\r\n");
+                  sb.append("Connection: close\r\n\r\n");
+                  o.write(sb.toString().getBytes("UTF-8"));
+                  o.write(body);
+                  o.flush();
+              }
+
+              private String absoluteOrBase(String url) {
+                  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+                  if (url.startsWith("//")) return "https:" + url;
+                  if (url.startsWith("/")) return baseUrl() + url;
+                  return baseUrl() + "/" + url;
+              }
+
+              private String detectType(String url) {
+                  if (url == null) return "unknown";
+                  String u = url.toLowerCase(Locale.ROOT);
+                  if (u.contains(".mpd")) return "mpd";
+                  if (u.contains(".m3u8")) return "m3u8";
+                  if (u.contains(".mp4") || u.contains(".m4v")) return "mp4";
+                  if (u.contains(".webm")) return "webm";
+                  return "media";
+              }
+
+              // Extract likely video URLs from the page HTML
+              private List<String> extractMediaUrls(String html, String pageUrl) {
+                  List<String> result = new ArrayList<String>();
+                  Set<String> seen = new HashSet<String>();
+
+                  // A) direct URLs of .mpd/.m3u8/.mp4/.webm
+                  Matcher m = Pattern.compile(
+                          "(https?:)?//[^\\s\"'<>()\\\\]+?\\.(?:mpd|m3u8|mp4|webm|m4v)(?:\\?[^\\s\"'<>()\\\\]*)?",
+                          Pattern.CASE_INSENSITIVE).matcher(html);
+                  while (m.find()) {
+                      String u = m.group(0);
+                      if (u.startsWith("//")) u = "https:" + u;
+                      if (seen.add(u)) result.add(u);
+                  }
+
+                  // B) <video src="..."> and <source src="...">
+                  Pattern tagP = Pattern.compile(
+                          "<(?:video|source)[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']",
+                          Pattern.CASE_INSENSITIVE);
+                  Matcher tm = tagP.matcher(html);
+                  while (tm.find()) {
+                      String u = resolveUrl(tm.group(1), pageUrl);
+                      if (u != null && seen.add(u)) result.add(u);
+                  }
+
+                  // C) common JSON keys
+                  Pattern jsonP = Pattern.compile(
+                          "\"(?:file|src|source|url|stream|hls|dash|mpd|playlist|videoUrl|manifestUrl)\"\\s*:\\s*\"([^\"]+)\"",
+                          Pattern.CASE_INSENSITIVE);
+                  Matcher jm = jsonP.matcher(html);
+                  while (jm.find()) {
+                      String raw = jm.group(1);
+                      if (raw.startsWith("blob:") || raw.startsWith("data:")) continue;
+                      String u = resolveUrl(raw, pageUrl);
+                      if (u != null && looksLikeMedia(u) && seen.add(u)) result.add(u);
+                  }
+
+                  // Sort: mpd first, then m3u8, then mp4
+                  List<String> sorted = new ArrayList<String>();
+                  for (String u : result) if (u.toLowerCase(Locale.ROOT).contains(".mpd")) sorted.add(u);
+                  for (String u : result) if (u.toLowerCase(Locale.ROOT).contains(".m3u8")) sorted.add(u);
+                  for (String u : result) if (!sorted.contains(u)) sorted.add(u);
+                  return sorted;
+              }
+
+              private String extractLicenseUrl(String html, String pageUrl) {
+                  Pattern p = Pattern.compile(
+                          "[\"']?([A-Za-z0-9_./:-]*(?:license|widevine|playready|clearkey|drm|wv)[A-Za-z0-9_./:-]*)[\"']?",
+                          Pattern.CASE_INSENSITIVE);
+                  // More targeted: URLs containing license keywords
+                  Matcher m = Pattern.compile(
+                          "(https?:)?//[^\\s\"'<>()\\\\]+?(?:license|widevine|playready|clearkey|/drm/)[^\\s\"'<>()\\\\]*",
+                          Pattern.CASE_INSENSITIVE).matcher(html);
+                  if (m.find()) {
+                      String u = m.group(0);
+                      if (u.startsWith("//")) u = "https:" + u;
+                      return u;
+                  }
+                  // Fallback: named keys
+                  Matcher km = Pattern.compile(
+                          "\"(?:licenseUrl|licenseServer|license_url|drmUrl|widevine)\"\\s*:\\s*\"([^\"]+)\"",
+                          Pattern.CASE_INSENSITIVE).matcher(html);
+                  if (km.find()) {
+                      String u = resolveUrl(km.group(1), pageUrl);
+                      return u;
+                  }
+                  return null;
+              }
+
+              private boolean looksLikeMedia(String u) {
+                  String l = u.toLowerCase(Locale.ROOT);
+                  return l.contains(".mpd") || l.contains(".m3u8") || l.contains(".mp4")
+                          || l.contains(".webm") || l.contains(".m4v") || l.contains("/manifest")
+                          || l.contains("format=mpd") || l.contains("format=m3u8");
+              }
+
+              private String resolveUrl(String ref, String baseUrlStr) {
+                  try {
+                      if (ref == null || ref.isEmpty()) return null;
+                      if (ref.startsWith("http://") || ref.startsWith("https://")) return ref;
+                      if (ref.startsWith("//")) return "https:" + ref;
+                      if (ref.startsWith("/")) {
+                          Uri b = Uri.parse(baseUrlStr);
+                          return b.getScheme() + "://" + b.getHost() + ref;
+                      }
+                      // Relative to page
+                      java.net.URL b = new java.net.URL(baseUrlStr);
+                      java.net.URL u = new java.net.URL(b, ref);
+                      return u.toString();
+                  } catch (Exception e) { return null; }
+              }
+
+              // ------------------------------------------------------------
+              //  /S/<host>/<path>  →  media proxy with CORS + Range
+              // ------------------------------------------------------------
+              private void handleMediaProxy(String method, String hostAndPath,
+                                            String query,
+                                            Map<String, String> reqHeaders,
+                                            byte[] reqBody,
+                                            OutputStream out) throws IOException {
+                  if (hostAndPath.isEmpty()) {
+                      writeHttpResponse(out, 400, "Bad Request", "text/plain",
+                              "Missing host".getBytes("UTF-8"));
+                      return;
+                  }
+                  String targetUrl = "https://" + hostAndPath;
+                  if (query != null && !query.isEmpty()) targetUrl += "?" + query;
+
+                  HttpURLConnection conn = null;
+                  try {
+                      conn = (HttpURLConnection) new URL(targetUrl).openConnection();
+                      conn.setRequestMethod("HEAD".equals(method) ? "HEAD" : ("POST".equals(method) ? "POST" : "GET"));
+                      conn.setConnectTimeout(15000);
+                      conn.setReadTimeout(120000);
+                      conn.setInstanceFollowRedirects(true);
+                      conn.setDoInput(true);
+
+                      if (reqHeaders.get("range") != null)
+                          conn.setRequestProperty("Range", reqHeaders.get("range"));
+                      if (reqHeaders.get("accept") != null)
+                          conn.setRequestProperty("Accept", reqHeaders.get("accept"));
+                      if (reqHeaders.get("content-type") != null)
+                          conn.setRequestProperty("Content-Type", reqHeaders.get("content-type"));
+                      String ua = reqHeaders.get("user-agent");
+                      conn.setRequestProperty("User-Agent", ua != null ? ua : DESKTOP_UA);
+                      conn.setRequestProperty("Referer", baseUrl());
+
+                      if (reqBody != null && reqBody.length > 0) {
+                          conn.setDoOutput(true);
+                          OutputStream co = conn.getOutputStream();
+                          co.write(reqBody); co.flush(); co.close();
+                      }
+
+                      int code = conn.getResponseCode();
+                      String contentType = conn.getContentType();
+                      if (contentType == null || contentType.isEmpty())
+                          contentType = guessContentType(targetUrl);
+
+                      // For MPD / M3U8 manifests, read fully, rewrite absolute URLs, send
+                      String lower = targetUrl.toLowerCase(Locale.ROOT);
+                      boolean isManifest = lower.contains(".mpd") || lower.contains(".m3u8");
+
+                      byte[] payload;
+                      int outCode = code;
+                      if (code >= 200 && code < 300 && isManifest && !"HEAD".equals(method)) {
+                          String raw = readAll(conn.getInputStream());
+                          String rewritten;
+                          if (lower.contains(".mpd")) rewritten = rewriteMpd(raw, hostAndPath);
+                          else                        rewritten = rewriteM3u8(raw, hostAndPath);
+                          payload = rewritten.getBytes("UTF-8");
+                          if (lower.contains(".mpd") && (contentType == null || contentType.isEmpty()))
+                              contentType = "application/dash+xml";
+                          if (lower.contains(".m3u8") && (contentType == null || contentType.isEmpty()))
+                              contentType = "application/vnd.apple.mpegurl";
+                      } else if (code >= 200 && code < 300 && !"HEAD".equals(method)) {
+                          payload = readAllBytes(conn.getInputStream());
+                      } else if (code >= 400) {
+                          InputStream err = conn.getErrorStream();
+                          payload = err != null ? readAllBytes(err) : new byte[0];
+                      } else {
+                          payload = new byte[0];
+                      }
+
+                      String cl = conn.getHeaderField("Content-Length");
+                      String cr = conn.getHeaderField("Content-Range");
+                      String ar = conn.getHeaderField("Accept-Ranges");
+
+                      StringBuilder head = new StringBuilder();
+                      head.append("HTTP/1.1 ").append(outCode).append(' ')
+                              .append(safe(conn.getResponseMessage())).append("\r\n");
+                      head.append("Access-Control-Allow-Origin: *\r\n");
+                      head.append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
+                      head.append("Access-Control-Allow-Headers: *\r\n");
+                      head.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n");
+                      head.append("Content-Type: ").append(contentType).append("\r\n");
+                      // If we rewrote the manifest, Content-Length is our payload size
+                      if (isManifest) head.append("Content-Length: ").append(payload.length).append("\r\n");
+                      else if (cl != null) head.append("Content-Length: ").append(cl).append("\r\n");
+                      if (cr != null) head.append("Content-Range: ").append(cr).append("\r\n");
+                      head.append("Accept-Ranges: ").append(ar != null ? ar : "bytes").append("\r\n");
+                      head.append("Cache-Control: no-cache\r\n");
+                      head.append("Connection: close\r\n\r\n");
+                      out.write(head.toString().getBytes("UTF-8"));
+
+                      if (!"HEAD".equals(method)) out.write(payload);
+                      out.flush();
+
+                  } catch (Exception e) {
+                      Log.e(TAG, "media proxy error: " + targetUrl, e);
+                      writeHttpResponse(out, 502, "Bad Gateway", "text/plain",
+                              ("Proxy error: " + e.getMessage()).getBytes("UTF-8"));
+                  } finally {
+                      if (conn != null) conn.disconnect();
+                  }
+              }
+
+              // Rewrite relative-friendly: only absolute/protocol-relative/absolute-path URLs
+              private String rewriteUrl(String url, String manifestHost) {
+                  if (url == null || url.isEmpty()) return url;
+                  if (url.startsWith("/S/")) return url;
+                  if (url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("javascript:")) return url;
+                  if (url.startsWith("//")) return "/S/" + url.substring(2);
+                  if (url.startsWith("http://"))  return "/S/" + url.substring(7);
+                  if (url.startsWith("https://")) return "/S/" + url.substring(8);
+                  if (url.startsWith("/")) return "/S/" + manifestHost + url;
+                  return url; // relative — leave alone (browser resolves against /S/host/path)
+              }
+
+              private String rewriteM3u8(String content, String manifestHostAndPath) {
+                  String host = manifestHostAndPath;
+                  int slash = host.indexOf('/');
+                  if (slash > 0) host = host.substring(0, slash);
+
+                  StringBuilder sb = new StringBuilder();
+                  for (String line : content.split("\n", -1)) {
+                      String trimmed = line.trim();
+                      if (trimmed.isEmpty()) { sb.append(line); sb.append('\n'); continue; }
+                      if (trimmed.startsWith("#")) {
+                          sb.append(rewriteUriAttrs(line, host));
+                      } else {
+                          sb.append(rewriteUrl(trimmed, host));
+                      }
+                      sb.append('\n');
+                  }
+                  return sb.toString();
+              }
+
+              private String rewriteUriAttrs(String line, String host) {
+                  Pattern p = Pattern.compile("URI=\"([^\"]+)\"");
+                  Matcher m = p.matcher(line);
+                  StringBuffer sb = new StringBuffer();
+                  while (m.find()) {
+                      String rewritten = rewriteUrl(m.group(1), host);
+                      m.appendReplacement(sb, "URI=\"" + Matcher.quoteReplacement(rewritten) + "\"");
+                  }
+                  m.appendTail(sb);
+                  return sb.toString();
+              }
+
+              private String rewriteMpd(String content, String manifestHostAndPath) {
+                  String host = manifestHostAndPath;
+                  int slash = host.indexOf('/');
+                  if (slash > 0) host = host.substring(0, slash);
+
+                  content = rewriteMpdAttr(content, "media=\"", "\"", host);
+                  content = rewriteMpdAttr(content, "initialization=\"", "\"", host);
+                  content = rewriteMpdAttr(content, "sourceURL=\"", "\"", host);
+                  content = rewriteMpdTag(content, "BaseURL", host);
+                  content = rewriteMpdTag(content, "Location", host);
+                  return content;
+              }
+
+              private String rewriteMpdAttr(String content, String prefix, String suffix, String host) {
+                  Pattern p = Pattern.compile(Pattern.quote(prefix) + "([^\"]+)" + Pattern.quote(suffix));
+                  Matcher m = p.matcher(content);
+                  StringBuffer sb = new StringBuffer();
+                  while (m.find()) {
+                      String rewritten = rewriteUrl(m.group(1), host);
+                      m.appendReplacement(sb, Matcher.quoteReplacement(prefix + rewritten + suffix));
+                  }
+                  m.appendTail(sb);
+                  return sb.toString();
+              }
+
+              private String rewriteMpdTag(String content, String tag, String host) {
+                  Pattern p = Pattern.compile("<" + tag + ">([^<]+)</" + tag + ">");
+                  Matcher m = p.matcher(content);
+                  StringBuffer sb = new StringBuffer();
+                  while (m.find()) {
+                      String rewritten = rewriteUrl(m.group(1).trim(), host);
+                      m.appendReplacement(sb, Matcher.quoteReplacement("<" + tag + ">" + rewritten + "</" + tag + ">"));
+                  }
+                  m.appendTail(sb);
+                  return sb.toString();
+              }
+
+              // ------------------------------------------------------------
+              //  Player HTML
+              // ------------------------------------------------------------
+              private String proxyMediaUrl(String url) {
+                  if (url == null) return null;
+                  if (url.startsWith("//")) url = "https:" + url;
+                  if (url.startsWith("http://"))  return "/S/" + url.substring(7);
+                  if (url.startsWith("https://")) return "/S/" + url.substring(8);
+                  return url;
+              }
+
+              private String proxyLicenseUrl(String url) {
+                  return proxyMediaUrl(url);
+              }
+
+              private String buildPlayerHtml(String mediaUrl, String mediaType, String licenseUrl) {
+                  String mediaJson;
+                  try {
+                      JSONObject o = new JSONObject();
+                      if (mediaUrl != null)    o.put("url", mediaUrl);
+                      if (mediaType != null)   o.put("type", mediaType);
+                      if (licenseUrl != null)  o.put("licenseUrl", licenseUrl);
+                      mediaJson = o.toString();
+                  } catch (Exception e) { mediaJson = "{}"; }
+
+                  return "<!DOCTYPE html>\n"
+                  + "<html><head><meta charset=\"utf-8\">"
+                  + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,user-scalable=no\">"
+                  + "<title>Video</title>"
+                  + "<style>"
+                  + "html,body{margin:0;padding:0;background:#000;width:100%;height:100%;overflow:hidden}"
+                  + "video{width:100%;height:100%;object-fit:contain;background:#000}"
+                  + "#status{position:fixed;bottom:8px;left:8px;color:#fff;font:12px system-ui;"
+                  + "background:rgba(0,0,0,.7);padding:6px 10px;border-radius:6px;max-width:80vw;word-break:break-all}"
+                  + "#back{position:fixed;top:8px;left:8px;z-index:10;color:#fff;background:rgba(0,0,0,.7);"
+                  + "border:0;border-radius:20px;padding:8px 16px;font:bold 14px system-ui;cursor:pointer}"
+                  + "</style>"
+                  + "<script src=\"https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.compiled.js\"></script>"
+                  + "<script src=\"https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js\"></script>"
+                  + "</head><body>"
+                  + "<button id=\"back\" onclick=\"history.back()\">\u2190 Back</button>"
+                  + "<video id=\"v\" controls autoplay playsinline></video>"
+                  + "<div id=\"status\"></div>"
+                  + "<script>(function(){"
+                  + "var media=" + mediaJson + ";"
+                  + "var video=document.getElementById('v');var status=document.getElementById('status');"
+                  + "var t=setTimeout(function(){status.style.display='none'},8000);"
+                  + "function log(s){console.log('[video-only]',s);status.textContent=s;status.style.display='block';"
+                  + "clearTimeout(t);t=setTimeout(function(){status.style.display='none'},8000);}"
+                  + "if(!media||!media.url){log('No video URL detected on the source page');return;}"
+                  + "var url=media.url;log('Loading '+(media.type||'media')+'...');"
+                  + "var isMpd=/\\.mpd(\\?|$)/i.test(url)||media.type==='mpd';"
+                  + "var isM3u8=/\\.m3u8(\\?|$)/i.test(url)||media.type==='m3u8';"
+                  + "if(isMpd&&window.shaka){shaka.polyfill.installAll();"
+                  + "if(!shaka.Player.isBrowserSupported()){log('Shaka not supported');return;}"
+                  + "var player=new shaka.Player(video);window.__player=player;"
+                  + "player.addEventListener('error',function(e){log('Player err: '+(e.detail||e));});"
+                  + "if(media.licenseUrl){var s={};s['com.widevine.alpha']=media.licenseUrl;"
+                  + "player.configure({drm:{servers:s}});log('DRM Widevine -> '+media.licenseUrl);}"
+                  + "player.load(url).then(function(){log('Playing DASH');video.play().catch(function(){});})"
+                  + ".catch(function(e){log('DASH failed: '+e);});"
+                  + "}else if(isM3u8&&window.Hls){if(Hls.isSupported()){"
+                  + "var hls=new Hls();hls.loadSource(url);hls.attachMedia(video);"
+                  + "hls.on(Hls.Events.MANIFEST_PARSED,function(){log('Playing HLS');video.play().catch(function(){});});"
+                  + "hls.on(Hls.Events.ERROR,function(e,d){if(d&&d.fatal)log('HLS fatal: '+d.type);});"
+                  + "window.__hls=hls;}else if(video.canPlayType('application/vnd.apple.mpegurl')){"
+                  + "video.src=url;video.play().catch(function(){});}else{log('HLS not supported');}"
+                  + "}else{video.src=url;video.play().catch(function(){});"
+                  + "video.addEventListener('error',function(){log('Native playback failed');});"
+                  + "log('Playing native');}}})();</script></body></html>";
+              }
+
+              // ------------------------------------------------------------
+              //  HTTP helpers
+              // ------------------------------------------------------------
               private static void writeHttpResponse(OutputStream out, int code, String msg,
                                                     String contentType, byte[] body)
                       throws IOException {
                   StringBuilder sb = new StringBuilder();
                   sb.append("HTTP/1.1 ").append(code).append(' ').append(msg).append("\r\n");
                   sb.append("Access-Control-Allow-Origin: *\r\n");
-                  sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n");
+                  sb.append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
                   sb.append("Access-Control-Allow-Headers: *\r\n");
-                  sb.append("Content-Type: ")
-                          .append(contentType != null ? contentType : "text/plain")
-                          .append("\r\n");
+                  sb.append("Content-Type: ").append(contentType != null ? contentType : "text/plain").append("\r\n");
                   sb.append("Content-Length: ").append(body.length).append("\r\n");
                   sb.append("Connection: close\r\n\r\n");
                   out.write(sb.toString().getBytes("UTF-8"));
@@ -693,8 +993,7 @@ jobs:
                   int q = u.indexOf('?'); if (q >= 0) u = u.substring(0, q);
                   if (u.endsWith(".mpd"))  return "application/dash+xml";
                   if (u.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
-                  if (u.endsWith(".mp4") || u.endsWith(".m4s") || u.endsWith(".m4v"))
-                      return "video/mp4";
+                  if (u.endsWith(".mp4") || u.endsWith(".m4s") || u.endsWith(".m4v")) return "video/mp4";
                   if (u.endsWith(".ts"))   return "video/mp2t";
                   if (u.endsWith(".webm")) return "video/webm";
                   if (u.endsWith(".mkv"))  return "video/x-matroska";
@@ -705,7 +1004,62 @@ jobs:
                   return "application/octet-stream";
               }
 
-              // ---------------- system UI helpers ----------------
+              private static byte[] readAllBytes(InputStream is) throws IOException {
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                  byte[] buf = new byte[8192]; int n;
+                  while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                  is.close();
+                  return bo.toByteArray();
+              }
+
+              private static String readAll(InputStream is) throws IOException {
+                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                  byte[] buf = new byte[8192]; int n;
+                  while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                  is.close();
+                  return new String(bo.toByteArray(), "UTF-8");
+              }
+
+              private String fetchText(String link) {
+                  HttpURLConnection c = null;
+                  try {
+                      c = (HttpURLConnection) new URL(link).openConnection();
+                      c.setConnectTimeout(10000);
+                      c.setReadTimeout(20000);
+                      c.setRequestProperty("User-Agent", DESKTOP_UA);
+                      c.setInstanceFollowRedirects(true);
+                      int code = c.getResponseCode();
+                      if (code < 200 || code >= 400) return null;
+                      return readAll(c.getInputStream());
+                  } catch (Exception e) {
+                      Log.e(TAG, "fetchText", e); return null;
+                  } finally {
+                      if (c != null) c.disconnect();
+                  }
+              }
+
+              // ------------------------------------------------------------
+              //  Media / License detection helpers (used for logging)
+              // ------------------------------------------------------------
+              private static boolean isMediaUrl(String url) {
+                  if (url == null) return false;
+                  String u = url.toLowerCase(Locale.ROOT);
+                  return u.contains(".mpd") || u.contains(".m3u8") || u.contains(".mp4")
+                          || u.contains(".m4s") || u.contains(".ts?")
+                          || u.contains("manifest") || u.contains("playlist");
+              }
+
+              private static boolean isLicenseUrl(String url) {
+                  if (url == null) return false;
+                  String u = url.toLowerCase(Locale.ROOT);
+                  return u.contains("license") || u.contains("widevine")
+                          || u.contains("playready") || u.contains("clearkey")
+                          || u.contains("/drm/");
+              }
+
+              // ------------------------------------------------------------
+              //  System UI + fullscreen
+              // ------------------------------------------------------------
               private void applyNormalSystemUi() {
                   getWindow().getDecorView().setSystemUiVisibility(
                           View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -739,8 +1093,7 @@ jobs:
                   frame.requestApplyInsets();
               }
 
-              @Override
-              public void onWindowFocusChanged(boolean hasFocus) {
+              @Override public void onWindowFocusChanged(boolean hasFocus) {
                   super.onWindowFocusChanged(hasFocus);
                   if (hasFocus) {
                       if (customView != null) applyFullscreenSystemUi();
@@ -748,7 +1101,9 @@ jobs:
                   }
               }
 
-              // ---------------- block list ----------------
+              // ------------------------------------------------------------
+              //  Block list
+              // ------------------------------------------------------------
               private boolean parse(String json) {
                   try {
                       JSONObject o = new JSONObject(json);
@@ -774,8 +1129,7 @@ jobs:
               private boolean isBlocked(String url) {
                   try {
                       String host = Uri.parse(url).getHost();
-                      if (host != null && blockDomains.contains(host.toLowerCase(Locale.ROOT)))
-                          return true;
+                      if (host != null && blockDomains.contains(host.toLowerCase(Locale.ROOT))) return true;
                       if (blockUrls.contains(endpointKey(url))) return true;
                   } catch (Exception ignored) { }
                   return false;
@@ -794,22 +1148,12 @@ jobs:
                       c = (HttpURLConnection) new URL(link).openConnection();
                       c.setConnectTimeout(5000); c.setReadTimeout(5000);
                       if (c.getResponseCode() != 200) return null;
-                      BufferedReader r = new BufferedReader(
-                              new InputStreamReader(c.getInputStream(), "UTF-8"));
-                      StringBuilder sb = new StringBuilder();
-                      String line;
-                      while ((line = r.readLine()) != null) sb.append(line).append('\n');
-                      r.close();
-                      return sb.toString();
-                  } catch (Exception e) {
-                      Log.e(TAG, "download error", e); return null;
-                  } finally {
-                      if (c != null) c.disconnect();
-                  }
+                      return readAll(c.getInputStream());
+                  } catch (Exception e) { Log.e(TAG, "download error", e); return null; }
+                  finally { if (c != null) c.disconnect(); }
               }
 
-              @Override
-              public void onBackPressed() {
+              @Override public void onBackPressed() {
                   if (customView != null) exitCustomView();
                   else if (web.canGoBack()) web.goBack();
                   else super.onBackPressed();
@@ -817,29 +1161,19 @@ jobs:
 
               @Override protected void onPause()  { super.onPause();  web.onPause();  }
               @Override protected void onResume() { super.onResume(); web.onResume(); }
-
-              @Override
-              protected void onDestroy() {
-                  stopProxyServer();
-                  super.onDestroy();
-              }
+              @Override protected void onDestroy() { stopProxyServer(); super.onDestroy(); }
           }
           EOF
 
-          # ---------- inject values ----------
           export PKG="$PACKAGE_NAME"
-          export INIT="$INITIAL_PATH"
-          export SB="$STREAM_BASE"
           export PORT="$PROXY_PORT"
           for f in app/build.gradle app/src/main/AndroidManifest.xml \
                    app/src/main/java/$PKG_PATH/MainActivity.java; do
             perl -pi -e 's/__PKG__/$ENV{PKG}/g;
                          s/__BASE_URL__/$ENV{BASE_URL}/g;
-                         s/__INITIAL_PATH__/$ENV{INIT}/g;
                          s/__BLOCK_API__/$ENV{BLOCK_API}/g;
                          s/__APP_NAME__/$ENV{APP_NAME}/g;
                          s/__ICON_REF__/$ENV{ICON_REF}/g;
-                         s/__STREAM_BASE__/$ENV{SB}/g;
                          s/__PROXY_PORT__/$ENV{PORT}/g' "$f"
           done
 
