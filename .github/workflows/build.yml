@@ -51,7 +51,7 @@ env:
   # ---------------------------------------------------------------
   # >>> BASE DOMAIN / WEB-APP URL <<<
   # ---------------------------------------------------------------
-  BASE_URL: ${{ github.event.inputs.base_url || 'https://example.com' }}
+  BASE_URL: ${{ github.event.inputs.base_url || 'https://hotstar.com' }}
 
   # >>> INITIAL PATH appended to BASE_URL when the app opens <<<
   #     Example: /example/new?token=new
@@ -63,7 +63,7 @@ env:
   APP_NAME: ${{ github.event.inputs.app_name || 'Veryhotstar' }}
 
   # >>> PACKAGE NAME <<<
-  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.example.webapp' }}
+  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.exahot.webapp' }}
 
   # >>> WHERE THE /Strem PROXY FETCHES STREAMS FROM <<<
   #     Leave empty to use BASE_URL.
