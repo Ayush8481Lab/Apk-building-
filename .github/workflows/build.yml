@@ -1,414 +1,860 @@
-name: Build Premium WebView APK
+name: Build Web APK
+
+# =====================================================================
+#  WebView APK builder + LOCAL STREAM PROXY
+#
+#  - Opens BASE_URL + INITIAL_PATH inside the app (desktop mode)
+#  - Runs a LOCAL HTTP server on 127.0.0.1:8481 inside the app:
+#        GET /Strem?path=/example/new&token=new
+#      -> proxies to  STREAM_BASE + /example/new?token=new
+#      Returns the real bytes (MPD / DASH / HLS / MP4 / WebM / TS /
+#      m4s / key files etc.) with full CORS + Range support.
+#  - So the web app loaded from BASE_URL can do:
+#        <video src="http://localhost:8481/Strem?path=/example/new&token=new">
+#        fetch("http://localhost:8481/Strem?path=/example/new&token=new")
+#      and playback works exactly as if served from the real domain.
+#  - Full-screen video, notch-safe layout, block list (Block.json),
+#    debug APK uploaded as artifact — same as before.
+#
+#  HOW TO USE
+#   1. Save as .github/workflows/build-apk.yml
+#   2. Edit the "env" block below  (or run manually from the Actions
+#      tab → "Run workflow" and fill in the inputs)
+#   3. Download the APK from the run's "Artifacts" section
+# =====================================================================
 
 on:
   workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Base domain / web-app URL (e.g. https://example.com)"
+        required: false
+      initial_path:
+        description: "Initial path appended to BASE_URL (e.g. /example/new?token=new) — leave empty to open BASE_URL as-is"
+        required: false
+      stream_base:
+        description: "Domain the /Strem proxy fetches from (leave empty to use BASE_URL)"
+        required: false
+      app_name:
+        description: "App name"
+        required: false
+      package_name:
+        description: "Package name (e.g. com.example.webapp)"
+        required: false
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+env:
+  # ---------------------------------------------------------------
+  # >>> BASE DOMAIN / WEB-APP URL <<<
+  # ---------------------------------------------------------------
+  BASE_URL: ${{ github.event.inputs.base_url || 'https://example.com' }}
+
+  # >>> INITIAL PATH appended to BASE_URL when the app opens <<<
+  #     Example: /example/new?token=new
+  #     Result : https://example.com/example/new?token=new
+  #     Leave empty to open BASE_URL as-is.
+  INITIAL_PATH: ${{ github.event.inputs.initial_path || '/example/new?token=new' }}
+
+  # >>> APP NAME <<<
+  APP_NAME: ${{ github.event.inputs.app_name || 'Veryhotstar' }}
+
+  # >>> PACKAGE NAME <<<
+  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.example.webapp' }}
+
+  # >>> WHERE THE /Strem PROXY FETCHES STREAMS FROM <<<
+  #     Leave empty to use BASE_URL.
+  STREAM_BASE: ${{ github.event.inputs.stream_base || '' }}
+
+  # >>> BLOCK LIST API <<<
+  BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
+
+  # >>> OPTIONAL PNG ICON <<<
+  ICON_URL: 'https://static.vecteezy.com/system/resources/previews/056/505/637/non_2x/jiohotstar-app-icon-on-transparent-background-free-png.png'
+
+  # >>> LOCAL PROXY PORT <<<
+  PROXY_PORT: '8481'
 
 jobs:
-  build-apk:
-    runs-on: ubuntu-22.04 
-    
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          node-version: '22'
+          distribution: temurin
+          java-version: '17'
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          distribution: 'temurin'
-          java-version: '21'
+          gradle-version: '8.7'
 
-      - name: Install Capacitor & Premium Plugins
-        run: |
-          npm init -y
-          npm install @capacitor/core
-          npm install -D @capacitor/cli @capacitor/android @capacitor/assets
-          npm install @capgo/capacitor-media-session
-          npm install @capacitor/splash-screen
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-      - name: Initialize Capacitor Config & Offline UI
+      - name: Generate Android WebView project
         run: |
-          mkdir -p www
-          echo "<html><body>Loading Music8481...</body></html>" > www/index.html
-          
-          # Beautiful Offline UI Fallback
-          cat <<EOF > www/error.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Offline</title>
-            <style>
-              body { background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-              .spinner { width: 50px; height: 50px; border: 3px solid rgba(29, 185, 84, 0.3); border-top-color: #1DB954; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 20px; }
-              @keyframes spin { 100% { transform: rotate(360deg); } }
-              h1 { font-size: 24px; margin: 0 0 10px; }
-              p { color: #a7a7a7; font-size: 14px; text-align: center; max-width: 80%; }
-              button { margin-top: 20px; background: #1DB954; color: #000; border: none; padding: 12px 24px; border-radius: 20px; font-weight: bold; cursor: pointer; transition: transform 0.2s; }
-              button:active { transform: scale(0.95); }
-            </style>
-          </head>
-          <body>
-            <div class="spinner"></div>
-            <h1>You're Offline</h1>
-            <p>Please check your internet connection to stream music.</p>
-            <button onclick="window.location.href='https://ayushgaana.vercel.app'">Retry Connection</button>
-          </body>
-          </html>
+          set -e
+          mkdir -p webapp && cd webapp
+          PKG_PATH=$(echo "$PACKAGE_NAME" | tr . /)
+          mkdir -p app/src/main/java/$PKG_PATH
+          mkdir -p app/src/main/res/drawable
+
+          # ---------- optional icon ----------
+          if [ -n "$ICON_URL" ]; then
+            curl -fsSL "$ICON_URL" -o app/src/main/res/drawable/ic_launcher.png || true
+          fi
+          if [ -f app/src/main/res/drawable/ic_launcher.png ]; then
+            export ICON_REF="@drawable/ic_launcher"
+          else
+            export ICON_REF="@android:drawable/sym_def_app_icon"
+          fi
+
+          # ---------- settings.gradle ----------
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "WebApp"
+          include ':app'
           EOF
-          
-          npx cap init Music8481 com.music8481.app --web-dir www
 
-          # FIX: Removed transparent overlay so Portrait mode stays perfectly within safe areas!
-          rm capacitor.config.ts || true
-          cat <<EOF > capacitor.config.json
-          {
-            "appId": "com.music8481.app",
-            "appName": "Music8481",
-            "webDir": "www",
-            "server": {
-              "url": "https://ayushgaana.vercel.app",
-              "cleartext": true,
-              "errorPath": "error.html"
-            },
-            "plugins": {
-              "SplashScreen": {
-                "launchShowDuration": 3000,
-                "launchAutoHide": true,
-                "backgroundColor": "#000000",
-                "androidSplashResourceName": "splash",
-                "showSpinner": true,
-                "spinnerColor": "#1DB954"
+          # ---------- root build.gradle ----------
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          # ---------- gradle.properties ----------
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+
+          # ---------- app/build.gradle ----------
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android {
+              namespace '__PKG__'
+              compileSdk 34
+              defaultConfig {
+                  applicationId '__PKG__'
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
               }
-            }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              buildTypes { release { minifyEnabled false } }
           }
           EOF
 
-      - name: Add Native Android Platform
-        run: npx cap add android
+          # ---------- AndroidManifest.xml ----------
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:label="__APP_NAME__"
+                  android:icon="__ICON_REF__"
+                  android:hardwareAccelerated="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:hardwareAccelerated="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|smallestScreenSize|screenLayout|uiMode|density|fontScale"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
 
-      # DEEP FIX 1: Lock App to Portrait Globally, Enable PiP, Inject Permissions
-      - name: Inject Permissions & App Locks
-        run: |
-          node -e "
-          const fs = require('fs');
-          const path = 'android/app/src/main/AndroidManifest.xml';
-          let xml = fs.readFileSync(path, 'utf8');
-          const perms = \`
-              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />
-              <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK\" />
-              <uses-permission android:name=\"android.permission.WAKE_LOCK\" />
-              <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" />
-              <uses-permission android:name=\"android.permission.MODIFY_AUDIO_SETTINGS\" />
-          \`;
-          
-          const vivoTags = \`
-              <meta-data android:name=\"com.vivo.dynamic.island.support\" android:value=\"true\" />
-              <meta-data android:name=\"android.media.playback.ALWAYS_SHOW_LOCK_SCREEN_CONTROLS\" android:value=\"true\" />
-              <meta-data android:name=\"com.vivo.music.lockscreen.support\" android:value=\"true\" />
-          \`;
+          # ---------- MainActivity.java ----------
+          cat > app/src/main/java/$PKG_PATH/MainActivity.java <<'EOF'
+          package __PKG__;
 
-          if (!xml.includes('android.permission.WAKE_LOCK')) {
-              xml = xml.replace('<application', perms + '\n    <application');
-              xml = xml.replace('<application', '<application android:hardwareAccelerated=\"true\" android:largeHeap=\"true\"');
-              
-              // LOCK TO PORTRAIT DEFAULT & ALLOW PIP
-              xml = xml.replace('<activity', '<activity android:supportsPictureInPicture=\"true\" android:screenOrientation=\"portrait\"');
-              
-              xml = xml.replace('</application>', vivoTags + '\n    </application>');
-              fs.writeFileSync(path, xml);
-          }
-          "
-
-      # DEEP FIX 2: Advanced Java Engine for Seamless Landscape Video, PiP, and Background Audio
-      - name: Inject Native Premium Engine
-        run: |
-          cat <<EOF > android/app/src/main/java/com/music8481/app/MainActivity.java
-          package com.music8481.app;
-
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ActivityInfo;
+          import android.graphics.Bitmap;
           import android.graphics.Color;
+          import android.graphics.drawable.ColorDrawable;
+          import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
-          import android.Manifest;
-          import android.content.pm.PackageManager;
-          import androidx.core.app.ActivityCompat;
-          import androidx.core.content.ContextCompat;
-          import com.getcapacitor.BridgeActivity;
-          
-          import android.webkit.WebView;
-          import android.webkit.WebSettings;
-          import android.webkit.WebChromeClient;
-          import android.webkit.JavascriptInterface;
+          import android.util.Log;
+          import android.view.DisplayCutout;
           import android.view.View;
-          import android.widget.FrameLayout;
-          import android.content.Context;
-          import android.os.PowerManager;
-          import android.media.AudioManager;
+          import android.view.Window;
+          import android.view.WindowInsets;
           import android.view.WindowManager;
-          import android.app.PictureInPictureParams;
-          import android.content.pm.ActivityInfo;
-          import android.util.Rational;
-          import android.content.res.Configuration;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
 
-          public class MainActivity extends BridgeActivity {
-              private PowerManager.WakeLock wakeLock;
-              private boolean isVideoFullscreen = false;
-              private boolean isVideoModeActive = false; 
+          import org.json.JSONArray;
+          import org.json.JSONObject;
 
-              private void updatePiPParams(boolean enable) {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder();
-                      builder.setAspectRatio(new Rational(16, 9));
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                          builder.setAutoEnterEnabled(enable);
-                      }
-                      setPictureInPictureParams(builder.build());
-                  }
+          import java.io.BufferedReader;
+          import java.io.ByteArrayInputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.InetAddress;
+          import java.net.ServerSocket;
+          import java.net.Socket;
+          import java.net.URL;
+          import java.util.Collections;
+          import java.util.HashMap;
+          import java.util.HashSet;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+
+              // ---------- injected by the GitHub workflow ----------
+              private static final String BASE_URL         = "__BASE_URL__";
+              private static final String INITIAL_PATH     = "__INITIAL_PATH__";
+              private static final String BLOCK_API        = "__BLOCK_API__";
+              private static final String STREAM_BASE_CFG  = "__STREAM_BASE__";
+              private static final int    PROXY_PORT       = __PROXY_PORT__;
+
+              private static final String TAG = "WebApp";
+              private static final String DESKTOP_UA =
+                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      + "Chrome/124.0.0.0 Safari/537.36";
+              private static final int DESKTOP_WIDTH = 1024;
+
+              private static final String VIEWPORT_JS =
+                      "(function(){if(window.__dw)return;window.__dw=1;"
+                      + "var C='width=" + DESKTOP_WIDTH + ", user-scalable=yes';"
+                      + "function a(){var h=document.head||document.documentElement;if(!h)return;"
+                      + "var m=document.querySelector('meta[name=viewport]');"
+                      + "if(!m){m=document.createElement('meta');m.name='viewport';h.appendChild(m);}"
+                      + "if(m.getAttribute('content')!==C)m.setAttribute('content',C);}"
+                      + "a();new MutationObserver(a).observe(document.documentElement,"
+                      + "{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();";
+
+              private FrameLayout frame;
+              private FrameLayout content;
+              private FrameLayout fullscreenContainer;
+              private WebView web;
+              private SharedPreferences prefs;
+
+              private View customView;
+              private WebChromeClient.CustomViewCallback customCallback;
+              private int padL, padT, padR, padB;
+
+              private final Set<String> blockDomains = Collections.synchronizedSet(new HashSet<String>());
+              private final Set<String> blockUrls    = Collections.synchronizedSet(new HashSet<String>());
+
+              // Local proxy
+              private ServerSocket proxyServerSocket;
+              private volatile String lastToken = null;
+
+              // -----------------------------------------------------------
+              //  CONFIG HELPERS
+              // -----------------------------------------------------------
+              private String initialUrl() {
+                  if (INITIAL_PATH == null || INITIAL_PATH.isEmpty()) return BASE_URL;
+                  if (INITIAL_PATH.startsWith("/")) return BASE_URL + INITIAL_PATH;
+                  return BASE_URL + "/" + INITIAL_PATH;
               }
 
-              public class WebAppInterface {
-                  @JavascriptInterface
-                  public void setVideoMode(boolean isVideo) {
-                      if (isVideoModeActive != isVideo) {
-                          isVideoModeActive = isVideo;
-                          runOnUiThread(new Runnable() {
-                              @Override
-                              public void run() {
-                                  updatePiPParams(isVideoFullscreen || isVideoModeActive);
-                              }
-                          });
-                      }
-                  }
+              private String streamBase() {
+                  String s = (STREAM_BASE_CFG == null || STREAM_BASE_CFG.isEmpty())
+                          ? BASE_URL : STREAM_BASE_CFG;
+                  if (!s.startsWith("http://") && !s.startsWith("https://")) s = "https://" + s;
+                  while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+                  return s;
               }
 
               @Override
-              public void onCreate(Bundle savedInstanceState) {
+              protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  
-                  // ALWAYS ALLOW DRAWING UNDER PUNCH HOLE (Required for Landscape Fullscreen)
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                      WindowManager.LayoutParams attributes = getWindow().getAttributes();
-                      attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                      getWindow().setAttributes(attributes);
+                  prefs = getSharedPreferences("blocklist", MODE_PRIVATE);
+
+                  Window w = getWindow();
+                  w.setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+                  w.setStatusBarColor(Color.BLACK);
+                  w.setNavigationBarColor(Color.BLACK);
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      WindowManager.LayoutParams lp = w.getAttributes();
+                      lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
+                              ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                              : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      w.setAttributes(lp);
                   }
-                  
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                          ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
+
+                  frame = new FrameLayout(this);
+                  frame.setBackgroundColor(Color.BLACK);
+
+                  content = new FrameLayout(this);
+                  web = new WebView(this);
+                  content.addView(web, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT,
+                          FrameLayout.LayoutParams.MATCH_PARENT));
+
+                  fullscreenContainer = new FrameLayout(this);
+                  fullscreenContainer.setBackgroundColor(Color.BLACK);
+                  fullscreenContainer.setVisibility(View.GONE);
+
+                  frame.addView(content, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT,
+                          FrameLayout.LayoutParams.MATCH_PARENT));
+                  frame.addView(fullscreenContainer, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT,
+                          FrameLayout.LayoutParams.MATCH_PARENT));
+                  setContentView(frame);
+
+                  applyNormalSystemUi();
+
+                  frame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                      @Override
+                      public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
+                          int l = in.getSystemWindowInsetLeft();
+                          int t = in.getSystemWindowInsetTop();
+                          int r = in.getSystemWindowInsetRight();
+                          int b = in.getSystemWindowInsetBottom();
+                          if (Build.VERSION.SDK_INT >= 28) {
+                              DisplayCutout dc = in.getDisplayCutout();
+                              if (dc != null) {
+                                  l = Math.max(l, dc.getSafeInsetLeft());
+                                  t = Math.max(t, dc.getSafeInsetTop());
+                                  r = Math.max(r, dc.getSafeInsetRight());
+                                  b = Math.max(b, dc.getSafeInsetBottom());
+                              }
+                          }
+                          padL = l; padT = t; padR = r; padB = b;
+                          if (customView == null) content.setPadding(l, t, r, b);
+                          return in;
                       }
+                  });
+                  frame.requestApplyInsets();
+
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  // IMPORTANT for localhost:8481 over HTTPS page
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setUserAgentString(DESKTOP_UA);
+                  s.setUseWideViewPort(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setSupportZoom(true);
+                  s.setBuiltInZoomControls(true);
+                  s.setDisplayZoomControls(false);
+                  s.setTextZoom(100);
+                  if (Build.VERSION.SDK_INT >= 19) {
+                      WebView.setWebContentsDebuggingEnabled(true);
                   }
 
-                  AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-                  if (audioManager != null) setVolumeControlStream(AudioManager.STREAM_MUSIC);
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onShowCustomView(View view, CustomViewCallback callback) {
+                          if (customView != null) { callback.onCustomViewHidden(); return; }
+                          customView = view;
+                          customCallback = callback;
+                          fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
+                                  FrameLayout.LayoutParams.MATCH_PARENT,
+                                  FrameLayout.LayoutParams.MATCH_PARENT));
+                          fullscreenContainer.setVisibility(View.VISIBLE);
+                          content.setVisibility(View.INVISIBLE);
+                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                          applyFullscreenSystemUi();
+                      }
+                      @Override public void onHideCustomView() { exitCustomView(); }
+                      @Override public Bitmap getDefaultVideoPoster() {
+                          return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+                      }
+                  });
 
-                  // Silent Background Execution Lock (No Battery Popups Needed)
-                  PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-                  wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Music8481::BackgroundAudioLock");
-                  wakeLock.acquire();
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override public void onPageStarted(WebView v, String url, Bitmap f) {
+                          super.onPageStarted(v, url, f);
+                          v.evaluateJavascript(VIEWPORT_JS, null);
+                      }
+                      @Override public void onPageCommitVisible(WebView v, String url) {
+                          super.onPageCommitVisible(v, url);
+                          v.evaluateJavascript(VIEWPORT_JS, null);
+                      }
+                      @Override public void onPageFinished(WebView v, String url) {
+                          super.onPageFinished(v, url);
+                          v.evaluateJavascript(VIEWPORT_JS, null);
+                      }
+                      @Override public WebResourceResponse shouldInterceptRequest(
+                              WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          // Never block our own local proxy
+                          if (url.startsWith("http://localhost:" + PROXY_PORT)
+                                  || url.startsWith("http://127.0.0.1:" + PROXY_PORT)) {
+                              return super.shouldInterceptRequest(view, request);
+                          }
+                          if (isBlocked(url)) {
+                              Log.d(TAG, "BLOCKED: " + url);
+                              return new WebResourceResponse("text/plain", "UTF-8",
+                                      403, "Blocked", new HashMap<String, String>(),
+                                      new ByteArrayInputStream(new byte[0]));
+                          }
+                          return super.shouldInterceptRequest(view, request);
+                      }
+                      @Override public boolean shouldOverrideUrlLoading(
+                              WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          if (isBlocked(url)) { Log.d(TAG, "BLOCKED NAV: " + url); return true; }
+                          String scheme = request.getUrl().getScheme();
+                          if ("http".equals(scheme) || "https".equals(scheme)) return false;
+                          try { startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl())); }
+                          catch (Exception ignored) { }
+                          return true;
+                      }
+                  });
+
+                  // Start local stream proxy
+                  startProxyServer();
+
+                  // Block list + initial load
+                  String cached = prefs.getString("json", null);
+                  final boolean hadCache = cached != null && parse(cached);
+                  if (hadCache) web.loadUrl(initialUrl());
+
+                  new Thread(new Runnable() {
+                      @Override public void run() {
+                          String json = download(BLOCK_API);
+                          if (json != null && parse(json)) {
+                              prefs.edit().putString("json", json).apply();
+                          }
+                          if (!hadCache) {
+                              runOnUiThread(new Runnable() {
+                                  @Override public void run() { web.loadUrl(initialUrl()); }
+                              });
+                          }
+                      }
+                  }).start();
               }
 
-              @Override
-              public void onStart() {
-                  super.onStart();
-                  if (this.bridge != null && this.bridge.getWebView() != null) {
-                      final WebView webView = this.bridge.getWebView();
-                      WebSettings settings = webView.getSettings();
-                      
-                      settings.setMediaPlaybackRequiresUserGesture(false); 
-                      webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-                      settings.setDomStorageEnabled(true);
-
-                      webView.addJavascriptInterface(new WebAppInterface(), "AndroidApp");
-                      
-                      // Poll for specific iframe video source to trigger PiP capability
-                      webView.postDelayed(new Runnable() {
-                          @Override
-                          public void run() {
-                              webView.evaluateJavascript(
-                                  "setInterval(function() {" +
-                                  "  var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                                  "  var hasVideo = iframe !== null;" +
-                                  "  if (window.AndroidApp) window.AndroidApp.setVideoMode(hasVideo);" +
-                                  "}, 1000);", null);
+              // =================================================================
+              //  LOCAL STREAM PROXY  (127.0.0.1:8481)
+              // =================================================================
+              private void startProxyServer() {
+                  try {
+                      proxyServerSocket = new ServerSocket(
+                              PROXY_PORT, 50, InetAddress.getByName("127.0.0.1"));
+                      Thread t = new Thread(new Runnable() {
+                          @Override public void run() {
+                              while (!proxyServerSocket.isClosed()) {
+                                  try {
+                                      final Socket client = proxyServerSocket.accept();
+                                      Thread h = new Thread(new Runnable() {
+                                          @Override public void run() { handleProxyClient(client); }
+                                      });
+                                      h.setDaemon(true);
+                                      h.start();
+                                  } catch (IOException e) {
+                                      if (!proxyServerSocket.isClosed()) Log.e(TAG, "accept", e);
+                                      break;
+                                  }
+                              }
                           }
-                      }, 2000);
-
-                      final WebChromeClient originalClient = webView.getWebChromeClient();
-                      webView.setWebChromeClient(new WebChromeClient() {
-                          private View mCustomView;
-                          private WebChromeClient.CustomViewCallback mCustomViewCallback;
-                          private int mOriginalSystemUiVisibility;
-
-                          @Override
-                          public void onShowCustomView(View view, CustomViewCallback callback) {
-                              if (mCustomView != null) { onHideCustomView(); return; }
-                              mCustomView = view;
-                              isVideoFullscreen = true;
-                              mOriginalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
-                              mCustomViewCallback = callback;
-                              
-                              runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() { updatePiPParams(true); }
-                              });
-
-                              // 1. FORCE LANDSCAPE
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-
-                              // 2. FORCE IMMERSIVE FULLSCREEN (Hides Nav/Status Bar, overlaps punch hole)
-                              getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN |
-                                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-
-                              ((FrameLayout) getWindow().getDecorView()).addView(mCustomView, new FrameLayout.LayoutParams(-1, -1));
-                          }
-
-                          @Override
-                          public void onHideCustomView() {
-                              ((FrameLayout) getWindow().getDecorView()).removeView(mCustomView);
-                              mCustomView = null;
-                              isVideoFullscreen = false;
-                              
-                              runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() { updatePiPParams(isVideoModeActive); }
-                              });
-
-                              // 1. REVERT TO PORTRAIT
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-                              
-                              // 2. RESTORE NORMAL SAFE-AREA UI
-                              getWindow().getDecorView().setSystemUiVisibility(mOriginalSystemUiVisibility);
-                              if (mCustomViewCallback != null) { mCustomViewCallback.onCustomViewHidden(); mCustomViewCallback = null; }
-                          }
-                          @Override
-                          public void onPermissionRequest(android.webkit.PermissionRequest request) { if (originalClient != null) originalClient.onPermissionRequest(request); }
-                          @Override
-                          public boolean onShowFileChooser(WebView webView, android.webkit.ValueCallback<android.net.Uri[]> filePathCallback, FileChooserParams fileChooserParams) { return originalClient != null && originalClient.onShowFileChooser(webView, filePathCallback, fileChooserParams); }
-                          @Override
-                          public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) { return originalClient != null && originalClient.onConsoleMessage(consoleMessage); }
                       });
+                      t.setDaemon(true);
+                      t.start();
+                      Log.d(TAG, "Proxy server on 127.0.0.1:" + PROXY_PORT);
+                  } catch (IOException e) {
+                      Log.e(TAG, "Failed to start proxy server", e);
                   }
               }
 
-              // PIP STRETCH HACK: Targets ayushcom.vercel.app and fills the small PiP box seamlessly
-              @Override
-              public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
-                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
-                  if (this.bridge != null && this.bridge.getWebView() != null) {
-                      WebView webView = this.bridge.getWebView();
-                      if (isInPictureInPictureMode) {
-                          webView.evaluateJavascript(
-                              "var iframe = document.querySelector('iframe[src*=\"ayushcom.vercel.app\"]');" +
-                              "if(iframe) {" +
-                              "  iframe.style.position = 'fixed';" +
-                              "  iframe.style.top = '0'; iframe.style.left = '0';" +
-                              "  iframe.style.width = '100vw'; iframe.style.height = '100vh';" +
-                              "  iframe.style.zIndex = '999999';" +
-                              "  iframe.setAttribute('data-pip', 'true');" +
-                              "}", null);
-                      } else {
-                          webView.evaluateJavascript(
-                              "var iframe = document.querySelector('iframe[data-pip=\"true\"]');" +
-                              "if(iframe) {" +
-                              "  iframe.style.position = '';" +
-                              "  iframe.style.top = ''; iframe.style.left = '';" +
-                              "  iframe.style.width = '100%'; iframe.style.height = '100%';" +
-                              "  iframe.style.zIndex = '';" +
-                              "  iframe.removeAttribute('data-pip');" +
-                              "}", null);
+              private void stopProxyServer() {
+                  try {
+                      if (proxyServerSocket != null && !proxyServerSocket.isClosed())
+                          proxyServerSocket.close();
+                  } catch (IOException ignored) { }
+              }
+
+              private void handleProxyClient(Socket client) {
+                  HttpURLConnection conn = null;
+                  try {
+                      client.setSoTimeout(120000);
+                      InputStream in = client.getInputStream();
+                      OutputStream out = client.getOutputStream();
+                      BufferedReader reader = new BufferedReader(
+                              new InputStreamReader(in, "UTF-8"));
+
+                      String requestLine = reader.readLine();
+                      if (requestLine == null || requestLine.isEmpty()) { client.close(); return; }
+                      String[] parts = requestLine.split(" ");
+                      if (parts.length < 3) { client.close(); return; }
+                      String method = parts[0].toUpperCase(Locale.ROOT);
+                      String rawTarget = parts[1];
+
+                      Map<String, String> reqHeaders = new HashMap<String, String>();
+                      int contentLength = 0;
+                      String line;
+                      while ((line = reader.readLine()) != null && !line.isEmpty()) {
+                          int idx = line.indexOf(':');
+                          if (idx > 0) {
+                              String k = line.substring(0, idx).trim().toLowerCase(Locale.ROOT);
+                              String v = line.substring(idx + 1).trim();
+                              reqHeaders.put(k, v);
+                              if (k.equals("content-length")) {
+                                  try { contentLength = Integer.parseInt(v); } catch (Exception ignored) {}
+                              }
+                          }
                       }
+                      if (contentLength > 0) {
+                          byte[] body = new byte[contentLength];
+                          int read = 0;
+                          while (read < contentLength) {
+                              int r = in.read(body, read, contentLength - read);
+                              if (r < 0) break;
+                              read += r;
+                          }
+                      }
+
+                      // -------- CORS preflight --------
+                      if ("OPTIONS".equals(method)) {
+                          writeHttpResponse(out, 204, "No Content", null, new byte[0]);
+                          client.close();
+                          return;
+                      }
+
+                      Uri uri = Uri.parse(rawTarget);
+                      String path = uri.getPath() == null ? "" : uri.getPath();
+
+                      // -------- health --------
+                      if (path.equals("/health") || path.equals("/")) {
+                          writeHttpResponse(out, 200, "OK", "text/plain",
+                                  "OK".getBytes("UTF-8"));
+                          client.close();
+                          return;
+                      }
+
+                      String targetUrl;
+                      if (path.equals("/Strem") || path.startsWith("/Strem/")) {
+                          String streamPath = uri.getQueryParameter("path");
+                          String token      = uri.getQueryParameter("token");
+                          if (token != null && !token.isEmpty()) lastToken = token;
+
+                          if (streamPath == null || streamPath.isEmpty()) {
+                              writeHttpResponse(out, 400, "Bad Request", "text/plain",
+                                      "Missing path".getBytes("UTF-8"));
+                              client.close();
+                              return;
+                          }
+                          if (streamPath.startsWith("http://") || streamPath.startsWith("https://")) {
+                              targetUrl = streamPath;
+                          } else {
+                              if (!streamPath.startsWith("/")) streamPath = "/" + streamPath;
+                              targetUrl = streamBase() + streamPath;
+                          }
+                          if (token != null && !token.isEmpty() && !targetUrl.contains("token=")) {
+                              targetUrl += (targetUrl.contains("?") ? "&" : "?") + "token=" + token;
+                          }
+                      } else {
+                          // Fallback: proxy any other path to STREAM_BASE + path
+                          // (needed when a DASH manifest uses relative segment URLs)
+                          targetUrl = streamBase() + path;
+                          if (uri.getQuery() != null && !uri.getQuery().isEmpty()) {
+                              targetUrl += "?" + uri.getQuery();
+                          }
+                          if (lastToken != null && !targetUrl.contains("token=")) {
+                              targetUrl += (targetUrl.contains("?") ? "&" : "?")
+                                      + "token=" + lastToken;
+                          }
+                      }
+
+                      Log.d(TAG, "PROXY " + method + " " + targetUrl);
+
+                      conn = (HttpURLConnection) new URL(targetUrl).openConnection();
+                      conn.setRequestMethod("HEAD".equals(method) ? "HEAD" : "GET");
+                      conn.setConnectTimeout(15000);
+                      conn.setReadTimeout(120000);
+                      conn.setInstanceFollowRedirects(true);
+
+                      String range = reqHeaders.get("range");
+                      if (range != null) conn.setRequestProperty("Range", range);
+                      String accept = reqHeaders.get("accept");
+                      if (accept != null) conn.setRequestProperty("Accept", accept);
+                      String ua = reqHeaders.get("user-agent");
+                      conn.setRequestProperty("User-Agent", ua != null ? ua : DESKTOP_UA);
+                      conn.setRequestProperty("Referer", BASE_URL);
+
+                      int code = conn.getResponseCode();
+                      String contentType = conn.getContentType();
+                      if (contentType == null || contentType.isEmpty())
+                          contentType = guessContentType(targetUrl);
+
+                      String cl     = conn.getHeaderField("Content-Length");
+                      String cr     = conn.getHeaderField("Content-Range");
+                      String ar     = conn.getHeaderField("Accept-Ranges");
+
+                      StringBuilder head = new StringBuilder();
+                      head.append("HTTP/1.1 ").append(code).append(' ')
+                              .append(safe(conn.getResponseMessage())).append("\r\n");
+                      head.append("Access-Control-Allow-Origin: *\r\n");
+                      head.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n");
+                      head.append("Access-Control-Allow-Headers: *\r\n");
+                      head.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n");
+                      head.append("Content-Type: ").append(contentType).append("\r\n");
+                      if (cl != null) head.append("Content-Length: ").append(cl).append("\r\n");
+                      if (cr != null) head.append("Content-Range: ").append(cr).append("\r\n");
+                      head.append("Accept-Ranges: ").append(ar != null ? ar : "bytes").append("\r\n");
+                      head.append("Cache-Control: no-cache\r\n");
+                      head.append("Connection: close\r\n\r\n");
+                      out.write(head.toString().getBytes("UTF-8"));
+
+                      if (!"HEAD".equals(method) && code >= 200 && code < 300) {
+                          InputStream bodyIn = conn.getInputStream();
+                          byte[] buf = new byte[16384];
+                          int n;
+                          while ((n = bodyIn.read(buf)) > 0) {
+                              out.write(buf, 0, n);
+                              out.flush();
+                          }
+                          bodyIn.close();
+                      } else if (!"HEAD".equals(method) && code >= 400) {
+                          InputStream err = conn.getErrorStream();
+                          if (err != null) {
+                              byte[] buf = new byte[4096];
+                              int n;
+                              while ((n = err.read(buf)) > 0) out.write(buf, 0, n);
+                              err.close();
+                          }
+                      }
+                      out.flush();
+                      client.close();
+                  } catch (Exception e) {
+                      Log.e(TAG, "handleProxyClient", e);
+                      try {
+                          OutputStream out = client.getOutputStream();
+                          writeHttpResponse(out, 502, "Bad Gateway", "text/plain",
+                                  "Proxy error".getBytes("UTF-8"));
+                      } catch (IOException ignored) { }
+                      try { client.close(); } catch (IOException ignored) { }
+                  } finally {
+                      if (conn != null) conn.disconnect();
                   }
               }
 
+              private static void writeHttpResponse(OutputStream out, int code, String msg,
+                                                    String contentType, byte[] body)
+                      throws IOException {
+                  StringBuilder sb = new StringBuilder();
+                  sb.append("HTTP/1.1 ").append(code).append(' ').append(msg).append("\r\n");
+                  sb.append("Access-Control-Allow-Origin: *\r\n");
+                  sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n");
+                  sb.append("Access-Control-Allow-Headers: *\r\n");
+                  sb.append("Content-Type: ")
+                          .append(contentType != null ? contentType : "text/plain")
+                          .append("\r\n");
+                  sb.append("Content-Length: ").append(body.length).append("\r\n");
+                  sb.append("Connection: close\r\n\r\n");
+                  out.write(sb.toString().getBytes("UTF-8"));
+                  out.write(body);
+                  out.flush();
+              }
+
+              private static String safe(String s) { return s == null ? "" : s; }
+
+              private static String guessContentType(String url) {
+                  if (url == null) return "application/octet-stream";
+                  String u = url.toLowerCase(Locale.ROOT);
+                  int q = u.indexOf('?'); if (q >= 0) u = u.substring(0, q);
+                  if (u.endsWith(".mpd"))  return "application/dash+xml";
+                  if (u.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
+                  if (u.endsWith(".mp4") || u.endsWith(".m4s") || u.endsWith(".m4v"))
+                      return "video/mp4";
+                  if (u.endsWith(".ts"))   return "video/mp2t";
+                  if (u.endsWith(".webm")) return "video/webm";
+                  if (u.endsWith(".mkv"))  return "video/x-matroska";
+                  if (u.endsWith(".mp3"))  return "audio/mpeg";
+                  if (u.endsWith(".aac"))  return "audio/aac";
+                  if (u.endsWith(".json")) return "application/json";
+                  if (u.endsWith(".xml"))  return "application/xml";
+                  return "application/octet-stream";
+              }
+
+              // ---------------- system UI helpers ----------------
+              private void applyNormalSystemUi() {
+                  getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+              }
+
+              private void applyFullscreenSystemUi() {
+                  getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+              }
+
+              private void exitCustomView() {
+                  if (customView == null) return;
+                  fullscreenContainer.removeView(customView);
+                  fullscreenContainer.setVisibility(View.GONE);
+                  content.setVisibility(View.VISIBLE);
+                  customView = null;
+                  WebChromeClient.CustomViewCallback cb = customCallback;
+                  customCallback = null;
+                  if (cb != null) cb.onCustomViewHidden();
+                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                  applyNormalSystemUi();
+                  content.setPadding(padL, padT, padR, padB);
+                  frame.requestApplyInsets();
+              }
+
               @Override
-              public void onUserLeaveHint() {
-                  super.onUserLeaveHint();
-                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) {}
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) {
+                      if (customView != null) applyFullscreenSystemUi();
+                      else applyNormalSystemUi();
+                  }
+              }
+
+              // ---------------- block list ----------------
+              private boolean parse(String json) {
+                  try {
+                      JSONObject o = new JSONObject(json);
+                      Set<String> d = new HashSet<String>();
+                      Set<String> u = new HashSet<String>();
+                      JSONArray da = o.optJSONArray("blockDomains");
+                      JSONArray ua = o.optJSONArray("blockUrls");
+                      if (da != null) for (int i = 0; i < da.length(); i++)
+                          d.add(da.getString(i).trim().toLowerCase(Locale.ROOT));
+                      if (ua != null) for (int i = 0; i < ua.length(); i++)
+                          u.add(endpointKey(ua.getString(i).trim()));
+                      blockDomains.clear(); blockDomains.addAll(d);
+                      blockUrls.clear();    blockUrls.addAll(u);
+                      return true;
+                  } catch (Exception e) { Log.e(TAG, "parse error", e); return false; }
+              }
+
+              private static String stripSlash(String s) {
+                  while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+                  return s;
+              }
+
+              private boolean isBlocked(String url) {
+                  try {
+                      String host = Uri.parse(url).getHost();
+                      if (host != null && blockDomains.contains(host.toLowerCase(Locale.ROOT)))
+                          return true;
+                      if (blockUrls.contains(endpointKey(url))) return true;
+                  } catch (Exception ignored) { }
+                  return false;
+              }
+
+              private static String endpointKey(String url) {
+                  Uri u = Uri.parse(url);
+                  String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+                  String path = u.getPath() == null ? "" : u.getPath().toLowerCase(Locale.ROOT);
+                  return host + stripSlash(path);
+              }
+
+              private String download(String link) {
+                  HttpURLConnection c = null;
+                  try {
+                      c = (HttpURLConnection) new URL(link).openConnection();
+                      c.setConnectTimeout(5000); c.setReadTimeout(5000);
+                      if (c.getResponseCode() != 200) return null;
+                      BufferedReader r = new BufferedReader(
+                              new InputStreamReader(c.getInputStream(), "UTF-8"));
+                      StringBuilder sb = new StringBuilder();
+                      String line;
+                      while ((line = r.readLine()) != null) sb.append(line).append('\n');
+                      r.close();
+                      return sb.toString();
+                  } catch (Exception e) {
+                      Log.e(TAG, "download error", e); return null;
+                  } finally {
+                      if (c != null) c.disconnect();
                   }
               }
 
               @Override
               public void onBackPressed() {
-                  if ((isVideoFullscreen || isVideoModeActive) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      try { enterPictureInPictureMode(new PictureInPictureParams.Builder().setAspectRatio(new Rational(16, 9)).build()); } catch (Exception e) { super.onBackPressed(); }
-                  } else {
-                      super.onBackPressed();
-                  }
+                  if (customView != null) exitCustomView();
+                  else if (web.canGoBack()) web.goBack();
+                  else super.onBackPressed();
               }
 
-              @Override
-              public void onPause() {
-                  super.onPause();
-                  // Keeps audio and video running silently!
-                  if (this.bridge != null && this.bridge.getWebView() != null) {
-                      this.bridge.getWebView().resumeTimers();
-                      this.bridge.getWebView().onResume(); 
-                  }
-              }
+              @Override protected void onPause()  { super.onPause();  web.onPause();  }
+              @Override protected void onResume() { super.onResume(); web.onResume(); }
 
               @Override
-              public void onDestroy() {
+              protected void onDestroy() {
+                  stopProxyServer();
                   super.onDestroy();
-                  if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
               }
           }
           EOF
 
-      - name: Fix Kotlin Duplicate Classes (Gradle Bug)
-        run: |
-          cat <<EOF >> android/app/build.gradle
-          
-          dependencies {
-              constraints {
-                  implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22") {
-                      because("kotlin-stdlib-jdk7 is now a part of kotlin-stdlib")
-                  }
-                  implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22") {
-                      because("kotlin-stdlib-jdk8 is now a part of kotlin-stdlib")
-                  }
-              }
-          }
-          EOF
+          # ---------- inject values ----------
+          export PKG="$PACKAGE_NAME"
+          export INIT="$INITIAL_PATH"
+          export SB="$STREAM_BASE"
+          export PORT="$PROXY_PORT"
+          for f in app/build.gradle app/src/main/AndroidManifest.xml \
+                   app/src/main/java/$PKG_PATH/MainActivity.java; do
+            perl -pi -e 's/__PKG__/$ENV{PKG}/g;
+                         s/__BASE_URL__/$ENV{BASE_URL}/g;
+                         s/__INITIAL_PATH__/$ENV{INIT}/g;
+                         s/__BLOCK_API__/$ENV{BLOCK_API}/g;
+                         s/__APP_NAME__/$ENV{APP_NAME}/g;
+                         s/__ICON_REF__/$ENV{ICON_REF}/g;
+                         s/__STREAM_BASE__/$ENV{SB}/g;
+                         s/__PROXY_PORT__/$ENV{PORT}/g' "$f"
+          done
 
-      - name: Generate App Icon & Splash Screen
-        run: |
-          sudo apt-get install -y imagemagick
-          mkdir -p assets
-          
-          wget -q https://raw.githubusercontent.com/Ayush8481Lab/Ayushgaana/refs/heads/main/app/android-chrome-512x512.png -O assets/icon.png
-          convert -size 2732x2732 xc:"#000000" assets/icon.png -gravity center -composite assets/splash.png
-          npx @capacitor/assets generate --android
+      - name: Build debug APK
+        working-directory: webapp
+        run: gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Fix Gradle Daemon & Memory Issues (CI Stability)
+      - name: Rename APK
         run: |
-          echo "org.gradle.daemon=false" >> android/gradle.properties
-          echo "org.gradle.jvmargs=-Xmx1024m -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
+          mkdir -p out
+          cp webapp/app/build/outputs/apk/debug/app-debug.apk out/webapp.apk
 
-      - name: Generate Android Keystore (For App Signing)
-        run: |
-          keytool -genkey -v -keystore android.keystore -alias android -keyalg RSA -keysize 2048 -validity 10000 -storepass password123 -keypass password123 -dname "CN=Music8481, OU=App, O=Music8481, C=IN"
-
-      - name: Build & Auto-Sign Android APK (Release)
-        run: |
-          cd android
-          ./gradlew assembleRelease \
-            -Pandroid.injected.signing.store.file=${{ github.workspace }}/android.keystore \
-            -Pandroid.injected.signing.store.password=password123 \
-            -Pandroid.injected.signing.key.alias=android \
-            -Pandroid.injected.signing.key.password=password123
-
-      - name: Upload Independent APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Music8481-Independent-APK
-          path: android/app/build/outputs/apk/release/app-release.apk
+          name: web-apk
+          path: out/webapp.apk
+          if-no-files-found: error
