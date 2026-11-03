@@ -1,317 +1,773 @@
-name: Build YouTube Muxer APK
+name: Build DevTools Browser APK
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+  push:
+    branches: [ main, master ]
 
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
         with:
-          channel: 'stable'
+          gradle-version: '8.7'
 
-      - name: Generate Flutter project
-        run: flutter create --project-name youtube_muxer_app .
-
-      - name: Overwrite pubspec.yaml
+      - name: Generate Android Project Structure & Source Code
         run: |
-          cat > pubspec.yaml << 'EOF'
-          name: youtube_muxer_app
-          description: YouTube downloader with audio/video muxing.
-          publish_to: 'none'
-          version: 1.0.0+1
+          mkdir -p app/src/main/java/com/devtools/browser
 
-          environment:
-            sdk: '>=3.0.0 <4.0.0'
-
-          dependencies:
-            flutter:
-              sdk: flutter
-            flutter_erfan_youtube_muxer_2025: ^1.0.7
-            permission_handler: ^12.0.3
-            cupertino_icons: ^1.0.8
-
-          dev_dependencies:
-            flutter_test:
-              sdk: flutter
-            flutter_lints: ^4.0.0
-
-          flutter:
-            uses-material-design: true
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DevToolsBrowser"
+          include ':app'
           EOF
 
-      - name: Overwrite main.dart
-        run: |
-          cat > lib/main.dart << 'EOF'
-          import 'package:flutter/material.dart';
-          import 'package:flutter_erfan_youtube_muxer_2025/flutter_erfan_youtube_muxer_2025.dart';
-          import 'package:permission_handler/permission_handler.dart';
-
-          void main() {
-            WidgetsFlutterBinding.ensureInitialized();
-            runApp(const MyApp());
-          }
-
-          class MyApp extends StatelessWidget {
-            const MyApp({super.key});
-
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: 'YT Muxer',
-                theme: ThemeData(primarySwatch: Colors.red),
-                home: const DownloaderPage(),
-              );
-            }
-          }
-
-          class DownloaderPage extends StatefulWidget {
-            const DownloaderPage({super.key});
-
-            @override
-            State<DownloaderPage> createState() => _DownloaderPageState();
-          }
-
-          class _DownloaderPageState extends State<DownloaderPage> {
-            final _urlController = TextEditingController();
-            final _downloader = YoutubeDownloader();
-
-            List<VideoQuality> _qualities = [];
-            VideoQuality? _selectedQuality;
-            bool _isLoading = false;
-            String _status = 'Paste a YouTube link to start';
-            double _progress = 0.0;
-
-            @override
-            void initState() {
-              super.initState();
-              _requestPermissions();
-            }
-
-            Future<void> _requestPermissions() async {
-              await Permission.storage.request();
-              await Permission.videos.request();
-              await Permission.audio.request();
-            }
-
-            Future<void> _fetchQualities() async {
-              final url = _urlController.text.trim();
-
-              if (url.isEmpty) {
-                _showSnack('Please enter a YouTube URL or video ID.');
-                return;
-              }
-
-              setState(() {
-                _isLoading = true;
-                _status = 'Fetching qualities...';
-                _qualities = [];
-                _selectedQuality = null;
-              });
-
-              try {
-                final qualities = await _downloader.getQualities(url);
-
-                setState(() {
-                  _qualities = qualities;
-                  _isLoading = false;
-                  _status = _qualities.isEmpty
-                      ? 'No compatible H.264/AVC qualities found.'
-                      : 'Select a quality to download.';
-                });
-              } catch (e) {
-                setState(() {
-                  _isLoading = false;
-                  _status = 'Error: ${e.toString()}';
-                });
-              }
-            }
-
-            Future<void> _downloadSelected() async {
-              if (_selectedQuality == null) {
-                _showSnack('Please select a quality first.');
-                return;
-              }
-
-              final url = _urlController.text.trim();
-
-              setState(() {
-                _isLoading = true;
-                _status = 'Downloading & merging...';
-                _progress = 0.0;
-              });
-
-              try {
-                await for (final progress in _downloader.downloadVideo(
-                  _selectedQuality!,
-                  url,
-                )) {
-                  setState(() {
-                    _progress = progress.progress;
-                    _status =
-                        '${progress.status} (${(progress.progress * 100).toStringAsFixed(1)}%)';
-                  });
-                }
-
-                setState(() {
-                  _isLoading = false;
-                  _status = 'Download complete! File saved.';
-                });
-              } catch (e) {
-                setState(() {
-                  _isLoading = false;
-                  _status = 'Download failed: ${e.toString()}';
-                });
-              }
-            }
-
-            void _showSnack(String msg) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(msg)),
-              );
-            }
-
-            @override
-            void dispose() {
-              _urlController.dispose();
-              super.dispose();
-            }
-
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(
-                  title: const Text('YouTube Downloader & Muxer'),
-                ),
-                body: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        TextField(
-                          controller: _urlController,
-                          decoration: const InputDecoration(
-                            labelText: 'YouTube URL or Video ID',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        ElevatedButton(
-                          onPressed: _isLoading ? null : _fetchQualities,
-                          child: const Text('Fetch Qualities'),
-                        ),
-                        const SizedBox(height: 20),
-                        if (_qualities.isNotEmpty)
-                          DropdownButtonFormField<VideoQuality>(
-                            value: _selectedQuality,
-                            decoration: const InputDecoration(
-                              labelText: 'Select Quality',
-                              border: OutlineInputBorder(),
-                            ),
-                            items: _qualities.map((q) {
-                              return DropdownMenuItem<VideoQuality>(
-                                value: q,
-                                child: Text(
-                                  '${q.quality} • ${q.codec} • ${q.container}',
-                                ),
-                              );
-                            }).toList(),
-                            onChanged: (val) {
-                              setState(() => _selectedQuality = val);
-                            },
-                          ),
-                        const SizedBox(height: 20),
-                        if (_selectedQuality != null)
-                          ElevatedButton.icon(
-                            onPressed: _isLoading ? null : _downloadSelected,
-                            icon: const Icon(Icons.download),
-                            label: const Text('Download & Merge'),
-                          ),
-                        const SizedBox(height: 30),
-                        if (_isLoading)
-                          LinearProgressIndicator(
-                            value: _progress == 0 ? null : _progress,
-                          ),
-                        const SizedBox(height: 10),
-                        Text(
-                          _status,
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            }
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.3.0' apply false
           }
           EOF
 
-      - name: Overwrite AndroidManifest.xml
-        run: |
-          cat > android/app/src/main/AndroidManifest.xml << 'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.example.youtube_muxer_app">
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.devtools.browser'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.devtools.browser"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
               <application
-                  android:label="YT Muxer"
-                  android:icon="@mipmap/ic_launcher">
-
+                  android:allowBackup="true"
+                  android:label="DevTools Browser"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:launchMode="singleTop"
-                      android:theme="@style/LaunchTheme"
-                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-                      android:hardwareAccelerated="true"
-                      android:windowSoftInputMode="adjustResize">
-
-                      <meta-data
-                          android:name="io.flutter.embedding.android.NormalTheme"
-                          android:resource="@style/NormalTheme" />
-
+                      android:configChanges="orientation|screenSize|keyboardHidden">
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-
-                  <meta-data
-                      android:name="flutterEmbedding"
-                      android:value="2" />
               </application>
           </manifest>
           EOF
 
-      - name: Install dependencies
-        run: flutter pub get
+          cat << 'EOF' > app/src/main/java/com/devtools/browser/MainActivity.java
+          package com.devtools.browser;
 
-      - name: Build release APK
-        run: flutter build apk --release
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.text.TextUtils;
+          import android.view.Gravity;
+          import android.view.KeyEvent;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.inputmethod.EditorInfo;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.BaseAdapter;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ListView;
+          import android.widget.ProgressBar;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
 
-      - name: Upload APK artifact
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.ByteArrayInputStream;
+          import java.nio.charset.StandardCharsets;
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Date;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.concurrent.TimeUnit;
+
+          import okhttp3.Headers;
+          import okhttp3.OkHttpClient;
+          import okhttp3.Request;
+          import okhttp3.Response;
+          import okhttp3.ResponseBody;
+
+          public class MainActivity extends Activity {
+
+              public static class NetworkLogItem {
+                  public String id;
+                  public String method;
+                  public String url;
+                  public int statusCode;
+                  public String contentType;
+                  public String requestHeaders;
+                  public String cookies;
+                  public String requestBody;
+                  public String responseHeaders;
+                  public String responseBody;
+                  public String timestamp;
+                  public long durationMs;
+              }
+
+              private WebView webView;
+              private EditText urlInput;
+              private ProgressBar progressBar;
+              private LinearLayout logsPanel;
+              private Button toggleLogsBtn;
+              private ListView logsListView;
+              private LogAdapter logAdapter;
+              private final List<NetworkLogItem> networkLogs = Collections.synchronizedList(new ArrayList<>());
+              private final Handler mainHandler = new Handler(Looper.getMainLooper());
+              private OkHttpClient okHttpClient;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  okHttpClient = new OkHttpClient.Builder()
+                          .followRedirects(true)
+                          .followSslRedirects(true)
+                          .connectTimeout(15, TimeUnit.SECONDS)
+                          .readTimeout(15, TimeUnit.SECONDS)
+                          .build();
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.parseColor("#121212"));
+
+                  // Top Navigation Bar
+                  LinearLayout topBar = new LinearLayout(this);
+                  topBar.setOrientation(LinearLayout.HORIZONTAL);
+                  topBar.setPadding(16, 16, 16, 16);
+                  topBar.setGravity(Gravity.CENTER_VERTICAL);
+                  topBar.setBackgroundColor(Color.parseColor("#1E1E1E"));
+
+                  urlInput = new EditText(this);
+                  urlInput.setHint("Enter URL (e.g. https://httpbin.org/get)");
+                  urlInput.setHintTextColor(Color.parseColor("#888888"));
+                  urlInput.setTextColor(Color.WHITE);
+                  urlInput.setSingleLine(true);
+                  urlInput.setImeOptions(EditorInfo.IME_ACTION_GO);
+                  urlInput.setBackgroundColor(Color.parseColor("#2C2C2C"));
+                  urlInput.setPadding(24, 18, 24, 18);
+                  LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                  urlParams.setMarginEnd(12);
+                  topBar.addView(urlInput, urlParams);
+
+                  Button goBtn = createStyledButton("GO", "#2979FF");
+                  goBtn.setOnClickListener(v -> loadTargetUrl());
+                  topBar.addView(goBtn);
+
+                  toggleLogsBtn = createStyledButton("Logs (0)", "#00C853");
+                  LinearLayout.LayoutParams logBtnParams = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  logBtnParams.setMarginStart(12);
+                  toggleLogsBtn.setOnClickListener(v -> {
+                      if (logsPanel.getVisibility() == View.VISIBLE) {
+                          logsPanel.setVisibility(View.GONE);
+                      } else {
+                          logsPanel.setVisibility(View.VISIBLE);
+                          logAdapter.notifyDataSetChanged();
+                      }
+                  });
+                  topBar.addView(toggleLogsBtn, logBtnParams);
+
+                  root.addView(topBar, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  progressBar.setMax(100);
+                  root.addView(progressBar, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 8));
+
+                  // Main Content Area (WebView + Collectible Logs Drawer)
+                  FrameLayout contentFrame = new FrameLayout(this);
+
+                  webView = new WebView(this);
+                  setupWebView();
+                  contentFrame.addView(webView, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  // Network Logs Panel Overlay
+                  logsPanel = new LinearLayout(this);
+                  logsPanel.setOrientation(LinearLayout.VERTICAL);
+                  logsPanel.setBackgroundColor(Color.parseColor("#F5181818"));
+                  logsPanel.setVisibility(View.GONE);
+
+                  LinearLayout logHeader = new LinearLayout(this);
+                  logHeader.setOrientation(LinearLayout.HORIZONTAL);
+                  logHeader.setPadding(24, 16, 24, 16);
+                  logHeader.setGravity(Gravity.CENTER_VERTICAL);
+                  logHeader.setBackgroundColor(Color.parseColor("#252525"));
+
+                  TextView titleTv = new TextView(this);
+                  titleTv.setText("Network Logs Inspector");
+                  titleTv.setTextColor(Color.WHITE);
+                  titleTv.setTextSize(16);
+                  titleTv.setTypeface(null, Typeface.BOLD);
+                  logHeader.addView(titleTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                  Button clearBtn = createStyledButton("Clear", "#D32F2F");
+                  clearBtn.setOnClickListener(v -> {
+                      networkLogs.clear();
+                      updateLogCount();
+                      logAdapter.notifyDataSetChanged();
+                  });
+                  logHeader.addView(clearBtn);
+
+                  Button closeBtn = createStyledButton("Close", "#555555");
+                  LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  closeParams.setMarginStart(12);
+                  closeBtn.setOnClickListener(v -> logsPanel.setVisibility(View.GONE));
+                  logHeader.addView(closeBtn, closeParams);
+
+                  logsPanel.addView(logHeader);
+
+                  logsListView = new ListView(this);
+                  logsListView.setDividerHeight(2);
+                  logAdapter = new LogAdapter();
+                  logsListView.setAdapter(logAdapter);
+                  logsPanel.addView(logsListView, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  contentFrame.addView(logsPanel, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  root.addView(contentFrame, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+
+                  urlInput.setOnEditorActionListener((v, actionId, event) -> {
+                      if (actionId == EditorInfo.IME_ACTION_GO ||
+                              (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+                          loadTargetUrl();
+                          return true;
+                      }
+                      return false;
+                  });
+
+                  urlInput.setText("https://jsonplaceholder.typicode.com");
+                  loadTargetUrl();
+              }
+
+              private Button createStyledButton(String text, String bgHex) {
+                  Button btn = new Button(this);
+                  btn.setText(text);
+                  btn.setTextColor(Color.WHITE);
+                  btn.setTextSize(12);
+                  btn.setAllCaps(false);
+                  btn.setPadding(28, 12, 28, 12);
+                  btn.setBackgroundColor(Color.parseColor(bgHex));
+                  return btn;
+              }
+
+              private void loadTargetUrl() {
+                  String raw = urlInput.getText().toString().trim();
+                  if (TextUtils.isEmpty(raw)) return;
+                  if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
+                      raw = "https://" + raw;
+                      urlInput.setText(raw);
+                  }
+                  webView.loadUrl(raw);
+              }
+
+              @SuppressWarnings("SetJavaScriptEnabled")
+              private void setupWebView() {
+                  CookieManager cookieManager = CookieManager.getInstance();
+                  cookieManager.setAcceptCookie(true);
+                  cookieManager.setAcceptThirdPartyCookies(webView, true);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  settings.setUserAgentString(settings.getUserAgentString() + " DevToolsBrowser/1.0");
+
+                  webView.addJavascriptInterface(new JSBridge(), "AndroidDevTools");
+
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onProgressChanged(WebView view, int newProgress) {
+                          progressBar.setProgress(newProgress);
+                          progressBar.setVisibility(newProgress == 100 ? View.GONE : View.VISIBLE);
+                      }
+                  });
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                          super.onPageStarted(view, url, favicon);
+                          urlInput.setText(url);
+                          injectNetworkHook(view);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          super.onPageFinished(view, url);
+                          injectNetworkHook(view);
+                      }
+
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          String method = request.getMethod();
+
+                          if (!"GET".equalsIgnoreCase(method) || (!url.startsWith("http://") && !url.startsWith("https://"))) {
+                              return super.shouldInterceptRequest(view, request);
+                          }
+
+                          long startTime = System.currentTimeMillis();
+                          NetworkLogItem item = new NetworkLogItem();
+                          item.method = method;
+                          item.url = url;
+                          item.timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+
+                          try {
+                              Request.Builder reqBuilder = new Request.Builder().url(url).get();
+                              StringBuilder reqHeadersStr = new StringBuilder();
+
+                              Map<String, String> webViewHeaders = request.getRequestHeaders();
+                              if (webViewHeaders != null) {
+                                  for (Map.Entry<String, String> entry : webViewHeaders.entrySet()) {
+                                      reqBuilder.header(entry.getKey(), entry.getValue());
+                                      reqHeadersStr.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n");
+                                  }
+                              }
+
+                              String cookieStr = CookieManager.getInstance().getCookie(url);
+                              if (!TextUtils.isEmpty(cookieStr)) {
+                                  reqBuilder.header("Cookie", cookieStr);
+                                  reqHeadersStr.append("Cookie: ").append(cookieStr).append("\n");
+                                  item.cookies = cookieStr;
+                              } else {
+                                  item.cookies = "No Cookies sent";
+                              }
+
+                              item.requestHeaders = reqHeadersStr.length() > 0 ? reqHeadersStr.toString().trim() : "None";
+                              item.requestBody = "(GET Request - No Body)";
+
+                              Response response = okHttpClient.newCall(reqBuilder.build()).execute();
+                              item.durationMs = System.currentTimeMillis() - startTime;
+                              item.statusCode = response.code();
+
+                              Headers resHeaders = response.headers();
+                              StringBuilder resHeadersBuilder = new StringBuilder();
+                              Map<String, String> responseHeaderMap = new HashMap<>();
+
+                              for (int i = 0; i < resHeaders.size(); i++) {
+                                  String name = resHeaders.name(i);
+                                  String val = resHeaders.value(i);
+                                  resHeadersBuilder.append(name).append(": ").append(val).append("\n");
+                                  responseHeaderMap.put(name, val);
+                                  if ("Set-Cookie".equalsIgnoreCase(name)) {
+                                      CookieManager.getInstance().setCookie(url, val);
+                                      if ("No Cookies sent".equals(item.cookies)) {
+                                          item.cookies = "Set-Cookie: " + val;
+                                      } else {
+                                          item.cookies += "\nSet-Cookie: " + val;
+                                      }
+                                  }
+                              }
+                              item.responseHeaders = resHeadersBuilder.toString().trim();
+
+                              String contentTypeHeader = response.header("Content-Type", "text/plain");
+                              item.contentType = contentTypeHeader;
+
+                              ResponseBody body = response.body();
+                              byte[] bodyBytes = body != null ? body.bytes() : new byte[0];
+
+                              if (isTextOrJsonContentType(contentTypeHeader)) {
+                                  String rawText = new String(bodyBytes, StandardCharsets.UTF_8);
+                                  item.responseBody = formatPrettyIfJson(rawText);
+
+                                  if (contentTypeHeader.toLowerCase(Locale.US).contains("text/html")) {
+                                      String hookedHtml = "<script>" + getJsInterceptorScript() + "</script>" + rawText;
+                                      bodyBytes = hookedHtml.getBytes(StandardCharsets.UTF_8);
+                                  }
+                              } else {
+                                  item.responseBody = "[Binary / Media Payload: " + bodyBytes.length + " bytes (" + contentTypeHeader + ")]";
+                              }
+
+                              addLogItem(item);
+
+                              String mimeType = contentTypeHeader.split(";")[0].trim();
+                              if (TextUtils.isEmpty(mimeType)) mimeType = "text/plain";
+
+                              WebResourceResponse webRes = new WebResourceResponse(
+                                      mimeType,
+                                      "UTF-8",
+                                      new ByteArrayInputStream(bodyBytes)
+                              );
+                              int code = response.code();
+                              String msg = response.message();
+                              if (TextUtils.isEmpty(msg)) msg = "OK";
+                              if (code >= 100 && code < 600) {
+                                  webRes.setStatusCodeAndReasonPhrase(code, msg);
+                              }
+                              webRes.setResponseHeaders(responseHeaderMap);
+                              return webRes;
+
+                          } catch (Exception e) {
+                              item.durationMs = System.currentTimeMillis() - startTime;
+                              item.statusCode = 0;
+                              item.responseHeaders = "Error: " + e.getMessage();
+                              item.responseBody = "Request Failed: " + e.toString();
+                              addLogItem(item);
+                              return super.shouldInterceptRequest(view, request);
+                          }
+                      }
+                  });
+              }
+
+              private boolean isTextOrJsonContentType(String contentType) {
+                  if (contentType == null) return false;
+                  String lower = contentType.toLowerCase(Locale.US);
+                  return lower.contains("json")
+                          || lower.contains("text/")
+                          || lower.contains("javascript")
+                          || lower.contains("xml")
+                          || lower.contains("urlencoded")
+                          || lower.contains("graphql");
+              }
+
+              private String formatPrettyIfJson(String raw) {
+                  if (raw == null) return "";
+                  String trimmed = raw.trim();
+                  try {
+                      if (trimmed.startsWith("{")) {
+                          return new JSONObject(trimmed).toString(2);
+                      } else if (trimmed.startsWith("[")) {
+                          return new JSONArray(trimmed).toString(2);
+                      }
+                  } catch (Exception ignored) {
+                  }
+                  if (raw.length() > 150000) {
+                      return raw.substring(0, 150000) + "\n\n... [Truncated at 150 KB]";
+                  }
+                  return raw;
+              }
+
+              private void injectNetworkHook(WebView view) {
+                  view.evaluateJavascript(getJsInterceptorScript(), null);
+              }
+
+              private String getJsInterceptorScript() {
+                  return "(function() {" +
+                          "if (window.__devToolsHooked) return;" +
+                          "window.__devToolsHooked = true;" +
+                          "const origFetch = window.fetch;" +
+                          "window.fetch = async function(...args) {" +
+                          "  const start = Date.now();" +
+                          "  let url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';" +
+                          "  let opts = args[1] || {};" +
+                          "  let method = (opts.method || (args[0] && args[0].method) || 'GET').toUpperCase();" +
+                          "  if (method === 'GET') return origFetch.apply(this, args);" +
+                          "  let reqHeaders = JSON.stringify(opts.headers || {});" +
+                          "  let reqBody = typeof opts.body === 'string' ? opts.body : '[Object/Empty]';" +
+                          "  try {" +
+                          "    const res = await origFetch.apply(this, args);" +
+                          "    const clone = res.clone();" +
+                          "    let resHeaders = '';" +
+                          "    clone.headers.forEach((v, k) => { resHeaders += k + ': ' + v + '\\n'; });" +
+                          "    let text = await clone.text();" +
+                          "    window.AndroidDevTools.recordJsLog(method, url, res.status, clone.headers.get('content-type') || 'text/plain', reqHeaders, document.cookie || '', reqBody, resHeaders, text, Date.now() - start);" +
+                          "    return res;" +
+                          "  } catch (err) {" +
+                          "    window.AndroidDevTools.recordJsLog(method, url, 0, 'error', reqHeaders, document.cookie || '', reqBody, '', err.toString(), Date.now() - start);" +
+                          "    throw err;" +
+                          "  }" +
+                          "};" +
+                          "const OrigXHR = window.XMLHttpRequest;" +
+                          "window.XMLHttpRequest = function() {" +
+                          "  const xhr = new OrigXHR();" +
+                          "  let method = 'GET', url = '', start = 0, reqHeaders = {}, reqBody = '';" +
+                          "  const origOpen = xhr.open;" +
+                          "  xhr.open = function(m, u, ...rest) {" +
+                          "    method = (m || 'GET').toUpperCase();" +
+                          "    url = u;" +
+                          "    return origOpen.call(this, m, u, ...rest);" +
+                          "  };" +
+                          "  const origSetHeader = xhr.setRequestHeader;" +
+                          "  xhr.setRequestHeader = function(k, v) {" +
+                          "    reqHeaders[k] = v;" +
+                          "    return origSetHeader.call(this, k, v);" +
+                          "  };" +
+                          "  const origSend = xhr.send;" +
+                          "  xhr.send = function(body) {" +
+                          "    start = Date.now();" +
+                          "    reqBody = typeof body === 'string' ? body : '';" +
+                          "    xhr.addEventListener('loadend', function() {" +
+                          "      if (method !== 'GET') {" +
+                          "        let hLines = Object.keys(reqHeaders).map(k => k + ': ' + reqHeaders[k]).join('\\n');" +
+                          "        window.AndroidDevTools.recordJsLog(method, url, xhr.status, xhr.getResponseHeader('content-type') || '', hLines, document.cookie || '', reqBody, xhr.getAllResponseHeaders() || '', xhr.responseText || '', Date.now() - start);" +
+                          "      }" +
+                          "    });" +
+                          "    return origSend.call(this, body);" +
+                          "  };" +
+                          "  return xhr;" +
+                          "};" +
+                          "})();";
+              }
+
+              public class JSBridge {
+                  @JavascriptInterface
+                  public void recordJsLog(String method, String url, int status, String contentType,
+                                          String reqHeaders, String cookies, String reqBody,
+                                          String resHeaders, String resBody, long duration) {
+                      NetworkLogItem item = new NetworkLogItem();
+                      item.method = method;
+                      item.url = url;
+                      item.statusCode = status;
+                      item.contentType = contentType;
+                      item.requestHeaders = TextUtils.isEmpty(reqHeaders) ? "Default Browser Headers" : reqHeaders;
+                      item.cookies = TextUtils.isEmpty(cookies) ? "No Cookies" : cookies;
+                      item.requestBody = TextUtils.isEmpty(reqBody) ? "(Empty)" : reqBody;
+                      item.responseHeaders = TextUtils.isEmpty(resHeaders) ? "None" : resHeaders;
+                      item.responseBody = formatPrettyIfJson(resBody);
+                      item.durationMs = duration;
+                      item.timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+                      addLogItem(item);
+                  }
+              }
+
+              private void addLogItem(NetworkLogItem item) {
+                  mainHandler.post(() -> {
+                      networkLogs.add(0, item);
+                      updateLogCount();
+                      if (logsPanel.getVisibility() == View.VISIBLE) {
+                          logAdapter.notifyDataSetChanged();
+                      }
+                  });
+              }
+
+              private void updateLogCount() {
+                  toggleLogsBtn.setText("Logs (" + networkLogs.size() + ")");
+              }
+
+              private class LogAdapter extends BaseAdapter {
+                  @Override
+                  public int getCount() {
+                      return networkLogs.size();
+                  }
+
+                  @Override
+                  public Object getItem(int position) {
+                      return networkLogs.get(position);
+                  }
+
+                  @Override
+                  public long getItemId(int position) {
+                      return position;
+                  }
+
+                  @Override
+                  public View getView(int position, View convertView, ViewGroup parent) {
+                      LinearLayout row = new LinearLayout(MainActivity.this);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setPadding(24, 20, 24, 20);
+                      row.setGravity(Gravity.CENTER_VERTICAL);
+                      row.setBackgroundColor(position % 2 == 0 ? Color.parseColor("#1E1E1E") : Color.parseColor("#161616"));
+
+                      NetworkLogItem item = networkLogs.get(position);
+
+                      LinearLayout infoLayout = new LinearLayout(MainActivity.this);
+                      infoLayout.setOrientation(LinearLayout.VERTICAL);
+
+                      TextView topLine = new TextView(MainActivity.this);
+                      String statusBadge = item.statusCode > 0 ? String.valueOf(item.statusCode) : "ERR";
+                      topLine.setText("[" + item.method + "] [" + statusBadge + "]  •  " + item.durationMs + "ms  •  " + item.timestamp);
+                      topLine.setTextSize(12);
+                      topLine.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                      if (item.statusCode >= 200 && item.statusCode < 300) {
+                          topLine.setTextColor(Color.parseColor("#69F0AE"));
+                      } else if (item.statusCode >= 400 || item.statusCode == 0) {
+                          topLine.setTextColor(Color.parseColor("#FF5252"));
+                      } else {
+                          topLine.setTextColor(Color.parseColor("#FFD740"));
+                      }
+                      infoLayout.addView(topLine);
+
+                      TextView urlTv = new TextView(MainActivity.this);
+                      urlTv.setText(item.url);
+                      urlTv.setTextColor(Color.parseColor("#E0E0E0"));
+                      urlTv.setTextSize(13);
+                      urlTv.setMaxLines(2);
+                      urlTv.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                      infoLayout.addView(urlTv);
+
+                      row.addView(infoLayout, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                      Button detailBtn = createStyledButton("View Detail", "#3949AB");
+                      LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                      btnParams.setMarginStart(16);
+                      detailBtn.setOnClickListener(v -> showLogDetailDialog(item));
+                      row.addView(detailBtn, btnParams);
+
+                      return row;
+                  }
+              }
+
+              private void showLogDetailDialog(NetworkLogItem item) {
+                  ScrollView scrollView = new ScrollView(this);
+                  scrollView.setBackgroundColor(Color.parseColor("#181818"));
+                  LinearLayout container = new LinearLayout(this);
+                  container.setOrientation(LinearLayout.VERTICAL);
+                  container.setPadding(32, 32, 32, 32);
+
+                  String fullDetails =
+                          "=== GENERAL ===\n" +
+                          "URL: " + item.url + "\n" +
+                          "Method: " + item.method + "\n" +
+                          "Status Code: " + item.statusCode + "\n" +
+                          "Content-Type: " + item.contentType + "\n" +
+                          "Time: " + item.timestamp + " (" + item.durationMs + " ms)\n\n" +
+                          "=== REQUEST HEADERS ===\n" +
+                          item.requestHeaders + "\n\n" +
+                          "=== COOKIES ===\n" +
+                          item.cookies + "\n\n" +
+                          "=== REQUEST BODY ===\n" +
+                          item.requestBody + "\n\n" +
+                          "=== RESPONSE HEADERS ===\n" +
+                          item.responseHeaders + "\n\n" +
+                          "=== RESPONSE BODY (JSON / TEXT) ===\n" +
+                          item.responseBody;
+
+                  TextView detailTv = new TextView(this);
+                  detailTv.setText(fullDetails);
+                  detailTv.setTextColor(Color.parseColor("#EEEEEE"));
+                  detailTv.setTextSize(12);
+                  detailTv.setTypeface(Typeface.MONOSPACE);
+                  detailTv.setTextIsSelectable(true);
+                  container.addView(detailTv);
+                  scrollView.addView(container);
+
+                  new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                          .setTitle(item.method + " (" + item.statusCode + ") Network Detail")
+                          .setView(scrollView)
+                          .setPositiveButton("Close", null)
+                          .setNeutralButton("Copy All", (d, w) -> {
+                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                              cb.setPrimaryClip(ClipData.newPlainText("NetworkLog", fullDetails));
+                              Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show();
+                          })
+                          .setNegativeButton("Copy Response Body", (d, w) -> {
+                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                              cb.setPrimaryClip(ClipData.newPlainText("ResponseBody", item.responseBody));
+                              Toast.makeText(this, "Response body copied", Toast.LENGTH_SHORT).show();
+                          })
+                          .show();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (logsPanel.getVisibility() == View.VISIBLE) {
+                      logsPanel.setVisibility(View.GONE);
+                  } else if (webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: DevTools-Browser-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
