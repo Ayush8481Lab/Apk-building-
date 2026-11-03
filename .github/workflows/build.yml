@@ -1,143 +1,116 @@
-name: Build Web APK
-
-# =====================================================================
-#  WebView APK  +  LOCAL VIDEO-ONLY PROXY (127.0.0.1:8481)
-#
-#  Input: ONE domain (e.g. Ayush8481.com)
-#
-#  Endpoints exposed by the in-app proxy:
-#    GET  /Strem?path=/xyz/abx[&token=..][&src=..]
-#          → fetches Ayush8481.com/xyz/abx, extracts the video URL
-#            (mpd / m3u8 / mp4) + DRM license URL, returns a minimal
-#            HTML page that plays ONLY the video (no site UI).
-#    GET  /S/<host>/<path>       → CORS/Range proxy for any media URL
-#    GET  /health                → "OK"
-#
-#  The WebView loads Ayush8481.com normally. A small floating
-#  "▶ Video only" button is auto-injected when a <video> is present;
-#  tap it → opens the video-only player.
-# =====================================================================
+name: Build DevTools Browser APK
 
 on:
   workflow_dispatch:
-    inputs:
-      base_url:
-        description: "Domain only (e.g. Ayush8481.com) — protocol auto-added"
-        required: false
-      app_name:
-        description: "App name"
-        required: false
-      package_name:
-        description: "Package name (e.g. com.example.webapp)"
-        required: false
   push:
     branches: [ main, master ]
 
-permissions:
-  contents: read
-
-env:
-  # >>> THE ONLY THING YOU EDIT <<<
-  BASE_URL: ${{ github.event.inputs.base_url || 'hotstar.com' }}
-
-  APP_NAME: ${{ github.event.inputs.app_name || 'VideoOnly' }}
-  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.efuch.webapp' }}
-
-  BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
-  ICON_URL:  'https://static.vecteezy.com/system/resources/previews/056/505/637/non_2x/jiohotstar-app-icon-on-transparent-background-free-png.png'
-  PROXY_PORT: '8481'
-
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: '8.7' }
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
 
-      - name: Generate Android WebView project
+      - name: Generate Android Project Structure & Source Code
         run: |
-          set -e
-          mkdir -p webapp && cd webapp
-          PKG_PATH=$(echo "$PACKAGE_NAME" | tr . /)
-          mkdir -p app/src/main/java/$PKG_PATH
-          mkdir -p app/src/main/res/drawable
+          mkdir -p app/src/main/java/com/devtools/browser
 
-          if [ -n "$ICON_URL" ]; then
-            curl -fsSL "$ICON_URL" -o app/src/main/res/drawable/ic_launcher.png || true
-          fi
-          if [ -f app/src/main/res/drawable/ic_launcher.png ]; then
-            export ICON_REF="@drawable/ic_launcher"
-          else
-            export ICON_REF="@android:drawable/sym_def_app_icon"
-          fi
-
-          cat > settings.gradle <<'EOF'
+          cat << 'EOF' > settings.gradle
           pluginManagement {
-              repositories { google(); mavenCentral(); gradlePluginPortal() }
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
           }
           dependencyResolutionManagement {
-              repositories { google(); mavenCentral() }
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
           }
-          rootProject.name = "WebApp"
+          rootProject.name = "DevToolsBrowser"
           include ':app'
           EOF
 
-          cat > build.gradle <<'EOF'
-          plugins { id 'com.android.application' version '8.5.2' apply false }
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.3.0' apply false
+          }
           EOF
 
-          cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx2g
-          android.useAndroidX=false
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
           EOF
 
-          cat > app/build.gradle <<'EOF'
-          plugins { id 'com.android.application' }
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
           android {
-              namespace '__PKG__'
+              namespace 'com.devtools.browser'
               compileSdk 34
+
               defaultConfig {
-                  applicationId '__PKG__'
-                  minSdk 21
+                  applicationId "com.devtools.browser"
+                  minSdk 24
                   targetSdk 34
                   versionCode 1
-                  versionName '1.0'
+                  versionName "1.0"
               }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
               }
-              buildTypes { release { minifyEnabled false } }
+          }
+
+          dependencies {
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
           }
           EOF
 
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
               <application
-                  android:label="__APP_NAME__"
-                  android:icon="__ICON_REF__"
-                  android:hardwareAccelerated="true"
+                  android:allowBackup="true"
+                  android:label="DevTools Browser"
                   android:usesCleartextTraffic="true"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:hardwareAccelerated="true"
-                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|smallestScreenSize|screenLayout|uiMode|density|fontScale"
-                      android:windowSoftInputMode="adjustResize">
+                      android:configChanges="orientation|screenSize|keyboardHidden">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -147,1048 +120,655 @@ jobs:
           </manifest>
           EOF
 
-          cat > app/src/main/java/$PKG_PATH/MainActivity.java <<'EOF'
-          package __PKG__;
+          cat << 'EOF' > app/src/main/java/com/devtools/browser/MainActivity.java
+          package com.devtools.browser;
 
           import android.app.Activity;
-          import android.content.Intent;
-          import android.content.SharedPreferences;
-          import android.content.pm.ActivityInfo;
-          import android.graphics.Bitmap;
+          import android.app.AlertDialog;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
           import android.graphics.Color;
-          import android.graphics.drawable.ColorDrawable;
-          import android.net.Uri;
-          import android.os.Build;
+          import android.graphics.Typeface;
           import android.os.Bundle;
-          import android.util.Log;
-          import android.view.DisplayCutout;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.text.TextUtils;
+          import android.view.Gravity;
+          import android.view.KeyEvent;
           import android.view.View;
-          import android.view.Window;
-          import android.view.WindowInsets;
-          import android.view.WindowManager;
+          import android.view.ViewGroup;
+          import android.view.inputmethod.EditorInfo;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
           import android.webkit.WebChromeClient;
           import android.webkit.WebResourceRequest;
           import android.webkit.WebResourceResponse;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
+          import android.widget.BaseAdapter;
+          import android.widget.Button;
+          import android.widget.EditText;
           import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ListView;
+          import android.widget.ProgressBar;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
 
           import org.json.JSONArray;
           import org.json.JSONObject;
 
-          import java.io.BufferedReader;
           import java.io.ByteArrayInputStream;
-          import java.io.ByteArrayOutputStream;
-          import java.io.IOException;
-          import java.io.InputStream;
-          import java.io.InputStreamReader;
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.InetAddress;
-          import java.net.ServerSocket;
-          import java.net.Socket;
-          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.text.SimpleDateFormat;
           import java.util.ArrayList;
           import java.util.Collections;
+          import java.util.Date;
           import java.util.HashMap;
-          import java.util.HashSet;
           import java.util.List;
           import java.util.Locale;
           import java.util.Map;
-          import java.util.Set;
-          import java.util.regex.Matcher;
-          import java.util.regex.Pattern;
+          import java.util.concurrent.TimeUnit;
+
+          import okhttp3.Headers;
+          import okhttp3.OkHttpClient;
+          import okhttp3.Request;
+          import okhttp3.Response;
+          import okhttp3.ResponseBody;
 
           public class MainActivity extends Activity {
 
-              private static final String BASE_URL_CFG   = "__BASE_URL__";
-              private static final String BLOCK_API      = "__BLOCK_API__";
-              private static final int    PROXY_PORT     = __PROXY_PORT__;
-              private static final String TAG            = "WebApp";
-
-              private static final String DESKTOP_UA =
-                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      + "Chrome/124.0.0.0 Safari/537.36";
-              private static final int DESKTOP_WIDTH = 1024;
-
-              private static final String VIEWPORT_JS =
-                      "(function(){if(window.__dw)return;window.__dw=1;"
-                      + "var C='width=" + DESKTOP_WIDTH + ", user-scalable=yes';"
-                      + "function a(){var h=document.head||document.documentElement;if(!h)return;"
-                      + "var m=document.querySelector('meta[name=viewport]');"
-                      + "if(!m){m=document.createElement('meta');m.name='viewport';h.appendChild(m);}"
-                      + "if(m.getAttribute('content')!==C)m.setAttribute('content',C);}"
-                      + "a();new MutationObserver(a).observe(document.documentElement,"
-                      + "{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();";
-
-              // Injects a floating "Video only" button when a <video> exists
-              private static final String INJECT_JS =
-                  "(function(){if(window.__vo){return;}window.__vo=1;"
-                + "function find(){var v=document.querySelector('video');"
-                + "var b=document.getElementById('__vo_btn');"
-                + "if(v&&!b){b=document.createElement('div');b.id='__vo_btn';b.textContent='\\u25B6 Video only';"
-                + "b.style.cssText='position:fixed;top:12px;right:12px;z-index:2147483647;"
-                + "background:#e50914;color:#fff;padding:10px 18px;border-radius:22px;"
-                + "font:bold 14px system-ui,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.5);"
-                + "cursor:pointer;user-select:none;';"
-                + "b.onclick=function(){var p=location.pathname+location.search;"
-                + "var s='';var vv=document.querySelector('video');"
-                + "if(vv){s=vv.currentSrc||vv.src||'';if(s.indexOf('blob:')===0||s.indexOf('data:')===0)s='';}"
-                + "var u='http://localhost:__PORT__/Strem?path='+encodeURIComponent(p);"
-                + "if(s)u+='&src='+encodeURIComponent(s);location.href=u;};"
-                + "document.body.appendChild(b);}"
-                + "else if(!v&&b){b.remove();}}"
-                + "setInterval(find,1500);find();})();";
-
-              private FrameLayout frame, content, fullscreenContainer;
-              private WebView web;
-              private SharedPreferences prefs;
-
-              private View customView;
-              private WebChromeClient.CustomViewCallback customCallback;
-              private int padL, padT, padR, padB;
-
-              private final Set<String> blockDomains = Collections.synchronizedSet(new HashSet<String>());
-              private final Set<String> blockUrls    = Collections.synchronizedSet(new HashSet<String>());
-
-              private ServerSocket proxyServerSocket;
-
-              // ------------------------------------------------------------------
-              //  BASE URL helpers
-              // ------------------------------------------------------------------
-              private String baseUrl() {
-                  String b = BASE_URL_CFG == null ? "" : BASE_URL_CFG.trim();
-                  if (b.isEmpty()) b = "https://example.com";
-                  if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b;
-                  while (b.endsWith("/")) b = b.substring(0, b.length() - 1);
-                  return b;
+              public static class NetworkLogItem {
+                  public String id;
+                  public String method;
+                  public String url;
+                  public int statusCode;
+                  public String contentType;
+                  public String requestHeaders;
+                  public String cookies;
+                  public String requestBody;
+                  public String responseHeaders;
+                  public String responseBody;
+                  public String timestamp;
+                  public long durationMs;
               }
 
-              private String baseHost() {
-                  try { return Uri.parse(baseUrl()).getHost(); }
-                  catch (Exception e) { return ""; }
-              }
+              private WebView webView;
+              private EditText urlInput;
+              private ProgressBar progressBar;
+              private LinearLayout logsPanel;
+              private Button toggleLogsBtn;
+              private ListView logsListView;
+              private LogAdapter logAdapter;
+              private final List<NetworkLogItem> networkLogs = Collections.synchronizedList(new ArrayList<>());
+              private final Handler mainHandler = new Handler(Looper.getMainLooper());
+              private OkHttpClient okHttpClient;
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  prefs = getSharedPreferences("blocklist", MODE_PRIVATE);
 
-                  Window w = getWindow();
-                  w.setBackgroundDrawable(new ColorDrawable(Color.BLACK));
-                  w.setStatusBarColor(Color.BLACK);
-                  w.setNavigationBarColor(Color.BLACK);
-                  if (Build.VERSION.SDK_INT >= 28) {
-                      WindowManager.LayoutParams lp = w.getAttributes();
-                      lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
-                              ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                              : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                      w.setAttributes(lp);
-                  }
+                  okHttpClient = new OkHttpClient.Builder()
+                          .followRedirects(true)
+                          .followSslRedirects(true)
+                          .connectTimeout(15, TimeUnit.SECONDS)
+                          .readTimeout(15, TimeUnit.SECONDS)
+                          .build();
 
-                  frame = new FrameLayout(this);
-                  frame.setBackgroundColor(Color.BLACK);
-                  content = new FrameLayout(this);
-                  web = new WebView(this);
-                  content.addView(web, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT,
-                          FrameLayout.LayoutParams.MATCH_PARENT));
-                  fullscreenContainer = new FrameLayout(this);
-                  fullscreenContainer.setBackgroundColor(Color.BLACK);
-                  fullscreenContainer.setVisibility(View.GONE);
-                  frame.addView(content, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT,
-                          FrameLayout.LayoutParams.MATCH_PARENT));
-                  frame.addView(fullscreenContainer, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT,
-                          FrameLayout.LayoutParams.MATCH_PARENT));
-                  setContentView(frame);
-                  applyNormalSystemUi();
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.parseColor("#121212"));
 
-                  frame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
-                      @Override
-                      public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
-                          int l = in.getSystemWindowInsetLeft(), t = in.getSystemWindowInsetTop();
-                          int r = in.getSystemWindowInsetRight(), b = in.getSystemWindowInsetBottom();
-                          if (Build.VERSION.SDK_INT >= 28) {
-                              DisplayCutout dc = in.getDisplayCutout();
-                              if (dc != null) {
-                                  l = Math.max(l, dc.getSafeInsetLeft());
-                                  t = Math.max(t, dc.getSafeInsetTop());
-                                  r = Math.max(r, dc.getSafeInsetRight());
-                                  b = Math.max(b, dc.getSafeInsetBottom());
-                              }
-                          }
-                          padL = l; padT = t; padR = r; padB = b;
-                          if (customView == null) content.setPadding(l, t, r, b);
-                          return in;
+                  // Top Navigation Bar
+                  LinearLayout topBar = new LinearLayout(this);
+                  topBar.setOrientation(LinearLayout.HORIZONTAL);
+                  topBar.setPadding(16, 16, 16, 16);
+                  topBar.setGravity(Gravity.CENTER_VERTICAL);
+                  topBar.setBackgroundColor(Color.parseColor("#1E1E1E"));
+
+                  urlInput = new EditText(this);
+                  urlInput.setHint("Enter URL (e.g. https://httpbin.org/get)");
+                  urlInput.setHintTextColor(Color.parseColor("#888888"));
+                  urlInput.setTextColor(Color.WHITE);
+                  urlInput.setSingleLine(true);
+                  urlInput.setImeOptions(EditorInfo.IME_ACTION_GO);
+                  urlInput.setBackgroundColor(Color.parseColor("#2C2C2C"));
+                  urlInput.setPadding(24, 18, 24, 18);
+                  LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                  urlParams.setMarginEnd(12);
+                  topBar.addView(urlInput, urlParams);
+
+                  Button goBtn = createStyledButton("GO", "#2979FF");
+                  goBtn.setOnClickListener(v -> loadTargetUrl());
+                  topBar.addView(goBtn);
+
+                  toggleLogsBtn = createStyledButton("Logs (0)", "#00C853");
+                  LinearLayout.LayoutParams logBtnParams = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  logBtnParams.setMarginStart(12);
+                  toggleLogsBtn.setOnClickListener(v -> {
+                      if (logsPanel.getVisibility() == View.VISIBLE) {
+                          logsPanel.setVisibility(View.GONE);
+                      } else {
+                          logsPanel.setVisibility(View.VISIBLE);
+                          logAdapter.notifyDataSetChanged();
                       }
                   });
-                  frame.requestApplyInsets();
+                  topBar.addView(toggleLogsBtn, logBtnParams);
 
-                  WebSettings s = web.getSettings();
-                  s.setJavaScriptEnabled(true);
-                  s.setDomStorageEnabled(true);
-                  s.setDatabaseEnabled(true);
-                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-                  s.setMediaPlaybackRequiresUserGesture(false);
-                  s.setUserAgentString(DESKTOP_UA);
-                  s.setUseWideViewPort(true);
-                  s.setLoadWithOverviewMode(true);
-                  s.setSupportZoom(true);
-                  s.setBuiltInZoomControls(true);
-                  s.setDisplayZoomControls(false);
-                  s.setTextZoom(100);
-                  if (Build.VERSION.SDK_INT >= 19) WebView.setWebContentsDebuggingEnabled(true);
+                  root.addView(topBar, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-                  web.setWebChromeClient(new WebChromeClient() {
-                      @Override public void onShowCustomView(View view, CustomViewCallback cb) {
-                          if (customView != null) { cb.onCustomViewHidden(); return; }
-                          customView = view; customCallback = cb;
-                          fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
-                                  FrameLayout.LayoutParams.MATCH_PARENT,
-                                  FrameLayout.LayoutParams.MATCH_PARENT));
-                          fullscreenContainer.setVisibility(View.VISIBLE);
-                          content.setVisibility(View.INVISIBLE);
-                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                          applyFullscreenSystemUi();
-                      }
-                      @Override public void onHideCustomView() { exitCustomView(); }
-                      @Override public Bitmap getDefaultVideoPoster() {
-                          return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
-                      }
+                  progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  progressBar.setMax(100);
+                  root.addView(progressBar, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 8));
+
+                  // Main Content Area (WebView + Collectible Logs Drawer)
+                  FrameLayout contentFrame = new FrameLayout(this);
+
+                  webView = new WebView(this);
+                  setupWebView();
+                  contentFrame.addView(webView, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  // Network Logs Panel Overlay
+                  logsPanel = new LinearLayout(this);
+                  logsPanel.setOrientation(LinearLayout.VERTICAL);
+                  logsPanel.setBackgroundColor(Color.parseColor("#F5181818"));
+                  logsPanel.setVisibility(View.GONE);
+
+                  LinearLayout logHeader = new LinearLayout(this);
+                  logHeader.setOrientation(LinearLayout.HORIZONTAL);
+                  logHeader.setPadding(24, 16, 24, 16);
+                  logHeader.setGravity(Gravity.CENTER_VERTICAL);
+                  logHeader.setBackgroundColor(Color.parseColor("#252525"));
+
+                  TextView titleTv = new TextView(this);
+                  titleTv.setText("Network Logs Inspector");
+                  titleTv.setTextColor(Color.WHITE);
+                  titleTv.setTextSize(16);
+                  titleTv.setTypeface(null, Typeface.BOLD);
+                  logHeader.addView(titleTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                  Button clearBtn = createStyledButton("Clear", "#D32F2F");
+                  clearBtn.setOnClickListener(v -> {
+                      networkLogs.clear();
+                      updateLogCount();
+                      logAdapter.notifyDataSetChanged();
                   });
+                  logHeader.addView(clearBtn);
 
-                  web.setWebViewClient(new WebViewClient() {
-                      @Override public void onPageStarted(WebView v, String url, Bitmap f) {
-                          super.onPageStarted(v, url, f);
-                          v.evaluateJavascript(VIEWPORT_JS, null);
-                      }
-                      @Override public void onPageFinished(WebView v, String url) {
-                          super.onPageFinished(v, url);
-                          v.evaluateJavascript(VIEWPORT_JS, null);
-                          String inject = INJECT_JS.replace("__PORT__", String.valueOf(PROXY_PORT));
-                          v.evaluateJavascript(inject, null);
-                      }
-                      @Override public WebResourceResponse shouldInterceptRequest(
-                              WebView view, WebResourceRequest request) {
-                          String url = request.getUrl().toString();
-                          // Log media/license URLs so the user can see them in logcat
-                          if (isMediaUrl(url))   Log.d(TAG, "[MEDIA DETECTED] " + url);
-                          if (isLicenseUrl(url)) Log.d(TAG, "[LICENSE DETECTED] " + url);
-                          // Never block our own proxy
-                          if (url.startsWith("http://localhost:" + PROXY_PORT)
-                                  || url.startsWith("http://127.0.0.1:" + PROXY_PORT))
-                              return super.shouldInterceptRequest(view, request);
-                          if (isBlocked(url)) {
-                              Log.d(TAG, "BLOCKED: " + url);
-                              return new WebResourceResponse("text/plain", "UTF-8",
-                                      403, "Blocked", new HashMap<String, String>(),
-                                      new ByteArrayInputStream(new byte[0]));
-                          }
-                          return super.shouldInterceptRequest(view, request);
-                      }
-                      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                          String url = request.getUrl().toString();
-                          if (isBlocked(url)) { Log.d(TAG, "BLOCKED NAV: " + url); return true; }
-                          String scheme = request.getUrl().getScheme();
-                          if ("http".equals(scheme) || "https".equals(scheme)) return false;
-                          try { startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl())); }
-                          catch (Exception ignored) { }
+                  Button closeBtn = createStyledButton("Close", "#555555");
+                  LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  closeParams.setMarginStart(12);
+                  closeBtn.setOnClickListener(v -> logsPanel.setVisibility(View.GONE));
+                  logHeader.addView(closeBtn, closeParams);
+
+                  logsPanel.addView(logHeader);
+
+                  logsListView = new ListView(this);
+                  logsListView.setDividerHeight(2);
+                  logAdapter = new LogAdapter();
+                  logsListView.setAdapter(logAdapter);
+                  logsPanel.addView(logsListView, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  contentFrame.addView(logsPanel, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  root.addView(contentFrame, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+
+                  urlInput.setOnEditorActionListener((v, actionId, event) -> {
+                      if (actionId == EditorInfo.IME_ACTION_GO ||
+                              (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+                          loadTargetUrl();
                           return true;
                       }
+                      return false;
                   });
 
-                  startProxyServer();
-
-                  String cached = prefs.getString("json", null);
-                  final boolean hadCache = cached != null && parse(cached);
-                  if (hadCache) web.loadUrl(baseUrl());
-
-                  new Thread(new Runnable() {
-                      @Override public void run() {
-                          String json = download(BLOCK_API);
-                          if (json != null && parse(json)) prefs.edit().putString("json", json).apply();
-                          if (!hadCache) runOnUiThread(new Runnable() {
-                              @Override public void run() { web.loadUrl(baseUrl()); }
-                          });
-                      }
-                  }).start();
+                  urlInput.setText("https://jsonplaceholder.typicode.com");
+                  loadTargetUrl();
               }
 
-              // ============================================================
-              //  PROXY SERVER
-              // ============================================================
-              private void startProxyServer() {
-                  try {
-                      proxyServerSocket = new ServerSocket(PROXY_PORT, 50, InetAddress.getByName("127.0.0.1"));
-                      Thread t = new Thread(new Runnable() {
-                          @Override public void run() {
-                              while (!proxyServerSocket.isClosed()) {
-                                  try {
-                                      final Socket client = proxyServerSocket.accept();
-                                      Thread h = new Thread(new Runnable() {
-                                          @Override public void run() { handleProxyClient(client); }
-                                      });
-                                      h.setDaemon(true); h.start();
-                                  } catch (IOException e) {
-                                      if (!proxyServerSocket.isClosed()) Log.e(TAG, "accept", e);
-                                      break;
+              private Button createStyledButton(String text, String bgHex) {
+                  Button btn = new Button(this);
+                  btn.setText(text);
+                  btn.setTextColor(Color.WHITE);
+                  btn.setTextSize(12);
+                  btn.setAllCaps(false);
+                  btn.setPadding(28, 12, 28, 12);
+                  btn.setBackgroundColor(Color.parseColor(bgHex));
+                  return btn;
+              }
+
+              private void loadTargetUrl() {
+                  String raw = urlInput.getText().toString().trim();
+                  if (TextUtils.isEmpty(raw)) return;
+                  if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
+                      raw = "https://" + raw;
+                      urlInput.setText(raw);
+                  }
+                  webView.loadUrl(raw);
+              }
+
+              @SuppressWarnings("SetJavaScriptEnabled")
+              private void setupWebView() {
+                  CookieManager cookieManager = CookieManager.getInstance();
+                  cookieManager.setAcceptCookie(true);
+                  cookieManager.setAcceptThirdPartyCookies(webView, true);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  settings.setUserAgentString(settings.getUserAgentString() + " DevToolsBrowser/1.0");
+
+                  webView.addJavascriptInterface(new JSBridge(), "AndroidDevTools");
+
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onProgressChanged(WebView view, int newProgress) {
+                          progressBar.setProgress(newProgress);
+                          progressBar.setVisibility(newProgress == 100 ? View.GONE : View.VISIBLE);
+                      }
+                  });
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                          super.onPageStarted(view, url, favicon);
+                          urlInput.setText(url);
+                          injectNetworkHook(view);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          super.onPageFinished(view, url);
+                          injectNetworkHook(view);
+                      }
+
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          String method = request.getMethod();
+
+                          // Only proxy GET HTTP/HTTPS requests directly in shouldInterceptRequest so POST bodies handled by JS hook aren't consumed
+                          if (!"GET".equalsIgnoreCase(method) || (!url.startsWith("http://") && !url.startsWith("https://"))) {
+                              return super.shouldInterceptRequest(view, request);
+                          }
+
+                          long startTime = System.currentTimeMillis();
+                          NetworkLogItem item = new NetworkLogItem();
+                          item.method = method;
+                          item.url = url;
+                          item.timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+
+                          try {
+                              Request.Builder reqBuilder = new Request.Builder().url(url).get();
+                              StringBuilder reqHeadersStr = new StringBuilder();
+
+                              Map<String, String> webViewHeaders = request.getRequestHeaders();
+                              if (webViewHeaders != null) {
+                                  for (Map.Entry<String, String> entry : webViewHeaders.entrySet()) {
+                                      reqBuilder.header(entry.getKey(), entry.getValue());
+                                      reqHeadersStr.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n");
                                   }
                               }
-                          }
-                      });
-                      t.setDaemon(true); t.start();
-                      Log.d(TAG, "Proxy on 127.0.0.1:" + PROXY_PORT);
-                  } catch (IOException e) {
-                      Log.e(TAG, "Proxy start failed", e);
-                  }
-              }
 
-              private void stopProxyServer() {
-                  try {
-                      if (proxyServerSocket != null && !proxyServerSocket.isClosed()) proxyServerSocket.close();
-                  } catch (IOException ignored) { }
-              }
-
-              private void handleProxyClient(Socket client) {
-                  HttpURLConnection conn = null;
-                  try {
-                      client.setSoTimeout(120000);
-                      InputStream in = client.getInputStream();
-                      OutputStream out = client.getOutputStream();
-                      BufferedReader reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-
-                      String requestLine = reader.readLine();
-                      if (requestLine == null || requestLine.isEmpty()) { client.close(); return; }
-                      String[] parts = requestLine.split(" ");
-                      if (parts.length < 3) { client.close(); return; }
-                      String method = parts[0].toUpperCase(Locale.ROOT);
-                      String rawTarget = parts[1];
-
-                      Map<String, String> reqHeaders = new HashMap<String, String>();
-                      int contentLength = 0;
-                      String line;
-                      while ((line = reader.readLine()) != null && !line.isEmpty()) {
-                          int idx = line.indexOf(':');
-                          if (idx > 0) {
-                              String k = line.substring(0, idx).trim().toLowerCase(Locale.ROOT);
-                              String v = line.substring(idx + 1).trim();
-                              reqHeaders.put(k, v);
-                              if (k.equals("content-length")) {
-                                  try { contentLength = Integer.parseInt(v); } catch (Exception ignored) {}
+                              String cookieStr = CookieManager.getInstance().getCookie(url);
+                              if (!TextUtils.isEmpty(cookieStr)) {
+                                  reqBuilder.header("Cookie", cookieStr);
+                                  reqHeadersStr.append("Cookie: ").append(cookieStr).append("\n");
+                                  item.cookies = cookieStr;
+                              } else {
+                                  item.cookies = "No Cookies sent";
                               }
+
+                              item.requestHeaders = reqHeadersStr.length() > 0 ? reqHeadersStr.toString().trim() : "None";
+                              item.requestBody = "(GET Request - No Body)";
+
+                              Response response = okHttpClient.newCall(reqBuilder.build()).execute();
+                              item.durationMs = System.currentTimeMillis() - startTime;
+                              item.statusCode = response.code();
+
+                              Headers resHeaders = response.headers();
+                              StringBuilder resHeadersBuilder = new StringBuilder();
+                              Map<String, String> responseHeaderMap = new HashMap<>();
+
+                              for (int i = 0; i < resHeaders.size(); i++) {
+                                  String name = resHeaders.name(i);
+                                  String val = resHeaders.value(i);
+                                  resHeadersBuilder.append(name).append(": ").append(val).append("\n");
+                                  responseHeaderMap.put(name, val);
+                                  if ("Set-Cookie".equalsIgnoreCase(name)) {
+                                      CookieManager.getInstance().setCookie(url, val);
+                                      if ("No Cookies sent".equals(item.cookies)) {
+                                          item.cookies = "Set-Cookie: " + val;
+                                      } else {
+                                          item.cookies += "\nSet-Cookie: " + val;
+                                      }
+                                  }
+                              }
+                              item.responseHeaders = resHeadersBuilder.toString().trim();
+
+                              String contentTypeHeader = response.header("Content-Type", "text/plain");
+                              item.contentType = contentTypeHeader;
+
+                              ResponseBody body = response.body();
+                              byte[] bodyBytes = body != null ? body.bytes() : new byte[0];
+
+                              if (isTextOrJsonContentType(contentTypeHeader)) {
+                                  String rawText = new String(bodyBytes, StandardCharsets.UTF_8);
+                                  item.responseBody = formatPrettyIfJson(rawText);
+
+                                  // If HTML document, prepend our JS fetch/XHR interceptor hook
+                                  if (contentTypeHeader.toLowerCase(Locale.US).contains("text/html")) {
+                                      String hookedHtml = "<script>" + getJsInterceptorScript() + "</script>" + rawText;
+                                      bodyBytes = hookedHtml.getBytes(StandardCharsets.UTF_8);
+                                  }
+                              } else {
+                                  item.responseBody = "[Binary / Media Payload: " + bodyBytes.length + " bytes (" + contentTypeHeader + ")]";
+                              }
+
+                              addLogItem(item);
+
+                              String mimeType = contentTypeHeader.split(";")[0].trim();
+                              if (TextUtils.isEmpty(mimeType)) mimeType = "text/plain";
+
+                              WebResourceResponse webRes = new WebResourceResponse(
+                                      mimeType,
+                                      "UTF-8",
+                                      new ByteArrayInputStream(bodyBytes)
+                              );
+                              int code = response.code();
+                              String msg = response.message();
+                              if (TextUtils.isEmpty(msg)) msg = "OK";
+                              if (code >= 100 && code < 600) {
+                                  webRes.setStatusCodeAndReasonPhrase(code, msg);
+                              }
+                              webRes.setResponseHeaders(responseHeaderMap);
+                              return webRes;
+
+                          } catch (Exception e) {
+                              item.durationMs = System.currentTimeMillis() - startTime;
+                              item.statusCode = 0;
+                              item.responseHeaders = "Error: " + e.getMessage();
+                              item.responseBody = "Request Failed: " + e.toString();
+                              addLogItem(item);
+                              return super.shouldInterceptRequest(view, request);
                           }
                       }
-                      byte[] reqBody = null;
-                      if (contentLength > 0) {
-                          reqBody = new byte[contentLength];
-                          int read = 0;
-                          while (read < contentLength) {
-                              int r = in.read(reqBody, read, contentLength - read);
-                              if (r < 0) break;
-                              read += r;
-                          }
+                  });
+              }
+
+              private boolean isTextOrJsonContentType(String contentType) {
+                  if (contentType == null) return false;
+                  String lower = contentType.toLowerCase(Locale.US);
+                  return lower.contains("json")
+                          || lower.contains("text/")
+                          || lower.contains("javascript")
+                          || lower.contains("xml")
+                          || lower.contains("urlencoded")
+                          || lower.contains("graphql");
+              }
+
+              private String formatPrettyIfJson(String raw) {
+                  if (raw == null) return "";
+                  String trimmed = raw.trim();
+                  try {
+                      if (trimmed.startsWith("{")) {
+                          return new JSONObject(trimmed).toString(2);
+                      } else if (trimmed.startsWith("[")) {
+                          return new JSONArray(trimmed).toString(2);
                       }
+                  } catch (Exception ignored) {
+                  }
+                  if (raw.length() > 150000) {
+                      return raw.substring(0, 150000) + "\n\n... [Truncated at 150 KB]";
+                  }
+                  return raw;
+              }
 
-                      if ("OPTIONS".equals(method)) {
-                          writeHttpResponse(out, 204, "No Content", null, new byte[0]);
-                          client.close(); return;
-                      }
+              private void injectNetworkHook(WebView view) {
+                  view.evaluateJavascript(getJsInterceptorScript(), null);
+              }
 
-                      Uri uri = Uri.parse(rawTarget);
-                      String path = uri.getPath() == null ? "" : uri.getPath();
+              private String getJsInterceptorScript() {
+                  return "(function() {" +
+                          "if (window.__devToolsHooked) return;" +
+                          "window.__devToolsHooked = true;" +
+                          "const origFetch = window.fetch;" +
+                          "window.fetch = async function(...args) {" +
+                          "  const start = Date.now();" +
+                          "  let url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';" +
+                          "  let opts = args[1] || {};" +
+                          "  let method = (opts.method || (args[0] && args[0].method) || 'GET').toUpperCase();" +
+                          "  if (method === 'GET') return origFetch.apply(this, args);" +
+                          "  let reqHeaders = JSON.stringify(opts.headers || {});" +
+                          "  let reqBody = typeof opts.body === 'string' ? opts.body : '[Object/Empty]';" +
+                          "  try {" +
+                          "    const res = await origFetch.apply(this, args);" +
+                          "    const clone = res.clone();" +
+                          "    let resHeaders = '';" +
+                          "    clone.headers.forEach((v, k) => { resHeaders += k + ': ' + v + '\\n'; });" +
+                          "    let text = await clone.text();" +
+                          "    window.AndroidDevTools.recordJsLog(method, url, res.status, clone.headers.get('content-type') || 'text/plain', reqHeaders, document.cookie || '', reqBody, resHeaders, text, Date.now() - start);" +
+                          "    return res;" +
+                          "  } catch (err) {" +
+                          "    window.AndroidDevTools.recordJsLog(method, url, 0, 'error', reqHeaders, document.cookie || '', reqBody, '', err.toString(), Date.now() - start);" +
+                          "    throw err;" +
+                          "  }" +
+                          "};" +
+                          "const OrigXHR = window.XMLHttpRequest;" +
+                          "window.XMLHttpRequest = function() {" +
+                          "  const xhr = new OrigXHR();" +
+                          "  let method = 'GET', url = '', start = 0, reqHeaders = {}, reqBody = '';" +
+                          "  const origOpen = xhr.open;" +
+                          "  xhr.open = function(m, u, ...rest) {" +
+                          "    method = (m || 'GET').toUpperCase();" +
+                          "    url = u;" +
+                          "    return origOpen.call(this, m, u, ...rest);" +
+                          "  };" +
+                          "  const origSetHeader = xhr.setRequestHeader;" +
+                          "  xhr.setRequestHeader = function(k, v) {" +
+                          "    reqHeaders[k] = v;" +
+                          "    return origSetHeader.call(this, k, v);" +
+                          "  };" +
+                          "  const origSend = xhr.send;" +
+                          "  xhr.send = function(body) {" +
+                          "    start = Date.now();" +
+                          "    reqBody = typeof body === 'string' ? body : '';" +
+                          "    xhr.addEventListener('loadend', function() {" +
+                          "      if (method !== 'GET') {" +
+                          "        let hLines = Object.keys(reqHeaders).map(k => k + ': ' + reqHeaders[k]).join('\\n');" +
+                          "        window.AndroidDevTools.recordJsLog(method, url, xhr.status, xhr.getResponseHeader('content-type') || '', hLines, document.cookie || '', reqBody, xhr.getAllResponseHeaders() || '', xhr.responseText || '', Date.now() - start);" +
+                          "      }" +
+                          "    });" +
+                          "    return origSend.call(this, body);" +
+                          "  };" +
+                          "  return xhr;" +
+                          "};" +
+                          "})();";
+              }
 
-                      if (path.equals("/health") || path.equals("/")) {
-                          writeHttpResponse(out, 200, "OK", "text/plain", "OK".getBytes("UTF-8"));
-                          client.close(); return;
-                      }
-
-                      if (path.equals("/Strem") || path.startsWith("/Strem/")) {
-                          handleStrem(uri, out);
-                          client.close(); return;
-                      }
-
-                      if (path.startsWith("/S/")) {
-                          handleMediaProxy(method, path.substring(3), uri.getQuery(), reqHeaders, reqBody, out);
-                          client.close(); return;
-                      }
-
-                      writeHttpResponse(out, 404, "Not Found", "text/plain", "Not Found".getBytes("UTF-8"));
-                      client.close();
-
-                  } catch (Exception e) {
-                      Log.e(TAG, "handleProxyClient", e);
-                      try {
-                          OutputStream out = client.getOutputStream();
-                          writeHttpResponse(out, 502, "Bad Gateway", "text/plain", "Proxy error".getBytes("UTF-8"));
-                      } catch (IOException ignored) { }
-                      try { client.close(); } catch (IOException ignored) { }
-                  } finally {
-                      if (conn != null) conn.disconnect();
+              public class JSBridge {
+                  @JavascriptInterface
+                  public void recordJsLog(String method, String url, int status, String contentType,
+                                          String reqHeaders, String cookies, String reqBody,
+                                          String resHeaders, String resBody, long duration) {
+                      NetworkLogItem item = new NetworkLogItem();
+                      item.method = method;
+                      item.url = url;
+                      item.statusCode = status;
+                      item.contentType = contentType;
+                      item.requestHeaders = TextUtils.isEmpty(reqHeaders) ? "Default Browser Headers" : reqHeaders;
+                      item.cookies = TextUtils.isEmpty(cookies) ? "No Cookies" : cookies;
+                      item.requestBody = TextUtils.isEmpty(reqBody) ? "(Empty)" : reqBody;
+                      item.responseHeaders = TextUtils.isEmpty(resHeaders) ? "None" : resHeaders;
+                      item.responseBody = formatPrettyIfJson(resBody);
+                      item.durationMs = duration;
+                      item.timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
+                      addLogItem(item);
                   }
               }
 
-              // ------------------------------------------------------------
-              //  /Strem  →  build the video-only player page
-              // ------------------------------------------------------------
-              private void handleStrem(Uri uri, OutputStream out) throws IOException {
-                  String streamPath = uri.getQueryParameter("path");
-                  String token      = uri.getQueryParameter("token");
-                  String clientSrc  = uri.getQueryParameter("src");
+              private void addLogItem(NetworkLogItem item) {
+                  mainHandler.post(() -> {
+                      networkLogs.add(0, item);
+                      updateLogCount();
+                      if (logsPanel.getVisibility() == View.VISIBLE) {
+                          logAdapter.notifyDataSetChanged();
+                      }
+                  });
+              }
 
-                  if (streamPath == null) streamPath = "/";
-                  if (!streamPath.startsWith("/")) streamPath = "/" + streamPath;
+              private void updateLogCount() {
+                  toggleLogsBtn.setText("Logs (" + networkLogs.size() + ")");
+              }
 
-                  String pageUrl = baseUrl() + streamPath;
-                  if (token != null && !token.isEmpty() && !pageUrl.contains("token="))
-                      pageUrl += (pageUrl.contains("?") ? "&" : "?") + "token=" + token;
-
-                  Log.d(TAG, "STREM fetch: " + pageUrl);
-
-                  String mediaUrl = null;
-                  String mediaType = null;
-                  String licenseUrl = null;
-
-                  // 1) If client-side JS already gave us the video src, use it
-                  if (clientSrc != null && !clientSrc.isEmpty()) {
-                      mediaUrl = absoluteOrBase(clientSrc);
-                      mediaType = detectType(mediaUrl);
-                      Log.d(TAG, "STREM using client src: " + mediaUrl);
+              private class LogAdapter extends BaseAdapter {
+                  @Override
+                  public int getCount() {
+                      return networkLogs.size();
                   }
 
-                  // 2) Otherwise fetch the page and extract
-                  if (mediaUrl == null) {
-                      String html = fetchText(pageUrl);
-                      if (html != null) {
-                          List<String> found = extractMediaUrls(html, pageUrl);
-                          licenseUrl = extractLicenseUrl(html, pageUrl);
-                          if (!found.isEmpty()) {
-                              mediaUrl = found.get(0);
-                              mediaType = detectType(mediaUrl);
-                              Log.d(TAG, "STREM extracted: " + mediaUrl);
-                          }
+                  @Override
+                  public Object getItem(int position) {
+                      return networkLogs.get(position);
+                  }
+
+                  @Override
+                  public long getItemId(int position) {
+                      return position;
+                  }
+
+                  @Override
+                  public View getView(int position, View convertView, ViewGroup parent) {
+                      LinearLayout row = new LinearLayout(MainActivity.this);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setPadding(24, 20, 24, 20);
+                      row.setGravity(Gravity.CENTER_VERTICAL);
+                      row.setBackgroundColor(position % 2 == 0 ? Color.parseColor("#1E1E1E") : Color.parseColor("#161616"));
+
+                      NetworkLogItem item = networkLogs.get(position);
+
+                      LinearLayout infoLayout = new LinearLayout(MainActivity.this);
+                      infoLayout.setOrientation(LinearLayout.VERTICAL);
+
+                      TextView topLine = new TextView(MainActivity.this);
+                      String statusBadge = item.statusCode > 0 ? String.valueOf(item.statusCode) : "ERR";
+                      topLine.setText("[" + item.method + "] [" + statusBadge + "]  •  " + item.durationMs + "ms  •  " + item.timestamp);
+                      topLine.setTextSize(12);
+                      topLine.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                      if (item.statusCode >= 200 && item.statusCode < 300) {
+                          topLine.setTextColor(Color.parseColor("#69F0AE"));
+                      } else if (item.statusCode >= 400 || item.statusCode == 0) {
+                          topLine.setTextColor(Color.parseColor("#FF5252"));
+                      } else {
+                          topLine.setTextColor(Color.parseColor("#FFD740"));
                       }
+                      infoLayout.addView(topLine);
+
+                      TextView urlTv = new TextView(MainActivity.this);
+                      urlTv.setText(item.url);
+                      urlTv.setTextColor(Color.parseColor("#E0E0E0"));
+                      urlTv.setTextSize(13);
+                      urlTv.setMaxLines(2);
+                      urlTv.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                      infoLayout.addView(urlTv);
+
+                      row.addView(infoLayout, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                      Button detailBtn = createStyledButton("View Detail", "#3949AB");
+                      LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                      btnParams.setMarginStart(16);
+                      detailBtn.setOnClickListener(v -> showLogDetailDialog(item));
+                      row.addView(detailBtn, btnParams);
+
+                      return row;
+                  }
+              }
+
+              private void showLogDetailDialog(NetworkLogItem item) {
+                  ScrollView scrollView = new ScrollView(this);
+                  scrollView.setBackgroundColor(Color.parseColor("#181818"));
+                  LinearLayout container = new LinearLayout(this);
+                  container.setOrientation(LinearLayout.VERTICAL);
+                  container.setPadding(32, 32, 32, 32);
+
+                  String fullDetails =
+                          "=== GENERAL ===\n" +
+                          "URL: " + item.url + "\n" +
+                          "Method: " + item.method + "\n" +
+                          "Status Code: " + item.statusCode + "\n" +
+                          "Content-Type: " + item.contentType + "\n" +
+                          "Time: " + item.timestamp + " (" + item.durationMs + " ms)\n\n" +
+                          "=== REQUEST HEADERS ===\n" +
+                          item.requestHeaders + "\n\n" +
+                          "=== COOKIES ===\n" +
+                          item.cookies + "\n\n" +
+                          "=== REQUEST BODY ===\n" +
+                          item.requestBody + "\n\n" +
+                          "=== RESPONSE HEADERS ===\n" +
+                          item.responseHeaders + "\n\n" +
+                          "=== RESPONSE BODY (JSON / TEXT) ===\n" +
+                          item.responseBody;
+
+                  TextView detailTv = new TextView(this);
+                  detailTv.setText(fullDetails);
+                  detailTv.setTextColor(Color.parseColor("#EEEEEE"));
+                  detailTv.setTextSize(12);
+                  detailTv.setTypeface(Typeface.MONOSPACE);
+                  detailTv.setTextIsSelectable(true);
+                  container.addView(detailTv);
+                  scrollView.addView(container);
+
+                  new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                          .setTitle(item.method + " (" + item.statusCode + ") Network Detail")
+                          .setView(scrollView)
+                          .setPositiveButton("Close", null)
+                          .setNeutralButton("Copy All", (d, w) -> {
+                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                              cb.setPrimaryClip(ClipData.newPlainText("NetworkLog", fullDetails));
+                              Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show();
+                          })
+                          .setNegativeButton("Copy Response Body", (d, w) -> {
+                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                              cb.setPrimaryClip(ClipData.newPlainText("ResponseBody", item.responseBody));
+                              Toast.makeText(this, "Response body copied", Toast.LENGTH_SHORT).show();
+                          })
+                          .show();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (logsPanel.getVisibility() == View.VISIBLE) {
+                      logsPanel.setVisibility(View.GONE);
+                  } else if (webView.canGoBack()) {
+                      webView.goBack();
                   } else {
-                      // best-effort license extraction still from page
-                      String html = fetchText(pageUrl);
-                      if (html != null) licenseUrl = extractLicenseUrl(html, pageUrl);
-                  }
-
-                  if (licenseUrl != null) Log.d(TAG, "[LICENSE] " + licenseUrl);
-                  else Log.d(TAG, "[LICENSE] not found in page HTML (may be set at runtime — check logcat)");
-
-                  // Proxy the media & license URLs
-                  String proxiedMedia = mediaUrl != null ? proxyMediaUrl(mediaUrl) : null;
-                  String proxiedLicense = licenseUrl != null ? proxyLicenseUrl(licenseUrl) : null;
-
-                  String html = buildPlayerHtml(proxiedMedia, mediaType, proxiedLicense);
-                  byte[] body = html.getBytes("UTF-8");
-                  OutputStream o = out;
-                  StringBuilder sb = new StringBuilder();
-                  sb.append("HTTP/1.1 200 OK\r\n");
-                  sb.append("Access-Control-Allow-Origin: *\r\n");
-                  sb.append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n");
-                  sb.append("Access-Control-Allow-Headers: *\r\n");
-                  sb.append("Content-Type: text/html; charset=utf-8\r\n");
-                  sb.append("Content-Length: ").append(body.length).append("\r\n");
-                  sb.append("Cache-Control: no-store\r\n");
-                  sb.append("Connection: close\r\n\r\n");
-                  o.write(sb.toString().getBytes("UTF-8"));
-                  o.write(body);
-                  o.flush();
-              }
-
-              private String absoluteOrBase(String url) {
-                  if (url.startsWith("http://") || url.startsWith("https://")) return url;
-                  if (url.startsWith("//")) return "https:" + url;
-                  if (url.startsWith("/")) return baseUrl() + url;
-                  return baseUrl() + "/" + url;
-              }
-
-              private String detectType(String url) {
-                  if (url == null) return "unknown";
-                  String u = url.toLowerCase(Locale.ROOT);
-                  if (u.contains(".mpd")) return "mpd";
-                  if (u.contains(".m3u8")) return "m3u8";
-                  if (u.contains(".mp4") || u.contains(".m4v")) return "mp4";
-                  if (u.contains(".webm")) return "webm";
-                  return "media";
-              }
-
-              // Extract likely video URLs from the page HTML
-              private List<String> extractMediaUrls(String html, String pageUrl) {
-                  List<String> result = new ArrayList<String>();
-                  Set<String> seen = new HashSet<String>();
-
-                  // A) direct URLs of .mpd/.m3u8/.mp4/.webm
-                  Matcher m = Pattern.compile(
-                          "(https?:)?//[^\\s\"'<>()\\\\]+?\\.(?:mpd|m3u8|mp4|webm|m4v)(?:\\?[^\\s\"'<>()\\\\]*)?",
-                          Pattern.CASE_INSENSITIVE).matcher(html);
-                  while (m.find()) {
-                      String u = m.group(0);
-                      if (u.startsWith("//")) u = "https:" + u;
-                      if (seen.add(u)) result.add(u);
-                  }
-
-                  // B) <video src="..."> and <source src="...">
-                  Pattern tagP = Pattern.compile(
-                          "<(?:video|source)[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']",
-                          Pattern.CASE_INSENSITIVE);
-                  Matcher tm = tagP.matcher(html);
-                  while (tm.find()) {
-                      String u = resolveUrl(tm.group(1), pageUrl);
-                      if (u != null && seen.add(u)) result.add(u);
-                  }
-
-                  // C) common JSON keys
-                  Pattern jsonP = Pattern.compile(
-                          "\"(?:file|src|source|url|stream|hls|dash|mpd|playlist|videoUrl|manifestUrl)\"\\s*:\\s*\"([^\"]+)\"",
-                          Pattern.CASE_INSENSITIVE);
-                  Matcher jm = jsonP.matcher(html);
-                  while (jm.find()) {
-                      String raw = jm.group(1);
-                      if (raw.startsWith("blob:") || raw.startsWith("data:")) continue;
-                      String u = resolveUrl(raw, pageUrl);
-                      if (u != null && looksLikeMedia(u) && seen.add(u)) result.add(u);
-                  }
-
-                  // Sort: mpd first, then m3u8, then mp4
-                  List<String> sorted = new ArrayList<String>();
-                  for (String u : result) if (u.toLowerCase(Locale.ROOT).contains(".mpd")) sorted.add(u);
-                  for (String u : result) if (u.toLowerCase(Locale.ROOT).contains(".m3u8")) sorted.add(u);
-                  for (String u : result) if (!sorted.contains(u)) sorted.add(u);
-                  return sorted;
-              }
-
-              private String extractLicenseUrl(String html, String pageUrl) {
-                  Pattern p = Pattern.compile(
-                          "[\"']?([A-Za-z0-9_./:-]*(?:license|widevine|playready|clearkey|drm|wv)[A-Za-z0-9_./:-]*)[\"']?",
-                          Pattern.CASE_INSENSITIVE);
-                  // More targeted: URLs containing license keywords
-                  Matcher m = Pattern.compile(
-                          "(https?:)?//[^\\s\"'<>()\\\\]+?(?:license|widevine|playready|clearkey|/drm/)[^\\s\"'<>()\\\\]*",
-                          Pattern.CASE_INSENSITIVE).matcher(html);
-                  if (m.find()) {
-                      String u = m.group(0);
-                      if (u.startsWith("//")) u = "https:" + u;
-                      return u;
-                  }
-                  // Fallback: named keys
-                  Matcher km = Pattern.compile(
-                          "\"(?:licenseUrl|licenseServer|license_url|drmUrl|widevine)\"\\s*:\\s*\"([^\"]+)\"",
-                          Pattern.CASE_INSENSITIVE).matcher(html);
-                  if (km.find()) {
-                      String u = resolveUrl(km.group(1), pageUrl);
-                      return u;
-                  }
-                  return null;
-              }
-
-              private boolean looksLikeMedia(String u) {
-                  String l = u.toLowerCase(Locale.ROOT);
-                  return l.contains(".mpd") || l.contains(".m3u8") || l.contains(".mp4")
-                          || l.contains(".webm") || l.contains(".m4v") || l.contains("/manifest")
-                          || l.contains("format=mpd") || l.contains("format=m3u8");
-              }
-
-              private String resolveUrl(String ref, String baseUrlStr) {
-                  try {
-                      if (ref == null || ref.isEmpty()) return null;
-                      if (ref.startsWith("http://") || ref.startsWith("https://")) return ref;
-                      if (ref.startsWith("//")) return "https:" + ref;
-                      if (ref.startsWith("/")) {
-                          Uri b = Uri.parse(baseUrlStr);
-                          return b.getScheme() + "://" + b.getHost() + ref;
-                      }
-                      // Relative to page
-                      java.net.URL b = new java.net.URL(baseUrlStr);
-                      java.net.URL u = new java.net.URL(b, ref);
-                      return u.toString();
-                  } catch (Exception e) { return null; }
-              }
-
-              // ------------------------------------------------------------
-              //  /S/<host>/<path>  →  media proxy with CORS + Range
-              // ------------------------------------------------------------
-              private void handleMediaProxy(String method, String hostAndPath,
-                                            String query,
-                                            Map<String, String> reqHeaders,
-                                            byte[] reqBody,
-                                            OutputStream out) throws IOException {
-                  if (hostAndPath.isEmpty()) {
-                      writeHttpResponse(out, 400, "Bad Request", "text/plain",
-                              "Missing host".getBytes("UTF-8"));
-                      return;
-                  }
-                  String targetUrl = "https://" + hostAndPath;
-                  if (query != null && !query.isEmpty()) targetUrl += "?" + query;
-
-                  HttpURLConnection conn = null;
-                  try {
-                      conn = (HttpURLConnection) new URL(targetUrl).openConnection();
-                      conn.setRequestMethod("HEAD".equals(method) ? "HEAD" : ("POST".equals(method) ? "POST" : "GET"));
-                      conn.setConnectTimeout(15000);
-                      conn.setReadTimeout(120000);
-                      conn.setInstanceFollowRedirects(true);
-                      conn.setDoInput(true);
-
-                      if (reqHeaders.get("range") != null)
-                          conn.setRequestProperty("Range", reqHeaders.get("range"));
-                      if (reqHeaders.get("accept") != null)
-                          conn.setRequestProperty("Accept", reqHeaders.get("accept"));
-                      if (reqHeaders.get("content-type") != null)
-                          conn.setRequestProperty("Content-Type", reqHeaders.get("content-type"));
-                      String ua = reqHeaders.get("user-agent");
-                      conn.setRequestProperty("User-Agent", ua != null ? ua : DESKTOP_UA);
-                      conn.setRequestProperty("Referer", baseUrl());
-
-                      if (reqBody != null && reqBody.length > 0) {
-                          conn.setDoOutput(true);
-                          OutputStream co = conn.getOutputStream();
-                          co.write(reqBody); co.flush(); co.close();
-                      }
-
-                      int code = conn.getResponseCode();
-                      String contentType = conn.getContentType();
-                      if (contentType == null || contentType.isEmpty())
-                          contentType = guessContentType(targetUrl);
-
-                      // For MPD / M3U8 manifests, read fully, rewrite absolute URLs, send
-                      String lower = targetUrl.toLowerCase(Locale.ROOT);
-                      boolean isManifest = lower.contains(".mpd") || lower.contains(".m3u8");
-
-                      byte[] payload;
-                      int outCode = code;
-                      if (code >= 200 && code < 300 && isManifest && !"HEAD".equals(method)) {
-                          String raw = readAll(conn.getInputStream());
-                          String rewritten;
-                          if (lower.contains(".mpd")) rewritten = rewriteMpd(raw, hostAndPath);
-                          else                        rewritten = rewriteM3u8(raw, hostAndPath);
-                          payload = rewritten.getBytes("UTF-8");
-                          if (lower.contains(".mpd") && (contentType == null || contentType.isEmpty()))
-                              contentType = "application/dash+xml";
-                          if (lower.contains(".m3u8") && (contentType == null || contentType.isEmpty()))
-                              contentType = "application/vnd.apple.mpegurl";
-                      } else if (code >= 200 && code < 300 && !"HEAD".equals(method)) {
-                          payload = readAllBytes(conn.getInputStream());
-                      } else if (code >= 400) {
-                          InputStream err = conn.getErrorStream();
-                          payload = err != null ? readAllBytes(err) : new byte[0];
-                      } else {
-                          payload = new byte[0];
-                      }
-
-                      String cl = conn.getHeaderField("Content-Length");
-                      String cr = conn.getHeaderField("Content-Range");
-                      String ar = conn.getHeaderField("Accept-Ranges");
-
-                      StringBuilder head = new StringBuilder();
-                      head.append("HTTP/1.1 ").append(outCode).append(' ')
-                              .append(safe(conn.getResponseMessage())).append("\r\n");
-                      head.append("Access-Control-Allow-Origin: *\r\n");
-                      head.append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
-                      head.append("Access-Control-Allow-Headers: *\r\n");
-                      head.append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges\r\n");
-                      head.append("Content-Type: ").append(contentType).append("\r\n");
-                      // If we rewrote the manifest, Content-Length is our payload size
-                      if (isManifest) head.append("Content-Length: ").append(payload.length).append("\r\n");
-                      else if (cl != null) head.append("Content-Length: ").append(cl).append("\r\n");
-                      if (cr != null) head.append("Content-Range: ").append(cr).append("\r\n");
-                      head.append("Accept-Ranges: ").append(ar != null ? ar : "bytes").append("\r\n");
-                      head.append("Cache-Control: no-cache\r\n");
-                      head.append("Connection: close\r\n\r\n");
-                      out.write(head.toString().getBytes("UTF-8"));
-
-                      if (!"HEAD".equals(method)) out.write(payload);
-                      out.flush();
-
-                  } catch (Exception e) {
-                      Log.e(TAG, "media proxy error: " + targetUrl, e);
-                      writeHttpResponse(out, 502, "Bad Gateway", "text/plain",
-                              ("Proxy error: " + e.getMessage()).getBytes("UTF-8"));
-                  } finally {
-                      if (conn != null) conn.disconnect();
+                      super.onBackPressed();
                   }
               }
-
-              // Rewrite relative-friendly: only absolute/protocol-relative/absolute-path URLs
-              private String rewriteUrl(String url, String manifestHost) {
-                  if (url == null || url.isEmpty()) return url;
-                  if (url.startsWith("/S/")) return url;
-                  if (url.startsWith("data:") || url.startsWith("blob:") || url.startsWith("javascript:")) return url;
-                  if (url.startsWith("//")) return "/S/" + url.substring(2);
-                  if (url.startsWith("http://"))  return "/S/" + url.substring(7);
-                  if (url.startsWith("https://")) return "/S/" + url.substring(8);
-                  if (url.startsWith("/")) return "/S/" + manifestHost + url;
-                  return url; // relative — leave alone (browser resolves against /S/host/path)
-              }
-
-              private String rewriteM3u8(String content, String manifestHostAndPath) {
-                  String host = manifestHostAndPath;
-                  int slash = host.indexOf('/');
-                  if (slash > 0) host = host.substring(0, slash);
-
-                  StringBuilder sb = new StringBuilder();
-                  for (String line : content.split("\n", -1)) {
-                      String trimmed = line.trim();
-                      if (trimmed.isEmpty()) { sb.append(line); sb.append('\n'); continue; }
-                      if (trimmed.startsWith("#")) {
-                          sb.append(rewriteUriAttrs(line, host));
-                      } else {
-                          sb.append(rewriteUrl(trimmed, host));
-                      }
-                      sb.append('\n');
-                  }
-                  return sb.toString();
-              }
-
-              private String rewriteUriAttrs(String line, String host) {
-                  Pattern p = Pattern.compile("URI=\"([^\"]+)\"");
-                  Matcher m = p.matcher(line);
-                  StringBuffer sb = new StringBuffer();
-                  while (m.find()) {
-                      String rewritten = rewriteUrl(m.group(1), host);
-                      m.appendReplacement(sb, "URI=\"" + Matcher.quoteReplacement(rewritten) + "\"");
-                  }
-                  m.appendTail(sb);
-                  return sb.toString();
-              }
-
-              private String rewriteMpd(String content, String manifestHostAndPath) {
-                  String host = manifestHostAndPath;
-                  int slash = host.indexOf('/');
-                  if (slash > 0) host = host.substring(0, slash);
-
-                  content = rewriteMpdAttr(content, "media=\"", "\"", host);
-                  content = rewriteMpdAttr(content, "initialization=\"", "\"", host);
-                  content = rewriteMpdAttr(content, "sourceURL=\"", "\"", host);
-                  content = rewriteMpdTag(content, "BaseURL", host);
-                  content = rewriteMpdTag(content, "Location", host);
-                  return content;
-              }
-
-              private String rewriteMpdAttr(String content, String prefix, String suffix, String host) {
-                  Pattern p = Pattern.compile(Pattern.quote(prefix) + "([^\"]+)" + Pattern.quote(suffix));
-                  Matcher m = p.matcher(content);
-                  StringBuffer sb = new StringBuffer();
-                  while (m.find()) {
-                      String rewritten = rewriteUrl(m.group(1), host);
-                      m.appendReplacement(sb, Matcher.quoteReplacement(prefix + rewritten + suffix));
-                  }
-                  m.appendTail(sb);
-                  return sb.toString();
-              }
-
-              private String rewriteMpdTag(String content, String tag, String host) {
-                  Pattern p = Pattern.compile("<" + tag + ">([^<]+)</" + tag + ">");
-                  Matcher m = p.matcher(content);
-                  StringBuffer sb = new StringBuffer();
-                  while (m.find()) {
-                      String rewritten = rewriteUrl(m.group(1).trim(), host);
-                      m.appendReplacement(sb, Matcher.quoteReplacement("<" + tag + ">" + rewritten + "</" + tag + ">"));
-                  }
-                  m.appendTail(sb);
-                  return sb.toString();
-              }
-
-              // ------------------------------------------------------------
-              //  Player HTML
-              // ------------------------------------------------------------
-              private String proxyMediaUrl(String url) {
-                  if (url == null) return null;
-                  if (url.startsWith("//")) url = "https:" + url;
-                  if (url.startsWith("http://"))  return "/S/" + url.substring(7);
-                  if (url.startsWith("https://")) return "/S/" + url.substring(8);
-                  return url;
-              }
-
-              private String proxyLicenseUrl(String url) {
-                  return proxyMediaUrl(url);
-              }
-
-              private String buildPlayerHtml(String mediaUrl, String mediaType, String licenseUrl) {
-                  String mediaJson;
-                  try {
-                      JSONObject o = new JSONObject();
-                      if (mediaUrl != null)    o.put("url", mediaUrl);
-                      if (mediaType != null)   o.put("type", mediaType);
-                      if (licenseUrl != null)  o.put("licenseUrl", licenseUrl);
-                      mediaJson = o.toString();
-                  } catch (Exception e) { mediaJson = "{}"; }
-
-                  return "<!DOCTYPE html>\n"
-                  + "<html><head><meta charset=\"utf-8\">"
-                  + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,user-scalable=no\">"
-                  + "<title>Video</title>"
-                  + "<style>"
-                  + "html,body{margin:0;padding:0;background:#000;width:100%;height:100%;overflow:hidden}"
-                  + "video{width:100%;height:100%;object-fit:contain;background:#000}"
-                  + "#status{position:fixed;bottom:8px;left:8px;color:#fff;font:12px system-ui;"
-                  + "background:rgba(0,0,0,.7);padding:6px 10px;border-radius:6px;max-width:80vw;word-break:break-all}"
-                  + "#back{position:fixed;top:8px;left:8px;z-index:10;color:#fff;background:rgba(0,0,0,.7);"
-                  + "border:0;border-radius:20px;padding:8px 16px;font:bold 14px system-ui;cursor:pointer}"
-                  + "</style>"
-                  + "<script src=\"https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.compiled.js\"></script>"
-                  + "<script src=\"https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js\"></script>"
-                  + "</head><body>"
-                  + "<button id=\"back\" onclick=\"history.back()\">\u2190 Back</button>"
-                  + "<video id=\"v\" controls autoplay playsinline></video>"
-                  + "<div id=\"status\"></div>"
-                  + "<script>(function(){"
-                  + "var media=" + mediaJson + ";"
-                  + "var video=document.getElementById('v');var status=document.getElementById('status');"
-                  + "var t=setTimeout(function(){status.style.display='none'},8000);"
-                  + "function log(s){console.log('[video-only]',s);status.textContent=s;status.style.display='block';"
-                  + "clearTimeout(t);t=setTimeout(function(){status.style.display='none'},8000);}"
-                  + "if(!media||!media.url){log('No video URL detected on the source page');return;}"
-                  + "var url=media.url;log('Loading '+(media.type||'media')+'...');"
-                  + "var isMpd=/\\.mpd(\\?|$)/i.test(url)||media.type==='mpd';"
-                  + "var isM3u8=/\\.m3u8(\\?|$)/i.test(url)||media.type==='m3u8';"
-                  + "if(isMpd&&window.shaka){shaka.polyfill.installAll();"
-                  + "if(!shaka.Player.isBrowserSupported()){log('Shaka not supported');return;}"
-                  + "var player=new shaka.Player(video);window.__player=player;"
-                  + "player.addEventListener('error',function(e){log('Player err: '+(e.detail||e));});"
-                  + "if(media.licenseUrl){var s={};s['com.widevine.alpha']=media.licenseUrl;"
-                  + "player.configure({drm:{servers:s}});log('DRM Widevine -> '+media.licenseUrl);}"
-                  + "player.load(url).then(function(){log('Playing DASH');video.play().catch(function(){});})"
-                  + ".catch(function(e){log('DASH failed: '+e);});"
-                  + "}else if(isM3u8&&window.Hls){if(Hls.isSupported()){"
-                  + "var hls=new Hls();hls.loadSource(url);hls.attachMedia(video);"
-                  + "hls.on(Hls.Events.MANIFEST_PARSED,function(){log('Playing HLS');video.play().catch(function(){});});"
-                  + "hls.on(Hls.Events.ERROR,function(e,d){if(d&&d.fatal)log('HLS fatal: '+d.type);});"
-                  + "window.__hls=hls;}else if(video.canPlayType('application/vnd.apple.mpegurl')){"
-                  + "video.src=url;video.play().catch(function(){});}else{log('HLS not supported');}"
-                  + "}else{video.src=url;video.play().catch(function(){});"
-                  + "video.addEventListener('error',function(){log('Native playback failed');});"
-                  + "log('Playing native');}}})();</script></body></html>";
-              }
-
-              // ------------------------------------------------------------
-              //  HTTP helpers
-              // ------------------------------------------------------------
-              private static void writeHttpResponse(OutputStream out, int code, String msg,
-                                                    String contentType, byte[] body)
-                      throws IOException {
-                  StringBuilder sb = new StringBuilder();
-                  sb.append("HTTP/1.1 ").append(code).append(' ').append(msg).append("\r\n");
-                  sb.append("Access-Control-Allow-Origin: *\r\n");
-                  sb.append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
-                  sb.append("Access-Control-Allow-Headers: *\r\n");
-                  sb.append("Content-Type: ").append(contentType != null ? contentType : "text/plain").append("\r\n");
-                  sb.append("Content-Length: ").append(body.length).append("\r\n");
-                  sb.append("Connection: close\r\n\r\n");
-                  out.write(sb.toString().getBytes("UTF-8"));
-                  out.write(body);
-                  out.flush();
-              }
-
-              private static String safe(String s) { return s == null ? "" : s; }
-
-              private static String guessContentType(String url) {
-                  if (url == null) return "application/octet-stream";
-                  String u = url.toLowerCase(Locale.ROOT);
-                  int q = u.indexOf('?'); if (q >= 0) u = u.substring(0, q);
-                  if (u.endsWith(".mpd"))  return "application/dash+xml";
-                  if (u.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
-                  if (u.endsWith(".mp4") || u.endsWith(".m4s") || u.endsWith(".m4v")) return "video/mp4";
-                  if (u.endsWith(".ts"))   return "video/mp2t";
-                  if (u.endsWith(".webm")) return "video/webm";
-                  if (u.endsWith(".mkv"))  return "video/x-matroska";
-                  if (u.endsWith(".mp3"))  return "audio/mpeg";
-                  if (u.endsWith(".aac"))  return "audio/aac";
-                  if (u.endsWith(".json")) return "application/json";
-                  if (u.endsWith(".xml"))  return "application/xml";
-                  return "application/octet-stream";
-              }
-
-              private static byte[] readAllBytes(InputStream is) throws IOException {
-                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                  byte[] buf = new byte[8192]; int n;
-                  while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
-                  is.close();
-                  return bo.toByteArray();
-              }
-
-              private static String readAll(InputStream is) throws IOException {
-                  ByteArrayOutputStream bo = new ByteArrayOutputStream();
-                  byte[] buf = new byte[8192]; int n;
-                  while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
-                  is.close();
-                  return new String(bo.toByteArray(), "UTF-8");
-              }
-
-              private String fetchText(String link) {
-                  HttpURLConnection c = null;
-                  try {
-                      c = (HttpURLConnection) new URL(link).openConnection();
-                      c.setConnectTimeout(10000);
-                      c.setReadTimeout(20000);
-                      c.setRequestProperty("User-Agent", DESKTOP_UA);
-                      c.setInstanceFollowRedirects(true);
-                      int code = c.getResponseCode();
-                      if (code < 200 || code >= 400) return null;
-                      return readAll(c.getInputStream());
-                  } catch (Exception e) {
-                      Log.e(TAG, "fetchText", e); return null;
-                  } finally {
-                      if (c != null) c.disconnect();
-                  }
-              }
-
-              // ------------------------------------------------------------
-              //  Media / License detection helpers (used for logging)
-              // ------------------------------------------------------------
-              private static boolean isMediaUrl(String url) {
-                  if (url == null) return false;
-                  String u = url.toLowerCase(Locale.ROOT);
-                  return u.contains(".mpd") || u.contains(".m3u8") || u.contains(".mp4")
-                          || u.contains(".m4s") || u.contains(".ts?")
-                          || u.contains("manifest") || u.contains("playlist");
-              }
-
-              private static boolean isLicenseUrl(String url) {
-                  if (url == null) return false;
-                  String u = url.toLowerCase(Locale.ROOT);
-                  return u.contains("license") || u.contains("widevine")
-                          || u.contains("playready") || u.contains("clearkey")
-                          || u.contains("/drm/");
-              }
-
-              // ------------------------------------------------------------
-              //  System UI + fullscreen
-              // ------------------------------------------------------------
-              private void applyNormalSystemUi() {
-                  getWindow().getDecorView().setSystemUiVisibility(
-                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-              }
-
-              private void applyFullscreenSystemUi() {
-                  getWindow().getDecorView().setSystemUiVisibility(
-                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                          | View.SYSTEM_UI_FLAG_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                          | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-              }
-
-              private void exitCustomView() {
-                  if (customView == null) return;
-                  fullscreenContainer.removeView(customView);
-                  fullscreenContainer.setVisibility(View.GONE);
-                  content.setVisibility(View.VISIBLE);
-                  customView = null;
-                  WebChromeClient.CustomViewCallback cb = customCallback;
-                  customCallback = null;
-                  if (cb != null) cb.onCustomViewHidden();
-                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
-                  applyNormalSystemUi();
-                  content.setPadding(padL, padT, padR, padB);
-                  frame.requestApplyInsets();
-              }
-
-              @Override public void onWindowFocusChanged(boolean hasFocus) {
-                  super.onWindowFocusChanged(hasFocus);
-                  if (hasFocus) {
-                      if (customView != null) applyFullscreenSystemUi();
-                      else applyNormalSystemUi();
-                  }
-              }
-
-              // ------------------------------------------------------------
-              //  Block list
-              // ------------------------------------------------------------
-              private boolean parse(String json) {
-                  try {
-                      JSONObject o = new JSONObject(json);
-                      Set<String> d = new HashSet<String>();
-                      Set<String> u = new HashSet<String>();
-                      JSONArray da = o.optJSONArray("blockDomains");
-                      JSONArray ua = o.optJSONArray("blockUrls");
-                      if (da != null) for (int i = 0; i < da.length(); i++)
-                          d.add(da.getString(i).trim().toLowerCase(Locale.ROOT));
-                      if (ua != null) for (int i = 0; i < ua.length(); i++)
-                          u.add(endpointKey(ua.getString(i).trim()));
-                      blockDomains.clear(); blockDomains.addAll(d);
-                      blockUrls.clear();    blockUrls.addAll(u);
-                      return true;
-                  } catch (Exception e) { Log.e(TAG, "parse error", e); return false; }
-              }
-
-              private static String stripSlash(String s) {
-                  while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
-                  return s;
-              }
-
-              private boolean isBlocked(String url) {
-                  try {
-                      String host = Uri.parse(url).getHost();
-                      if (host != null && blockDomains.contains(host.toLowerCase(Locale.ROOT))) return true;
-                      if (blockUrls.contains(endpointKey(url))) return true;
-                  } catch (Exception ignored) { }
-                  return false;
-              }
-
-              private static String endpointKey(String url) {
-                  Uri u = Uri.parse(url);
-                  String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
-                  String path = u.getPath() == null ? "" : u.getPath().toLowerCase(Locale.ROOT);
-                  return host + stripSlash(path);
-              }
-
-              private String download(String link) {
-                  HttpURLConnection c = null;
-                  try {
-                      c = (HttpURLConnection) new URL(link).openConnection();
-                      c.setConnectTimeout(5000); c.setReadTimeout(5000);
-                      if (c.getResponseCode() != 200) return null;
-                      return readAll(c.getInputStream());
-                  } catch (Exception e) { Log.e(TAG, "download error", e); return null; }
-                  finally { if (c != null) c.disconnect(); }
-              }
-
-              @Override public void onBackPressed() {
-                  if (customView != null) exitCustomView();
-                  else if (web.canGoBack()) web.goBack();
-                  else super.onBackPressed();
-              }
-
-              @Override protected void onPause()  { super.onPause();  web.onPause();  }
-              @Override protected void onResume() { super.onResume(); web.onResume(); }
-              @Override protected void onDestroy() { stopProxyServer(); super.onDestroy(); }
           }
           EOF
 
-          export PKG="$PACKAGE_NAME"
-          export PORT="$PROXY_PORT"
-          for f in app/build.gradle app/src/main/AndroidManifest.xml \
-                   app/src/main/java/$PKG_PATH/MainActivity.java; do
-            perl -pi -e 's/__PKG__/$ENV{PKG}/g;
-                         s/__BASE_URL__/$ENV{BASE_URL}/g;
-                         s/__BLOCK_API__/$ENV{BLOCK_API}/g;
-                         s/__APP_NAME__/$ENV{APP_NAME}/g;
-                         s/__ICON_REF__/$ENV{ICON_REF}/g;
-                         s/__PROXY_PORT__/$ENV{PORT}/g' "$f"
-          done
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
 
-      - name: Build debug APK
-        working-directory: webapp
-        run: gradle assembleDebug --no-daemon --stacktrace
-
-      - name: Rename APK
-        run: |
-          mkdir -p out
-          cp webapp/app/build/outputs/apk/debug/app-debug.apk out/webapp.apk
-
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: web-apk
-          path: out/webapp.apk
-          if-no-files-found: error
+          name: DevTools-Browser-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
