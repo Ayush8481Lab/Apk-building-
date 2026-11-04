@@ -1,37 +1,91 @@
-name: Build DevTools Browser APK
+name: Build Web APK
+
+# =====================================================================
+#  WebView APK builder
+#  - Opens your website (BASE_URL) as the initial page inside the app
+#  - ALWAYS desktop mode, same layout width on phone and tablet
+#  - Full-screen video support (landscape, immersive, edge-to-edge)
+#  - Punch-hole / notch safe
+#  - Downloads a block list (Block.json) from GitHub at every app start
+#    and blocks exact domains / exact URL endpoints in network requests
+#  - NEW: Local capture/proxy server on 127.0.0.1:8481
+#      http://127.0.0.1:8481/x?proxy=/home/newarticle&capdo=sample.com
+#      -> loads BASE_URL/home/newarticle in a hidden WebView, watches the
+#         network log, captures the first request to sample.com and
+#         proxies that URL back to the caller
+#      optional: &out=proxy|json|redirect  &contains=.m3u8  &timeout=25
+#  - Builds a debug APK and uploads it as artifact
+#
+#  HOW TO USE:
+#   1. Save this file as  .github/workflows/build-apk.yml  in your repo
+#   2. Edit the values in the "env" section below (or run manually from
+#      the Actions tab -> "Run workflow" and type them there)
+#   3. Download the APK from the run's "Artifacts" section
+# =====================================================================
 
 on:
   workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Base domain / initial URL (e.g. https://yourdomain.com)"
+        required: false
+      app_name:
+        description: "App name"
+        required: false
+      package_name:
+        description: "Package name (e.g. com.example.webapp)"
+        required: false
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+
+env:
+  BASE_URL: ${{ github.event.inputs.base_url || 'https://hotstar.com' }}
+  APP_NAME: ${{ github.event.inputs.app_name || 'Ayush ott' }}
+  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.example.webapp' }}
+  BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
+  ICON_URL: 'https://static.vecteezy.com/system/resources/previews/056/505/637/non_2x/jiohotstar-app-icon-on-transparent-background-free-png.png'
+
 jobs:
-  build-apk:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Generate Android Project Structure & Source Code
-        run: |
-          mkdir -p app/src/main/java/com/devtools/browser
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
-          cat << 'EOF' > settings.gradle
+      - name: Generate Android WebView project
+        run: |
+          set -e
+          mkdir -p webapp && cd webapp
+          PKG_PATH=$(echo "$PACKAGE_NAME" | tr . /)
+          mkdir -p app/src/main/java/$PKG_PATH
+          mkdir -p app/src/main/res/drawable
+
+          # ---------- optional icon ----------
+          if [ -n "$ICON_URL" ]; then
+            curl -fsSL "$ICON_URL" -o app/src/main/res/drawable/ic_launcher.png
+            export ICON_REF="@drawable/ic_launcher"
+          else
+            export ICON_REF="@android:drawable/sym_def_app_icon"
+          fi
+
+          # ---------- settings.gradle ----------
+          cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
                   google()
@@ -40,77 +94,73 @@ jobs:
               }
           }
           dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
                   google()
                   mavenCentral()
               }
           }
-          rootProject.name = "DevToolsBrowser"
+          rootProject.name = "WebApp"
           include ':app'
           EOF
 
-          cat << 'EOF' > build.gradle
+          # ---------- root build.gradle ----------
+          cat > build.gradle <<'EOF'
           plugins {
-              id 'com.android.application' version '8.3.0' apply false
+              id 'com.android.application' version '8.5.2' apply false
           }
           EOF
 
-          cat << 'EOF' > gradle.properties
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-          android.useAndroidX=true
+          # ---------- gradle.properties ----------
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
           EOF
 
-          cat << 'EOF' > app/build.gradle
+          # ---------- app/build.gradle ----------
+          cat > app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
           }
-
           android {
-              namespace 'com.devtools.browser'
+              namespace '__PKG__'
               compileSdk 34
-
               defaultConfig {
-                  applicationId "com.devtools.browser"
-                  minSdk 24
+                  applicationId '__PKG__'
+                  minSdk 21
                   targetSdk 34
                   versionCode 1
-                  versionName "1.0"
+                  versionName '1.0'
               }
-
-              buildTypes {
-                  debug {
-                      minifyEnabled false
-                  }
-              }
-
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
               }
-          }
-
-          dependencies {
-              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
           }
           EOF
 
-          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          # ---------- AndroidManifest.xml ----------
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
               <application
-                  android:allowBackup="true"
-                  android:label="DevTools Browser"
+                  android:label="__APP_NAME__"
+                  android:icon="__ICON_REF__"
+                  android:hardwareAccelerated="true"
                   android:usesCleartextTraffic="true"
                   android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      android:hardwareAccelerated="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|smallestScreenSize|screenLayout|uiMode|density|fontScale"
+                      android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -120,655 +170,768 @@ jobs:
           </manifest>
           EOF
 
-          cat << 'EOF' > app/src/main/java/com/devtools/browser/MainActivity.java
-          package com.devtools.browser;
+          # ---------- MainActivity.java ----------
+          cat > app/src/main/java/$PKG_PATH/MainActivity.java <<'EOF'
+          package __PKG__;
 
           import android.app.Activity;
-          import android.app.AlertDialog;
-          import android.content.ClipData;
-          import android.content.ClipboardManager;
-          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.ActivityInfo;
+          import android.graphics.Bitmap;
           import android.graphics.Color;
-          import android.graphics.Typeface;
+          import android.graphics.drawable.ColorDrawable;
+          import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
-          import android.os.Handler;
-          import android.os.Looper;
-          import android.text.TextUtils;
-          import android.view.Gravity;
-          import android.view.KeyEvent;
+          import android.util.Log;
+          import android.view.DisplayCutout;
           import android.view.View;
-          import android.view.ViewGroup;
-          import android.view.inputmethod.EditorInfo;
+          import android.view.Window;
+          import android.view.WindowInsets;
+          import android.view.WindowManager;
           import android.webkit.CookieManager;
-          import android.webkit.JavascriptInterface;
           import android.webkit.WebChromeClient;
           import android.webkit.WebResourceRequest;
           import android.webkit.WebResourceResponse;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
-          import android.widget.BaseAdapter;
-          import android.widget.Button;
-          import android.widget.EditText;
           import android.widget.FrameLayout;
-          import android.widget.LinearLayout;
-          import android.widget.ListView;
-          import android.widget.ProgressBar;
-          import android.widget.ScrollView;
-          import android.widget.TextView;
-          import android.widget.Toast;
 
           import org.json.JSONArray;
           import org.json.JSONObject;
 
+          import java.io.BufferedReader;
           import java.io.ByteArrayInputStream;
-          import java.nio.charset.StandardCharsets;
-          import java.text.SimpleDateFormat;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.InetAddress;
+          import java.net.InetSocketAddress;
+          import java.net.ServerSocket;
+          import java.net.Socket;
+          import java.net.URL;
+          import java.net.URLDecoder;
           import java.util.ArrayList;
           import java.util.Collections;
-          import java.util.Date;
           import java.util.HashMap;
+          import java.util.HashSet;
           import java.util.List;
           import java.util.Locale;
           import java.util.Map;
+          import java.util.Set;
+          import java.util.concurrent.CountDownLatch;
           import java.util.concurrent.TimeUnit;
-
-          import okhttp3.Headers;
-          import okhttp3.OkHttpClient;
-          import okhttp3.Request;
-          import okhttp3.Response;
-          import okhttp3.ResponseBody;
+          import java.util.concurrent.atomic.AtomicReference;
 
           public class MainActivity extends Activity {
 
-              public static class NetworkLogItem {
-                  public String id;
-                  public String method;
-                  public String url;
-                  public int statusCode;
-                  public String contentType;
-                  public String requestHeaders;
-                  public String cookies;
-                  public String requestBody;
-                  public String responseHeaders;
-                  public String responseBody;
-                  public String timestamp;
-                  public long durationMs;
-              }
+              // Injected by the GitHub workflow
+              private static final String BASE_URL  = "__BASE_URL__";
+              private static final String BLOCK_API = "__BLOCK_API__";
+              private static final String TAG = "WebApp";
 
-              private WebView webView;
-              private EditText urlInput;
-              private ProgressBar progressBar;
-              private LinearLayout logsPanel;
-              private Button toggleLogsBtn;
-              private ListView logsListView;
-              private LogAdapter logAdapter;
-              private final List<NetworkLogItem> networkLogs = Collections.synchronizedList(new ArrayList<>());
-              private final Handler mainHandler = new Handler(Looper.getMainLooper());
-              private OkHttpClient okHttpClient;
+              // Local capture/proxy server (only reachable from this phone)
+              private static final int SERVER_PORT = 8481;
+
+              private static final String DESKTOP_UA =
+                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      + "Chrome/124.0.0.0 Safari/537.36";
+
+              private static final int DESKTOP_WIDTH = 1024;
+
+              private static final String VIEWPORT_JS =
+                      "(function(){if(window.__dw)return;window.__dw=1;"
+                      + "var C='width=" + DESKTOP_WIDTH + ", user-scalable=yes';"
+                      + "function a(){var h=document.head||document.documentElement;if(!h)return;"
+                      + "var m=document.querySelector('meta[name=viewport]');"
+                      + "if(!m){m=document.createElement('meta');m.name='viewport';h.appendChild(m);}"
+                      + "if(m.getAttribute('content')!==C)m.setAttribute('content',C);}"
+                      + "a();new MutationObserver(a).observe(document.documentElement,"
+                      + "{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();";
+
+              private static final String CORS =
+                      "Access-Control-Allow-Origin: *\r\n"
+                      + "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                      + "Access-Control-Allow-Headers: *\r\n"
+                      + "Access-Control-Allow-Private-Network: true\r\n"
+                      + "Access-Control-Expose-Headers: *\r\n";
+
+              private FrameLayout frame;
+              private FrameLayout content;
+              private FrameLayout fullscreenContainer;
+              private WebView web;
+              private SharedPreferences prefs;
+
+              private View customView;
+              private WebChromeClient.CustomViewCallback customCallback;
+              private int padL, padT, padR, padB;
+
+              private ServerSocket serverSocket;
+              private volatile boolean serverRunning = false;
+
+              private final Set<String> blockDomains = Collections.synchronizedSet(new HashSet<String>());
+              private final Set<String> blockUrls = Collections.synchronizedSet(new HashSet<String>());
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("blocklist", MODE_PRIVATE);
 
-                  okHttpClient = new OkHttpClient.Builder()
-                          .followRedirects(true)
-                          .followSslRedirects(true)
-                          .connectTimeout(15, TimeUnit.SECONDS)
-                          .readTimeout(15, TimeUnit.SECONDS)
-                          .build();
-
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setBackgroundColor(Color.parseColor("#121212"));
-
-                  // Top Navigation Bar
-                  LinearLayout topBar = new LinearLayout(this);
-                  topBar.setOrientation(LinearLayout.HORIZONTAL);
-                  topBar.setPadding(16, 16, 16, 16);
-                  topBar.setGravity(Gravity.CENTER_VERTICAL);
-                  topBar.setBackgroundColor(Color.parseColor("#1E1E1E"));
-
-                  urlInput = new EditText(this);
-                  urlInput.setHint("Enter URL (e.g. https://httpbin.org/get)");
-                  urlInput.setHintTextColor(Color.parseColor("#888888"));
-                  urlInput.setTextColor(Color.WHITE);
-                  urlInput.setSingleLine(true);
-                  urlInput.setImeOptions(EditorInfo.IME_ACTION_GO);
-                  urlInput.setBackgroundColor(Color.parseColor("#2C2C2C"));
-                  urlInput.setPadding(24, 18, 24, 18);
-                  LinearLayout.LayoutParams urlParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-                  urlParams.setMarginEnd(12);
-                  topBar.addView(urlInput, urlParams);
-
-                  Button goBtn = createStyledButton("GO", "#2979FF");
-                  goBtn.setOnClickListener(v -> loadTargetUrl());
-                  topBar.addView(goBtn);
-
-                  toggleLogsBtn = createStyledButton("Logs (0)", "#00C853");
-                  LinearLayout.LayoutParams logBtnParams = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                  logBtnParams.setMarginStart(12);
-                  toggleLogsBtn.setOnClickListener(v -> {
-                      if (logsPanel.getVisibility() == View.VISIBLE) {
-                          logsPanel.setVisibility(View.GONE);
-                      } else {
-                          logsPanel.setVisibility(View.VISIBLE);
-                          logAdapter.notifyDataSetChanged();
-                      }
-                  });
-                  topBar.addView(toggleLogsBtn, logBtnParams);
-
-                  root.addView(topBar, new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-                  progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-                  progressBar.setMax(100);
-                  root.addView(progressBar, new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, 8));
-
-                  // Main Content Area (WebView + Collectible Logs Drawer)
-                  FrameLayout contentFrame = new FrameLayout(this);
-
-                  webView = new WebView(this);
-                  setupWebView();
-                  contentFrame.addView(webView, new FrameLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-                  // Network Logs Panel Overlay
-                  logsPanel = new LinearLayout(this);
-                  logsPanel.setOrientation(LinearLayout.VERTICAL);
-                  logsPanel.setBackgroundColor(Color.parseColor("#F5181818"));
-                  logsPanel.setVisibility(View.GONE);
-
-                  LinearLayout logHeader = new LinearLayout(this);
-                  logHeader.setOrientation(LinearLayout.HORIZONTAL);
-                  logHeader.setPadding(24, 16, 24, 16);
-                  logHeader.setGravity(Gravity.CENTER_VERTICAL);
-                  logHeader.setBackgroundColor(Color.parseColor("#252525"));
-
-                  TextView titleTv = new TextView(this);
-                  titleTv.setText("Network Logs Inspector");
-                  titleTv.setTextColor(Color.WHITE);
-                  titleTv.setTextSize(16);
-                  titleTv.setTypeface(null, Typeface.BOLD);
-                  logHeader.addView(titleTv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                  Button clearBtn = createStyledButton("Clear", "#D32F2F");
-                  clearBtn.setOnClickListener(v -> {
-                      networkLogs.clear();
-                      updateLogCount();
-                      logAdapter.notifyDataSetChanged();
-                  });
-                  logHeader.addView(clearBtn);
-
-                  Button closeBtn = createStyledButton("Close", "#555555");
-                  LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                  closeParams.setMarginStart(12);
-                  closeBtn.setOnClickListener(v -> logsPanel.setVisibility(View.GONE));
-                  logHeader.addView(closeBtn, closeParams);
-
-                  logsPanel.addView(logHeader);
-
-                  logsListView = new ListView(this);
-                  logsListView.setDividerHeight(2);
-                  logAdapter = new LogAdapter();
-                  logsListView.setAdapter(logAdapter);
-                  logsPanel.addView(logsListView, new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-                  contentFrame.addView(logsPanel, new FrameLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-                  root.addView(contentFrame, new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-                  setContentView(root);
-
-                  urlInput.setOnEditorActionListener((v, actionId, event) -> {
-                      if (actionId == EditorInfo.IME_ACTION_GO ||
-                              (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
-                          loadTargetUrl();
-                          return true;
-                      }
-                      return false;
-                  });
-
-                  urlInput.setText("https://jsonplaceholder.typicode.com");
-                  loadTargetUrl();
-              }
-
-              private Button createStyledButton(String text, String bgHex) {
-                  Button btn = new Button(this);
-                  btn.setText(text);
-                  btn.setTextColor(Color.WHITE);
-                  btn.setTextSize(12);
-                  btn.setAllCaps(false);
-                  btn.setPadding(28, 12, 28, 12);
-                  btn.setBackgroundColor(Color.parseColor(bgHex));
-                  return btn;
-              }
-
-              private void loadTargetUrl() {
-                  String raw = urlInput.getText().toString().trim();
-                  if (TextUtils.isEmpty(raw)) return;
-                  if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
-                      raw = "https://" + raw;
-                      urlInput.setText(raw);
+                  Window w = getWindow();
+                  w.setBackgroundDrawable(new ColorDrawable(Color.BLACK));
+                  w.setStatusBarColor(Color.BLACK);
+                  w.setNavigationBarColor(Color.BLACK);
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      WindowManager.LayoutParams lp = w.getAttributes();
+                      lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
+                              ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                              : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      w.setAttributes(lp);
                   }
-                  webView.loadUrl(raw);
-              }
 
-              @SuppressWarnings("SetJavaScriptEnabled")
-              private void setupWebView() {
-                  CookieManager cookieManager = CookieManager.getInstance();
-                  cookieManager.setAcceptCookie(true);
-                  cookieManager.setAcceptThirdPartyCookies(webView, true);
+                  frame = new FrameLayout(this);
+                  frame.setBackgroundColor(Color.BLACK);
 
-                  WebSettings settings = webView.getSettings();
-                  settings.setJavaScriptEnabled(true);
-                  settings.setDomStorageEnabled(true);
-                  settings.setDatabaseEnabled(true);
-                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-                  settings.setUserAgentString(settings.getUserAgentString() + " DevToolsBrowser/1.0");
+                  content = new FrameLayout(this);
+                  web = new WebView(this);
+                  content.addView(web, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
-                  webView.addJavascriptInterface(new JSBridge(), "AndroidDevTools");
+                  fullscreenContainer = new FrameLayout(this);
+                  fullscreenContainer.setBackgroundColor(Color.BLACK);
+                  fullscreenContainer.setVisibility(View.GONE);
 
-                  webView.setWebChromeClient(new WebChromeClient() {
+                  frame.addView(content, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  frame.addView(fullscreenContainer, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  setContentView(frame);
+
+                  applyNormalSystemUi();
+
+                  frame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
                       @Override
-                      public void onProgressChanged(WebView view, int newProgress) {
-                          progressBar.setProgress(newProgress);
-                          progressBar.setVisibility(newProgress == 100 ? View.GONE : View.VISIBLE);
+                      public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
+                          int l = in.getSystemWindowInsetLeft();
+                          int t = in.getSystemWindowInsetTop();
+                          int r = in.getSystemWindowInsetRight();
+                          int b = in.getSystemWindowInsetBottom();
+                          if (Build.VERSION.SDK_INT >= 28) {
+                              DisplayCutout dc = in.getDisplayCutout();
+                              if (dc != null) {
+                                  l = Math.max(l, dc.getSafeInsetLeft());
+                                  t = Math.max(t, dc.getSafeInsetTop());
+                                  r = Math.max(r, dc.getSafeInsetRight());
+                                  b = Math.max(b, dc.getSafeInsetBottom());
+                              }
+                          }
+                          padL = l; padT = t; padR = r; padB = b;
+                          if (customView == null) content.setPadding(l, t, r, b);
+                          return in;
+                      }
+                  });
+                  frame.requestApplyInsets();
+
+                  // ---------- main WebView ----------
+                  configureWebView(web);
+
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onShowCustomView(View view, CustomViewCallback callback) {
+                          if (customView != null) {
+                              callback.onCustomViewHidden();
+                              return;
+                          }
+                          customView = view;
+                          customCallback = callback;
+                          fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
+                                  FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                          fullscreenContainer.setVisibility(View.VISIBLE);
+                          content.setVisibility(View.INVISIBLE);
+                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                          applyFullscreenSystemUi();
+                      }
+
+                      @Override
+                      public void onHideCustomView() {
+                          exitCustomView();
+                      }
+
+                      @Override
+                      public Bitmap getDefaultVideoPoster() {
+                          return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
                       }
                   });
 
-                  webView.setWebViewClient(new WebViewClient() {
+                  web.setWebViewClient(new WebViewClient() {
                       @Override
-                      public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
                           super.onPageStarted(view, url, favicon);
-                          urlInput.setText(url);
-                          injectNetworkHook(view);
+                          view.evaluateJavascript(VIEWPORT_JS, null);
+                      }
+
+                      @Override
+                      public void onPageCommitVisible(WebView view, String url) {
+                          super.onPageCommitVisible(view, url);
+                          view.evaluateJavascript(VIEWPORT_JS, null);
                       }
 
                       @Override
                       public void onPageFinished(WebView view, String url) {
                           super.onPageFinished(view, url);
-                          injectNetworkHook(view);
+                          view.evaluateJavascript(VIEWPORT_JS, null);
                       }
 
                       @Override
                       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                           String url = request.getUrl().toString();
-                          String method = request.getMethod();
-
-                          // Only proxy GET HTTP/HTTPS requests directly in shouldInterceptRequest so POST bodies handled by JS hook aren't consumed
-                          if (!"GET".equalsIgnoreCase(method) || (!url.startsWith("http://") && !url.startsWith("https://"))) {
-                              return super.shouldInterceptRequest(view, request);
+                          if (isBlocked(url)) {
+                              Log.d(TAG, "BLOCKED: " + url);
+                              return blockedResponse();
                           }
+                          return super.shouldInterceptRequest(view, request);
+                      }
 
-                          long startTime = System.currentTimeMillis();
-                          NetworkLogItem item = new NetworkLogItem();
-                          item.method = method;
-                          item.url = url;
-                          item.timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
-
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          if (isBlocked(url)) {
+                              Log.d(TAG, "BLOCKED NAV: " + url);
+                              return true;
+                          }
+                          String scheme = request.getUrl().getScheme();
+                          if ("http".equals(scheme) || "https".equals(scheme)) {
+                              return false;
+                          }
                           try {
-                              Request.Builder reqBuilder = new Request.Builder().url(url).get();
-                              StringBuilder reqHeadersStr = new StringBuilder();
+                              startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
+                          } catch (Exception ignored) { }
+                          return true;
+                      }
+                  });
 
-                              Map<String, String> webViewHeaders = request.getRequestHeaders();
-                              if (webViewHeaders != null) {
-                                  for (Map.Entry<String, String> entry : webViewHeaders.entrySet()) {
-                                      reqBuilder.header(entry.getKey(), entry.getValue());
-                                      reqHeadersStr.append(entry.getKey()).append(": ").append(entry.getValue()).append("\n");
-                                  }
+                  // start local capture/proxy server
+                  startServer();
+
+                  String cached = prefs.getString("json", null);
+                  final boolean hadCache = cached != null && parse(cached);
+
+                  if (hadCache) web.loadUrl(BASE_URL);
+
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          String json = download(BLOCK_API);
+                          if (json != null && parse(json)) {
+                              prefs.edit().putString("json", json).apply();
+                          }
+                          if (!hadCache) {
+                              runOnUiThread(new Runnable() {
+                                  @Override public void run() { web.loadUrl(BASE_URL); }
+                              });
+                          }
+                      }
+                  }).start();
+              }
+
+              // Shared WebView settings (main + hidden capture WebViews): always desktop mode
+              private void configureWebView(WebView v) {
+                  WebSettings s = v.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setUserAgentString(DESKTOP_UA);
+                  s.setUseWideViewPort(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setSupportZoom(true);
+                  s.setBuiltInZoomControls(true);
+                  s.setDisplayZoomControls(false);
+                  s.setTextZoom(100);
+                  CookieManager.getInstance().setAcceptCookie(true);
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(v, true);
+              }
+
+              private WebResourceResponse blockedResponse() {
+                  return new WebResourceResponse("text/plain", "UTF-8", 403, "Blocked",
+                          new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
+              }
+
+              // ======================================================================
+              //  LOCAL CAPTURE / PROXY SERVER  (127.0.0.1:8481)
+              //
+              //  GET /any?proxy=/home/newarticle&capdo=sample.com
+              //    proxy    = path on BASE_URL (or a full http(s) URL) to open
+              //    capdo    = domain to capture (exact host or any subdomain)
+              //    out      = proxy (default) | json | redirect
+              //    contains = optional text the captured URL must contain
+              //    timeout  = seconds to wait (default 25, max 60)
+              // ======================================================================
+
+              private void startServer() {
+                  if (serverRunning) return;
+                  serverRunning = true;
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          try {
+                              serverSocket = new ServerSocket();
+                              serverSocket.setReuseAddress(true);
+                              serverSocket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), SERVER_PORT));
+                              Log.d(TAG, "Server listening on 127.0.0.1:" + SERVER_PORT);
+                              while (serverRunning) {
+                                  final Socket c = serverSocket.accept();
+                                  new Thread(new Runnable() {
+                                      @Override public void run() { handleClient(c); }
+                                  }).start();
                               }
-
-                              String cookieStr = CookieManager.getInstance().getCookie(url);
-                              if (!TextUtils.isEmpty(cookieStr)) {
-                                  reqBuilder.header("Cookie", cookieStr);
-                                  reqHeadersStr.append("Cookie: ").append(cookieStr).append("\n");
-                                  item.cookies = cookieStr;
-                              } else {
-                                  item.cookies = "No Cookies sent";
-                              }
-
-                              item.requestHeaders = reqHeadersStr.length() > 0 ? reqHeadersStr.toString().trim() : "None";
-                              item.requestBody = "(GET Request - No Body)";
-
-                              Response response = okHttpClient.newCall(reqBuilder.build()).execute();
-                              item.durationMs = System.currentTimeMillis() - startTime;
-                              item.statusCode = response.code();
-
-                              Headers resHeaders = response.headers();
-                              StringBuilder resHeadersBuilder = new StringBuilder();
-                              Map<String, String> responseHeaderMap = new HashMap<>();
-
-                              for (int i = 0; i < resHeaders.size(); i++) {
-                                  String name = resHeaders.name(i);
-                                  String val = resHeaders.value(i);
-                                  resHeadersBuilder.append(name).append(": ").append(val).append("\n");
-                                  responseHeaderMap.put(name, val);
-                                  if ("Set-Cookie".equalsIgnoreCase(name)) {
-                                      CookieManager.getInstance().setCookie(url, val);
-                                      if ("No Cookies sent".equals(item.cookies)) {
-                                          item.cookies = "Set-Cookie: " + val;
-                                      } else {
-                                          item.cookies += "\nSet-Cookie: " + val;
-                                      }
-                                  }
-                              }
-                              item.responseHeaders = resHeadersBuilder.toString().trim();
-
-                              String contentTypeHeader = response.header("Content-Type", "text/plain");
-                              item.contentType = contentTypeHeader;
-
-                              ResponseBody body = response.body();
-                              byte[] bodyBytes = body != null ? body.bytes() : new byte[0];
-
-                              if (isTextOrJsonContentType(contentTypeHeader)) {
-                                  String rawText = new String(bodyBytes, StandardCharsets.UTF_8);
-                                  item.responseBody = formatPrettyIfJson(rawText);
-
-                                  // If HTML document, prepend our JS fetch/XHR interceptor hook
-                                  if (contentTypeHeader.toLowerCase(Locale.US).contains("text/html")) {
-                                      String hookedHtml = "<script>" + getJsInterceptorScript() + "</script>" + rawText;
-                                      bodyBytes = hookedHtml.getBytes(StandardCharsets.UTF_8);
-                                  }
-                              } else {
-                                  item.responseBody = "[Binary / Media Payload: " + bodyBytes.length + " bytes (" + contentTypeHeader + ")]";
-                              }
-
-                              addLogItem(item);
-
-                              String mimeType = contentTypeHeader.split(";")[0].trim();
-                              if (TextUtils.isEmpty(mimeType)) mimeType = "text/plain";
-
-                              WebResourceResponse webRes = new WebResourceResponse(
-                                      mimeType,
-                                      "UTF-8",
-                                      new ByteArrayInputStream(bodyBytes)
-                              );
-                              int code = response.code();
-                              String msg = response.message();
-                              if (TextUtils.isEmpty(msg)) msg = "OK";
-                              if (code >= 100 && code < 600) {
-                                  webRes.setStatusCodeAndReasonPhrase(code, msg);
-                              }
-                              webRes.setResponseHeaders(responseHeaderMap);
-                              return webRes;
-
                           } catch (Exception e) {
-                              item.durationMs = System.currentTimeMillis() - startTime;
-                              item.statusCode = 0;
-                              item.responseHeaders = "Error: " + e.getMessage();
-                              item.responseBody = "Request Failed: " + e.toString();
-                              addLogItem(item);
-                              return super.shouldInterceptRequest(view, request);
+                              Log.e(TAG, "server stopped", e);
+                          }
+                      }
+                  }).start();
+              }
+
+              private void stopServer() {
+                  serverRunning = false;
+                  try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) { }
+              }
+
+              private void handleClient(Socket c) {
+                  try {
+                      c.setSoTimeout(10000);
+                      BufferedReader in = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
+                      OutputStream out = c.getOutputStream();
+
+                      String reqLine = in.readLine();
+                      if (reqLine == null) return;
+                      String range = null;
+                      String line;
+                      while ((line = in.readLine()) != null && !line.isEmpty()) {
+                          if (line.toLowerCase(Locale.ROOT).startsWith("range:")) {
+                              range = line.substring(6).trim();
+                          }
+                      }
+                      String[] parts = reqLine.split(" ");
+                      String method = parts[0];
+                      String target = parts.length > 1 ? parts[1] : "/";
+
+                      if ("OPTIONS".equals(method)) {
+                          send(out, 204, "No Content", "text/plain", new byte[0], null);
+                          return;
+                      }
+
+                      Map<String, String> q = parseQuery(target);
+                      String proxy = q.get("proxy");
+                      String capdo = q.get("capdo");
+                      if (proxy == null || proxy.isEmpty() || capdo == null || capdo.isEmpty()) {
+                          JSONObject e = new JSONObject();
+                          e.put("ok", false);
+                          e.put("error", "use /path?proxy=/home/page&capdo=sample.com[&out=proxy|json|redirect][&contains=text][&timeout=25]");
+                          send(out, 400, "Bad Request", "application/json; charset=utf-8", e.toString().getBytes("UTF-8"), null);
+                          return;
+                      }
+
+                      // normalise capdo: "https://Sample.com/x" -> "sample.com"
+                      capdo = capdo.trim().toLowerCase(Locale.ROOT);
+                      capdo = capdo.replaceFirst("^https?://", "");
+                      int slash = capdo.indexOf('/');
+                      if (slash >= 0) capdo = capdo.substring(0, slash);
+
+                      String contains = q.get("contains");
+                      if (contains != null) contains = contains.toLowerCase(Locale.ROOT);
+
+                      int timeout = 25;
+                      try { if (q.get("timeout") != null) timeout = Integer.parseInt(q.get("timeout")); }
+                      catch (Exception ignored) { }
+                      timeout = Math.max(1, Math.min(60, timeout));
+
+                      String mode = q.get("out") == null ? "proxy" : q.get("out").toLowerCase(Locale.ROOT);
+                      String pageUrl = buildPageUrl(proxy);
+
+                      List<String> all = Collections.synchronizedList(new ArrayList<String>());
+                      String first = capture(pageUrl, capdo, contains, timeout, all);
+
+                      if (first == null) {
+                          JSONObject e = new JSONObject();
+                          e.put("ok", false);
+                          e.put("error", "timeout: no request to " + capdo + " seen");
+                          e.put("page", pageUrl);
+                          send(out, 504, "Gateway Timeout", "application/json; charset=utf-8", e.toString().getBytes("UTF-8"), null);
+                          return;
+                      }
+
+                      if ("json".equals(mode)) {
+                          JSONObject o = new JSONObject();
+                          o.put("ok", true);
+                          o.put("page", pageUrl);
+                          o.put("url", first);
+                          JSONArray arr = new JSONArray();
+                          synchronized (all) { for (String s : all) arr.put(s); }
+                          o.put("all", arr);
+                          send(out, 200, "OK", "application/json; charset=utf-8", o.toString().getBytes("UTF-8"), null);
+                      } else if ("redirect".equals(mode)) {
+                          send(out, 302, "Found", "text/plain", new byte[0], "Location: " + first + "\r\n");
+                      } else {
+                          proxyFetch(first, range, out);
+                      }
+                  } catch (Exception e) {
+                      Log.e(TAG, "client error", e);
+                      try {
+                          JSONObject o = new JSONObject();
+                          o.put("ok", false);
+                          o.put("error", String.valueOf(e));
+                          send(c.getOutputStream(), 500, "Server Error", "application/json; charset=utf-8",
+                                  o.toString().getBytes("UTF-8"), null);
+                      } catch (Exception ignored) { }
+                  } finally {
+                      try { c.close(); } catch (Exception ignored) { }
+                  }
+              }
+
+              private String buildPageUrl(String p) {
+                  if (p.startsWith("http://") || p.startsWith("https://")) return p;
+                  if (!p.startsWith("/")) p = "/" + p;
+                  return stripSlash(BASE_URL) + p;
+              }
+
+              private static Map<String, String> parseQuery(String target) {
+                  Map<String, String> m = new HashMap<String, String>();
+                  int qi = target.indexOf('?');
+                  if (qi < 0) return m;
+                  String qs = target.substring(qi + 1);
+                  int h = qs.indexOf('#');
+                  if (h >= 0) qs = qs.substring(0, h);
+                  for (String pair : qs.split("&")) {
+                      if (pair.isEmpty()) continue;
+                      int eq = pair.indexOf('=');
+                      try {
+                          String k = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), "UTF-8");
+                          String v = eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), "UTF-8");
+                          m.put(k, v);
+                      } catch (Exception ignored) { }
+                  }
+                  return m;
+              }
+
+              private void send(OutputStream o, int code, String reason, String ctype, byte[] body, String extra)
+                      throws IOException {
+                  StringBuilder h = new StringBuilder();
+                  h.append("HTTP/1.1 ").append(code).append(' ').append(reason).append("\r\n");
+                  h.append("Content-Type: ").append(ctype).append("\r\n");
+                  h.append("Content-Length: ").append(body.length).append("\r\n");
+                  h.append(CORS);
+                  if (extra != null) h.append(extra);
+                  h.append("Connection: close\r\n\r\n");
+                  o.write(h.toString().getBytes("UTF-8"));
+                  o.write(body);
+                  o.flush();
+              }
+
+              // Opens pageUrl in a hidden WebView and waits for the first request to capdo
+              private String capture(final String pageUrl, final String capdo, final String contains,
+                                     int timeoutSec, final List<String> all) throws InterruptedException {
+                  final CountDownLatch latch = new CountDownLatch(1);
+                  final AtomicReference<String> first = new AtomicReference<String>(null);
+                  final AtomicReference<WebView> holder = new AtomicReference<WebView>(null);
+
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          WebView wv = new WebView(MainActivity.this);
+                          holder.set(wv);
+                          configureWebView(wv);
+                          wv.setWebViewClient(new WebViewClient() {
+                              @Override
+                              public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                                  super.onPageStarted(view, url, favicon);
+                                  view.evaluateJavascript(VIEWPORT_JS, null);
+                              }
+
+                              @Override
+                              public void onPageFinished(WebView view, String url) {
+                                  super.onPageFinished(view, url);
+                                  view.evaluateJavascript(VIEWPORT_JS, null);
+                              }
+
+                              @Override
+                              public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                                  String u = request.getUrl().toString();
+                                  if (tryCapture(u, capdo, contains, all, first, latch)) {
+                                      // answer empty so single-use tokens are NOT consumed by the page;
+                                      // the app fetches the URL itself afterwards
+                                      return new WebResourceResponse("text/plain", "UTF-8", 200, "OK",
+                                              new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
+                                  }
+                                  if (isBlocked(u)) return blockedResponse();
+                                  return super.shouldInterceptRequest(view, request);
+                              }
+
+                              @Override
+                              public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                                  String u = request.getUrl().toString();
+                                  if (tryCapture(u, capdo, contains, all, first, latch)) return true;
+                                  if (isBlocked(u)) return true;
+                                  String scheme = request.getUrl().getScheme();
+                                  return !("http".equals(scheme) || "https".equals(scheme));
+                              }
+                          });
+                          // sits underneath the visible content (index 0), user never sees it
+                          frame.addView(wv, 0, new FrameLayout.LayoutParams(
+                                  FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                          wv.loadUrl(pageUrl);
+                      }
+                  });
+
+                  latch.await(timeoutSec, TimeUnit.SECONDS);
+
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          WebView wv = holder.get();
+                          if (wv != null) {
+                              try {
+                                  wv.stopLoading();
+                                  frame.removeView(wv);
+                                  wv.destroy();
+                              } catch (Exception ignored) { }
                           }
                       }
                   });
+                  return first.get();
               }
 
-              private boolean isTextOrJsonContentType(String contentType) {
-                  if (contentType == null) return false;
-                  String lower = contentType.toLowerCase(Locale.US);
-                  return lower.contains("json")
-                          || lower.contains("text/")
-                          || lower.contains("javascript")
-                          || lower.contains("xml")
-                          || lower.contains("urlencoded")
-                          || lower.contains("graphql");
-              }
-
-              private String formatPrettyIfJson(String raw) {
-                  if (raw == null) return "";
-                  String trimmed = raw.trim();
+              private boolean tryCapture(String url, String capdo, String contains, List<String> all,
+                                         AtomicReference<String> first, CountDownLatch latch) {
                   try {
-                      if (trimmed.startsWith("{")) {
-                          return new JSONObject(trimmed).toString(2);
-                      } else if (trimmed.startsWith("[")) {
-                          return new JSONArray(trimmed).toString(2);
+                      String host = Uri.parse(url).getHost();
+                      if (host == null) return false;
+                      host = host.toLowerCase(Locale.ROOT);
+                      if (!(host.equals(capdo) || host.endsWith("." + capdo))) return false;
+                      if (contains != null && !contains.isEmpty()
+                              && !url.toLowerCase(Locale.ROOT).contains(contains)) return false;
+                      Log.d(TAG, "CAPTURED: " + url);
+                      all.add(url);
+                      if (first.compareAndSet(null, url)) latch.countDown();
+                      return true;
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              // Fetches the captured URL and streams it back to the caller
+              private void proxyFetch(String url, String range, OutputStream out) throws IOException {
+                  HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
+                  try {
+                      h.setInstanceFollowRedirects(true);
+                      h.setConnectTimeout(10000);
+                      h.setReadTimeout(30000);
+                      h.setRequestProperty("User-Agent", DESKTOP_UA);
+                      h.setRequestProperty("Referer", stripSlash(BASE_URL) + "/");
+                      h.setRequestProperty("Origin", stripSlash(BASE_URL));
+                      String ck = CookieManager.getInstance().getCookie(url);
+                      if (ck != null && !ck.isEmpty()) h.setRequestProperty("Cookie", ck);
+                      if (range != null) h.setRequestProperty("Range", range);
+
+                      int code = h.getResponseCode();
+                      InputStream is = code >= 400 ? h.getErrorStream() : h.getInputStream();
+
+                      StringBuilder hd = new StringBuilder();
+                      hd.append("HTTP/1.1 ").append(code).append(' ')
+                        .append(h.getResponseMessage() == null ? "OK" : h.getResponseMessage()).append("\r\n");
+                      String ct = h.getContentType();
+                      hd.append("Content-Type: ").append(ct == null ? "application/octet-stream" : ct).append("\r\n");
+                      long len = h.getContentLengthLong();
+                      if (len >= 0) hd.append("Content-Length: ").append(len).append("\r\n");
+                      String cr = h.getHeaderField("Content-Range");
+                      if (cr != null) hd.append("Content-Range: ").append(cr).append("\r\n");
+                      String ar = h.getHeaderField("Accept-Ranges");
+                      if (ar != null) hd.append("Accept-Ranges: ").append(ar).append("\r\n");
+                      hd.append("X-Captured-Url: ").append(url.replace("\r", "").replace("\n", "")).append("\r\n");
+                      hd.append(CORS);
+                      hd.append("Connection: close\r\n\r\n");
+                      out.write(hd.toString().getBytes("UTF-8"));
+
+                      if (is != null) {
+                          byte[] buf = new byte[16384];
+                          int n;
+                          while ((n = is.read(buf)) != -1) out.write(buf, 0, n);
+                          is.close();
                       }
-                  } catch (Exception ignored) {
-                  }
-                  if (raw.length() > 150000) {
-                      return raw.substring(0, 150000) + "\n\n... [Truncated at 150 KB]";
-                  }
-                  return raw;
-              }
-
-              private void injectNetworkHook(WebView view) {
-                  view.evaluateJavascript(getJsInterceptorScript(), null);
-              }
-
-              private String getJsInterceptorScript() {
-                  return "(function() {" +
-                          "if (window.__devToolsHooked) return;" +
-                          "window.__devToolsHooked = true;" +
-                          "const origFetch = window.fetch;" +
-                          "window.fetch = async function(...args) {" +
-                          "  const start = Date.now();" +
-                          "  let url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';" +
-                          "  let opts = args[1] || {};" +
-                          "  let method = (opts.method || (args[0] && args[0].method) || 'GET').toUpperCase();" +
-                          "  if (method === 'GET') return origFetch.apply(this, args);" +
-                          "  let reqHeaders = JSON.stringify(opts.headers || {});" +
-                          "  let reqBody = typeof opts.body === 'string' ? opts.body : '[Object/Empty]';" +
-                          "  try {" +
-                          "    const res = await origFetch.apply(this, args);" +
-                          "    const clone = res.clone();" +
-                          "    let resHeaders = '';" +
-                          "    clone.headers.forEach((v, k) => { resHeaders += k + ': ' + v + '\\n'; });" +
-                          "    let text = await clone.text();" +
-                          "    window.AndroidDevTools.recordJsLog(method, url, res.status, clone.headers.get('content-type') || 'text/plain', reqHeaders, document.cookie || '', reqBody, resHeaders, text, Date.now() - start);" +
-                          "    return res;" +
-                          "  } catch (err) {" +
-                          "    window.AndroidDevTools.recordJsLog(method, url, 0, 'error', reqHeaders, document.cookie || '', reqBody, '', err.toString(), Date.now() - start);" +
-                          "    throw err;" +
-                          "  }" +
-                          "};" +
-                          "const OrigXHR = window.XMLHttpRequest;" +
-                          "window.XMLHttpRequest = function() {" +
-                          "  const xhr = new OrigXHR();" +
-                          "  let method = 'GET', url = '', start = 0, reqHeaders = {}, reqBody = '';" +
-                          "  const origOpen = xhr.open;" +
-                          "  xhr.open = function(m, u, ...rest) {" +
-                          "    method = (m || 'GET').toUpperCase();" +
-                          "    url = u;" +
-                          "    return origOpen.call(this, m, u, ...rest);" +
-                          "  };" +
-                          "  const origSetHeader = xhr.setRequestHeader;" +
-                          "  xhr.setRequestHeader = function(k, v) {" +
-                          "    reqHeaders[k] = v;" +
-                          "    return origSetHeader.call(this, k, v);" +
-                          "  };" +
-                          "  const origSend = xhr.send;" +
-                          "  xhr.send = function(body) {" +
-                          "    start = Date.now();" +
-                          "    reqBody = typeof body === 'string' ? body : '';" +
-                          "    xhr.addEventListener('loadend', function() {" +
-                          "      if (method !== 'GET') {" +
-                          "        let hLines = Object.keys(reqHeaders).map(k => k + ': ' + reqHeaders[k]).join('\\n');" +
-                          "        window.AndroidDevTools.recordJsLog(method, url, xhr.status, xhr.getResponseHeader('content-type') || '', hLines, document.cookie || '', reqBody, xhr.getAllResponseHeaders() || '', xhr.responseText || '', Date.now() - start);" +
-                          "      }" +
-                          "    });" +
-                          "    return origSend.call(this, body);" +
-                          "  };" +
-                          "  return xhr;" +
-                          "};" +
-                          "})();";
-              }
-
-              public class JSBridge {
-                  @JavascriptInterface
-                  public void recordJsLog(String method, String url, int status, String contentType,
-                                          String reqHeaders, String cookies, String reqBody,
-                                          String resHeaders, String resBody, long duration) {
-                      NetworkLogItem item = new NetworkLogItem();
-                      item.method = method;
-                      item.url = url;
-                      item.statusCode = status;
-                      item.contentType = contentType;
-                      item.requestHeaders = TextUtils.isEmpty(reqHeaders) ? "Default Browser Headers" : reqHeaders;
-                      item.cookies = TextUtils.isEmpty(cookies) ? "No Cookies" : cookies;
-                      item.requestBody = TextUtils.isEmpty(reqBody) ? "(Empty)" : reqBody;
-                      item.responseHeaders = TextUtils.isEmpty(resHeaders) ? "None" : resHeaders;
-                      item.responseBody = formatPrettyIfJson(resBody);
-                      item.durationMs = duration;
-                      item.timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
-                      addLogItem(item);
+                      out.flush();
+                  } finally {
+                      h.disconnect();
                   }
               }
 
-              private void addLogItem(NetworkLogItem item) {
-                  mainHandler.post(() -> {
-                      networkLogs.add(0, item);
-                      updateLogCount();
-                      if (logsPanel.getVisibility() == View.VISIBLE) {
-                          logAdapter.notifyDataSetChanged();
+              // ---------------- system UI helpers ----------------
+
+              private void applyNormalSystemUi() {
+                  getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+              }
+
+              private void applyFullscreenSystemUi() {
+                  getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+              }
+
+              private void exitCustomView() {
+                  if (customView == null) return;
+                  fullscreenContainer.removeView(customView);
+                  fullscreenContainer.setVisibility(View.GONE);
+                  content.setVisibility(View.VISIBLE);
+                  customView = null;
+                  WebChromeClient.CustomViewCallback cb = customCallback;
+                  customCallback = null;
+                  if (cb != null) cb.onCustomViewHidden();
+                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                  applyNormalSystemUi();
+                  content.setPadding(padL, padT, padR, padB);
+                  frame.requestApplyInsets();
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) {
+                      if (customView != null) applyFullscreenSystemUi();
+                      else applyNormalSystemUi();
+                  }
+              }
+
+              // ---------------- block list ----------------
+
+              private boolean parse(String json) {
+                  try {
+                      JSONObject o = new JSONObject(json);
+                      Set<String> d = new HashSet<String>();
+                      Set<String> u = new HashSet<String>();
+                      JSONArray da = o.optJSONArray("blockDomains");
+                      JSONArray ua = o.optJSONArray("blockUrls");
+                      if (da != null) for (int i = 0; i < da.length(); i++)
+                          d.add(da.getString(i).trim().toLowerCase(Locale.ROOT));
+                      if (ua != null) for (int i = 0; i < ua.length(); i++)
+                          u.add(endpointKey(ua.getString(i).trim()));
+                      blockDomains.clear(); blockDomains.addAll(d);
+                      blockUrls.clear();    blockUrls.addAll(u);
+                      Log.d(TAG, "Block list loaded: " + d.size() + " domains, " + u.size() + " urls");
+                      return true;
+                  } catch (Exception e) {
+                      Log.e(TAG, "parse error", e);
+                      return false;
+                  }
+              }
+
+              private static String stripSlash(String s) {
+                  while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+                  return s;
+              }
+
+              private boolean isBlocked(String url) {
+                  try {
+                      String host = Uri.parse(url).getHost();
+                      if (host != null && blockDomains.contains(host.toLowerCase(Locale.ROOT))) {
+                          return true;
                       }
-                  });
-              }
-
-              private void updateLogCount() {
-                  toggleLogsBtn.setText("Logs (" + networkLogs.size() + ")");
-              }
-
-              private class LogAdapter extends BaseAdapter {
-                  @Override
-                  public int getCount() {
-                      return networkLogs.size();
-                  }
-
-                  @Override
-                  public Object getItem(int position) {
-                      return networkLogs.get(position);
-                  }
-
-                  @Override
-                  public long getItemId(int position) {
-                      return position;
-                  }
-
-                  @Override
-                  public View getView(int position, View convertView, ViewGroup parent) {
-                      LinearLayout row = new LinearLayout(MainActivity.this);
-                      row.setOrientation(LinearLayout.HORIZONTAL);
-                      row.setPadding(24, 20, 24, 20);
-                      row.setGravity(Gravity.CENTER_VERTICAL);
-                      row.setBackgroundColor(position % 2 == 0 ? Color.parseColor("#1E1E1E") : Color.parseColor("#161616"));
-
-                      NetworkLogItem item = networkLogs.get(position);
-
-                      LinearLayout infoLayout = new LinearLayout(MainActivity.this);
-                      infoLayout.setOrientation(LinearLayout.VERTICAL);
-
-                      TextView topLine = new TextView(MainActivity.this);
-                      String statusBadge = item.statusCode > 0 ? String.valueOf(item.statusCode) : "ERR";
-                      topLine.setText("[" + item.method + "] [" + statusBadge + "]  •  " + item.durationMs + "ms  •  " + item.timestamp);
-                      topLine.setTextSize(12);
-                      topLine.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-                      if (item.statusCode >= 200 && item.statusCode < 300) {
-                          topLine.setTextColor(Color.parseColor("#69F0AE"));
-                      } else if (item.statusCode >= 400 || item.statusCode == 0) {
-                          topLine.setTextColor(Color.parseColor("#FF5252"));
-                      } else {
-                          topLine.setTextColor(Color.parseColor("#FFD740"));
+                      if (blockUrls.contains(endpointKey(url))) {
+                          return true;
                       }
-                      infoLayout.addView(topLine);
-
-                      TextView urlTv = new TextView(MainActivity.this);
-                      urlTv.setText(item.url);
-                      urlTv.setTextColor(Color.parseColor("#E0E0E0"));
-                      urlTv.setTextSize(13);
-                      urlTv.setMaxLines(2);
-                      urlTv.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-                      infoLayout.addView(urlTv);
-
-                      row.addView(infoLayout, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-                      Button detailBtn = createStyledButton("View Detail", "#3949AB");
-                      LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
-                              ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                      btnParams.setMarginStart(16);
-                      detailBtn.setOnClickListener(v -> showLogDetailDialog(item));
-                      row.addView(detailBtn, btnParams);
-
-                      return row;
-                  }
+                  } catch (Exception ignored) { }
+                  return false;
               }
 
-              private void showLogDetailDialog(NetworkLogItem item) {
-                  ScrollView scrollView = new ScrollView(this);
-                  scrollView.setBackgroundColor(Color.parseColor("#181818"));
-                  LinearLayout container = new LinearLayout(this);
-                  container.setOrientation(LinearLayout.VERTICAL);
-                  container.setPadding(32, 32, 32, 32);
+              private static String endpointKey(String url) {
+                  Uri u = Uri.parse(url);
+                  String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
+                  String path = u.getPath() == null ? "" : u.getPath().toLowerCase(Locale.ROOT);
+                  return host + stripSlash(path);
+              }
 
-                  String fullDetails =
-                          "=== GENERAL ===\n" +
-                          "URL: " + item.url + "\n" +
-                          "Method: " + item.method + "\n" +
-                          "Status Code: " + item.statusCode + "\n" +
-                          "Content-Type: " + item.contentType + "\n" +
-                          "Time: " + item.timestamp + " (" + item.durationMs + " ms)\n\n" +
-                          "=== REQUEST HEADERS ===\n" +
-                          item.requestHeaders + "\n\n" +
-                          "=== COOKIES ===\n" +
-                          item.cookies + "\n\n" +
-                          "=== REQUEST BODY ===\n" +
-                          item.requestBody + "\n\n" +
-                          "=== RESPONSE HEADERS ===\n" +
-                          item.responseHeaders + "\n\n" +
-                          "=== RESPONSE BODY (JSON / TEXT) ===\n" +
-                          item.responseBody;
-
-                  TextView detailTv = new TextView(this);
-                  detailTv.setText(fullDetails);
-                  detailTv.setTextColor(Color.parseColor("#EEEEEE"));
-                  detailTv.setTextSize(12);
-                  detailTv.setTypeface(Typeface.MONOSPACE);
-                  detailTv.setTextIsSelectable(true);
-                  container.addView(detailTv);
-                  scrollView.addView(container);
-
-                  new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                          .setTitle(item.method + " (" + item.statusCode + ") Network Detail")
-                          .setView(scrollView)
-                          .setPositiveButton("Close", null)
-                          .setNeutralButton("Copy All", (d, w) -> {
-                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                              cb.setPrimaryClip(ClipData.newPlainText("NetworkLog", fullDetails));
-                              Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show();
-                          })
-                          .setNegativeButton("Copy Response Body", (d, w) -> {
-                              ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                              cb.setPrimaryClip(ClipData.newPlainText("ResponseBody", item.responseBody));
-                              Toast.makeText(this, "Response body copied", Toast.LENGTH_SHORT).show();
-                          })
-                          .show();
+              private String download(String link) {
+                  HttpURLConnection c = null;
+                  try {
+                      c = (HttpURLConnection) new URL(link).openConnection();
+                      c.setConnectTimeout(5000);
+                      c.setReadTimeout(5000);
+                      if (c.getResponseCode() != 200) return null;
+                      BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
+                      StringBuilder sb = new StringBuilder();
+                      String line;
+                      while ((line = r.readLine()) != null) sb.append(line).append('\n');
+                      r.close();
+                      return sb.toString();
+                  } catch (Exception e) {
+                      Log.e(TAG, "download error", e);
+                      return null;
+                  } finally {
+                      if (c != null) c.disconnect();
+                  }
               }
 
               @Override
               public void onBackPressed() {
-                  if (logsPanel.getVisibility() == View.VISIBLE) {
-                      logsPanel.setVisibility(View.GONE);
-                  } else if (webView.canGoBack()) {
-                      webView.goBack();
+                  if (customView != null) {
+                      exitCustomView();
+                  } else if (web.canGoBack()) {
+                      web.goBack();
                   } else {
                       super.onBackPressed();
                   }
               }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  web.onPause();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  web.onResume();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  stopServer();
+                  super.onDestroy();
+              }
           }
           EOF
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+          # ---------- inject values (perl keeps special chars like & safe) ----------
+          export PKG="$PACKAGE_NAME"
+          for f in app/build.gradle app/src/main/AndroidManifest.xml app/src/main/java/$PKG_PATH/MainActivity.java; do
+            perl -pi -e 's/__PKG__/$ENV{PKG}/g; s/__BASE_URL__/$ENV{BASE_URL}/g; s/__BLOCK_API__/$ENV{BLOCK_API}/g; s/__APP_NAME__/$ENV{APP_NAME}/g; s/__ICON_REF__/$ENV{ICON_REF}/g' "$f"
+          done
 
-      - name: Upload APK Artifact
+      - name: Build debug APK
+        working-directory: webapp
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp webapp/app/build/outputs/apk/debug/app-debug.apk "out/webapp.apk"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DevTools-Browser-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: web-apk
+          path: out/webapp.apk
+          if-no-files-found: error
