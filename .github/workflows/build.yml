@@ -49,7 +49,7 @@ permissions:
   contents: read
 
 env:
-  BASE_URL: ${{ github.event.inputs.base_url || 'https://ayushdevlopott.com' }}
+  BASE_URL: ${{ github.event.inputs.base_url || 'https://hotstar.com' }}
   APP_NAME: ${{ github.event.inputs.app_name || 'Ayush ott' }}
   PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.example.webapp' }}
   BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
