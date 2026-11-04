@@ -8,12 +8,19 @@ name: Build Web APK
 #  - Punch-hole / notch safe
 #  - Downloads a block list (Block.json) from GitHub at every app start
 #    and blocks exact domains / exact URL endpoints in network requests
-#  - NEW: Local capture/proxy server on 127.0.0.1:8481
+#  - Local capture/proxy server on 127.0.0.1:8481
 #      http://127.0.0.1:8481/x?proxy=/home/newarticle&capdo=sample.com
 #      -> loads BASE_URL/home/newarticle in a hidden WebView, watches the
-#         network log, captures the first request to sample.com and
-#         proxies that URL back to the caller
-#      optional: &out=proxy|json|redirect  &contains=.m3u8  &timeout=25
+#         network log, captures the first request to capdo (exact host or
+#         any subdomain) and proxies that URL back to the caller
+#      optional:
+#        &out=proxy|json|redirect   (default proxy)
+#        &contains=.m3u8            (URL must contain this text)
+#        &timeout=25                (seconds, max 60)
+#        &click=.play-btn           (CSS selector to click, URL-encode # as %23)
+#        &js=...                    (your own JS, runs every 1.5s until captured)
+#      on timeout the JSON reply contains "seen": every request the hidden
+#      page made (for debugging)
 #  - Builds a debug APK and uploads it as artifact
 #
 #  HOW TO USE:
@@ -42,7 +49,7 @@ permissions:
   contents: read
 
 env:
-  BASE_URL: ${{ github.event.inputs.base_url || 'https://hotstar.com' }}
+  BASE_URL: ${{ github.event.inputs.base_url || 'https://ayushdevlopott.com' }}
   APP_NAME: ${{ github.event.inputs.app_name || 'Ayush ott' }}
   PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.example.webapp' }}
   BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
@@ -252,6 +259,11 @@ jobs:
                       + "if(m.getAttribute('content')!==C)m.setAttribute('content',C);}"
                       + "a();new MutationObserver(a).observe(document.documentElement,"
                       + "{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();";
+
+              // Muted autoplay of any <video>/<audio> (used by the hidden capture page)
+              private static final String AUTOPLAY_JS =
+                      "(function(){try{document.querySelectorAll('video,audio').forEach(function(v){"
+                      + "v.muted=true;var p=v.play();if(p&&p.catch)p.catch(function(){});});}catch(e){}})();";
 
               private static final String CORS =
                       "Access-Control-Allow-Origin: *\r\n"
@@ -472,6 +484,8 @@ jobs:
               //    out      = proxy (default) | json | redirect
               //    contains = optional text the captured URL must contain
               //    timeout  = seconds to wait (default 25, max 60)
+              //    click    = optional CSS selector to click (retried)
+              //    js       = optional JavaScript to run (retried)
               // ======================================================================
 
               private void startServer() {
@@ -533,7 +547,7 @@ jobs:
                       if (proxy == null || proxy.isEmpty() || capdo == null || capdo.isEmpty()) {
                           JSONObject e = new JSONObject();
                           e.put("ok", false);
-                          e.put("error", "use /path?proxy=/home/page&capdo=sample.com[&out=proxy|json|redirect][&contains=text][&timeout=25]");
+                          e.put("error", "use /path?proxy=/home/page&capdo=sample.com[&out=proxy|json|redirect][&contains=text][&timeout=25][&click=selector][&js=code]");
                           send(out, 400, "Bad Request", "application/json; charset=utf-8", e.toString().getBytes("UTF-8"), null);
                           return;
                       }
@@ -555,14 +569,20 @@ jobs:
                       String mode = q.get("out") == null ? "proxy" : q.get("out").toLowerCase(Locale.ROOT);
                       String pageUrl = buildPageUrl(proxy);
 
+                      String clickSel = q.get("click");
+                      String js = q.get("js");
                       List<String> all = Collections.synchronizedList(new ArrayList<String>());
-                      String first = capture(pageUrl, capdo, contains, timeout, all);
+                      List<String> seen = Collections.synchronizedList(new ArrayList<String>());
+                      String first = capture(pageUrl, capdo, contains, timeout, all, seen, clickSel, js);
 
                       if (first == null) {
                           JSONObject e = new JSONObject();
                           e.put("ok", false);
                           e.put("error", "timeout: no request to " + capdo + " seen");
                           e.put("page", pageUrl);
+                          JSONArray sa = new JSONArray();
+                          synchronized (seen) { for (String s : seen) sa.put(s); }
+                          e.put("seen", sa);
                           send(out, 504, "Gateway Timeout", "application/json; charset=utf-8", e.toString().getBytes("UTF-8"), null);
                           return;
                       }
@@ -634,9 +654,14 @@ jobs:
                   o.flush();
               }
 
+              private void addSeen(List<String> seen, String url) {
+                  if (seen.size() < 500) seen.add(url);
+              }
+
               // Opens pageUrl in a hidden WebView and waits for the first request to capdo
               private String capture(final String pageUrl, final String capdo, final String contains,
-                                     int timeoutSec, final List<String> all) throws InterruptedException {
+                                     int timeoutSec, final List<String> all, final List<String> seen,
+                                     final String clickSel, final String js) throws InterruptedException {
                   final CountDownLatch latch = new CountDownLatch(1);
                   final AtomicReference<String> first = new AtomicReference<String>(null);
                   final AtomicReference<WebView> holder = new AtomicReference<WebView>(null);
@@ -644,9 +669,11 @@ jobs:
                   runOnUiThread(new Runnable() {
                       @Override
                       public void run() {
-                          WebView wv = new WebView(MainActivity.this);
+                          final WebView wv = new WebView(MainActivity.this);
                           holder.set(wv);
                           configureWebView(wv);
+                          wv.onResume();
+                          wv.resumeTimers();
                           wv.setWebViewClient(new WebViewClient() {
                               @Override
                               public void onPageStarted(WebView view, String url, Bitmap favicon) {
@@ -658,11 +685,19 @@ jobs:
                               public void onPageFinished(WebView view, String url) {
                                   super.onPageFinished(view, url);
                                   view.evaluateJavascript(VIEWPORT_JS, null);
+                                  poke(view, clickSel, js, latch, 8);
+                              }
+
+                              @Override
+                              public void onLoadResource(WebView view, String url) {
+                                  addSeen(seen, url);
+                                  tryCapture(url, capdo, contains, all, first, latch);
                               }
 
                               @Override
                               public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                                   String u = request.getUrl().toString();
+                                  addSeen(seen, u);
                                   if (tryCapture(u, capdo, contains, all, first, latch)) {
                                       // answer empty so single-use tokens are NOT consumed by the page;
                                       // the app fetches the URL itself afterwards
@@ -676,6 +711,7 @@ jobs:
                               @Override
                               public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                                   String u = request.getUrl().toString();
+                                  addSeen(seen, u);
                                   if (tryCapture(u, capdo, contains, all, first, latch)) return true;
                                   if (isBlocked(u)) return true;
                                   String scheme = request.getUrl().getScheme();
@@ -707,6 +743,29 @@ jobs:
                   return first.get();
               }
 
+              // Repeatedly autoplay / click / run user JS until captured
+              private void poke(final WebView v, final String clickSel, final String js,
+                                final CountDownLatch latch, final int left) {
+                  if (left <= 0 || latch.getCount() == 0) return;
+                  v.postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (latch.getCount() == 0) return;
+                          try {
+                              v.evaluateJavascript(AUTOPLAY_JS, null);
+                              if (clickSel != null && !clickSel.isEmpty()) {
+                                  v.evaluateJavascript("(function(){try{var e=document.querySelector("
+                                          + JSONObject.quote(clickSel) + ");if(e)e.click();}catch(x){}})();", null);
+                              }
+                              if (js != null && !js.isEmpty()) {
+                                  v.evaluateJavascript("(function(){try{" + js + "}catch(x){}})();", null);
+                              }
+                          } catch (Exception ignored) { }
+                          poke(v, clickSel, js, latch, left - 1);
+                      }
+                  }, 1500);
+              }
+
               private boolean tryCapture(String url, String capdo, String contains, List<String> all,
                                          AtomicReference<String> first, CountDownLatch latch) {
                   try {
@@ -717,7 +776,7 @@ jobs:
                       if (contains != null && !contains.isEmpty()
                               && !url.toLowerCase(Locale.ROOT).contains(contains)) return false;
                       Log.d(TAG, "CAPTURED: " + url);
-                      all.add(url);
+                      if (!all.contains(url)) all.add(url);
                       if (first.compareAndSet(null, url)) latch.countDown();
                       return true;
                   } catch (Exception e) {
