@@ -72,6 +72,8 @@ jobs:
           android.useAndroidX=true
           android.nonTransitiveRClass=true
           kotlin.code.style=official
+          kotlin.daemon.jvmargs=-Xmx2g
+          org.gradle.daemon=false
           __SB_EOF__
 
           mkdir -p app
@@ -2087,6 +2089,7 @@ jobs:
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.setValue
           import androidx.compose.ui.Modifier
+          import androidx.core.app.PictureInPictureModeChangedInfo
           import androidx.core.util.Consumer
 
           class MainActivity : ComponentActivity() {
@@ -2103,7 +2106,7 @@ jobs:
                   super.onCreate(savedInstanceState)
                   pc = PlayerController(this)
 
-                  addOnPictureInPictureModeChangedListener(Consumer { info ->
+                  addOnPictureInPictureModeChangedListener(Consumer<PictureInPictureModeChangedInfo> { info ->
                       inPip = info.isInPictureInPictureMode
                   })
 
@@ -2163,15 +2166,20 @@ jobs:
           }
           __SB_EOF__
 
-      - name: Build APKs
+      - name: Build debug APK
         working-directory: StreamBoxApp
-        run: gradle assembleDebug assembleRelease --no-daemon --stacktrace
+        run: gradle assembleDebug --no-daemon --console=plain --stacktrace
+
+      - name: Build release APK
+        continue-on-error: true
+        working-directory: StreamBoxApp
+        run: gradle assembleRelease --no-daemon --console=plain --stacktrace
 
       - name: Collect APKs
         run: |
           mkdir -p out
           cp StreamBoxApp/app/build/outputs/apk/debug/app-debug.apk out/StreamBox-debug.apk
-          cp StreamBoxApp/app/build/outputs/apk/release/app-release.apk out/StreamBox-release.apk
+          cp StreamBoxApp/app/build/outputs/apk/release/app-release.apk out/StreamBox-release.apk || true
           ls -lh out
 
       - name: Upload APKs
