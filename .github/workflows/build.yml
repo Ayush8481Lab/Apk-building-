@@ -1,98 +1,46 @@
-name: Build Web APK
+name: Build StreamBox APK
 
-# =====================================================================
-#  WebView APK builder
-#  - Opens your website (BASE_URL) as the initial page inside the app
-#  - ALWAYS desktop mode, same layout width on phone and tablet
-#  - Full-screen video support (landscape, immersive, edge-to-edge)
-#  - Punch-hole / notch safe
-#  - Downloads a block list (Block.json) from GitHub at every app start
-#    and blocks exact domains / exact URL endpoints in network requests
-#  - Local capture/proxy server on 127.0.0.1:8481
-#      http://127.0.0.1:8481/x?proxy=/home/newarticle&capdo=sample.com
-#      -> loads BASE_URL/home/newarticle in a hidden WebView, watches the
-#         network log, captures the first request to capdo (exact host or
-#         any subdomain) and proxies that URL back to the caller
-#      optional:
-#        &out=proxy|json|redirect   (default proxy)
-#        &contains=.m3u8            (URL must contain this text)
-#        &timeout=25                (seconds, max 60)
-#        &click=.play-btn           (CSS selector to click, URL-encode # as %23)
-#        &js=...                    (your own JS, runs every 1.5s until captured)
-#      on timeout the JSON reply contains "seen": every request the hidden
-#      page made (for debugging)
-#  - Builds a debug APK and uploads it as artifact
-#
-#  HOW TO USE:
-#   1. Save this file as  .github/workflows/build-apk.yml  in your repo
-#   2. Edit the values in the "env" section below (or run manually from
-#      the Actions tab -> "Run workflow" and type them there)
-#   3. Download the APK from the run's "Artifacts" section
-# =====================================================================
+# StreamBox - a TiviMate-inspired IPTV / M3U8 player for Android (phone + Android TV).
+# This single workflow generates the whole Android project, builds it and uploads the APKs.
+# Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "StreamBox-APK".
 
 on:
   workflow_dispatch:
-    inputs:
-      base_url:
-        description: "Base domain / initial URL (e.g. https://yourdomain.com)"
-        required: false
-      app_name:
-        description: "App name"
-        required: false
-      package_name:
-        description: "Package name (e.g. com.example.webapp)"
-        required: false
   push:
     branches: [ main, master ]
 
 permissions:
-  contents: read
-
-env:
-  BASE_URL: ${{ github.event.inputs.base_url || 'https://hotstar.com' }}
-  APP_NAME: ${{ github.event.inputs.app_name || 'Ayush ott' }}
-  PACKAGE_NAME: ${{ github.event.inputs.package_name || 'com.example.webapp' }}
-  BLOCK_API: 'https://raw.githubusercontent.com/Ayush8481-dev/Ayush/refs/heads/main/Block.json'
-  ICON_URL: 'https://static.vecteezy.com/system/resources/previews/056/505/637/non_2x/jiohotstar-app-icon-on-transparent-background-free-png.png'
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 40
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: 8.9
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
-
-      - name: Generate Android WebView project
+      - name: Generate project files
         run: |
           set -e
-          mkdir -p webapp && cd webapp
-          PKG_PATH=$(echo "$PACKAGE_NAME" | tr . /)
-          mkdir -p app/src/main/java/$PKG_PATH
-          mkdir -p app/src/main/res/drawable
-
-          # ---------- optional icon ----------
-          if [ -n "$ICON_URL" ]; then
-            curl -fsSL "$ICON_URL" -o app/src/main/res/drawable/ic_launcher.png
-            export ICON_REF="@drawable/ic_launcher"
-          else
-            export ICON_REF="@android:drawable/sym_def_app_icon"
-          fi
-
-          # ---------- settings.gradle ----------
-          cat > settings.gradle <<'EOF'
+          rm -rf StreamBoxApp
+          mkdir -p StreamBoxApp
+          cd StreamBoxApp
+          cat > settings.gradle.kts <<'__SB_EOF__'
           pluginManagement {
               repositories {
                   google()
@@ -101,896 +49,2141 @@ jobs:
               }
           }
           dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
                   google()
                   mavenCentral()
               }
           }
-          rootProject.name = "WebApp"
-          include ':app'
-          EOF
+          rootProject.name = "StreamBox"
+          include(":app")
+          __SB_EOF__
 
-          # ---------- root build.gradle ----------
-          cat > build.gradle <<'EOF'
+          cat > build.gradle.kts <<'__SB_EOF__'
           plugins {
-              id 'com.android.application' version '8.5.2' apply false
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
           }
-          EOF
+          __SB_EOF__
 
-          # ---------- gradle.properties ----------
-          cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx2g
-          android.useAndroidX=false
-          EOF
+          cat > gradle.properties <<'__SB_EOF__'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          __SB_EOF__
 
-          # ---------- app/build.gradle ----------
-          cat > app/build.gradle <<'EOF'
+          mkdir -p app
+          cat > app/build.gradle.kts <<'__SB_EOF__'
           plugins {
-              id 'com.android.application'
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
           }
+
           android {
-              namespace '__PKG__'
-              compileSdk 34
+              namespace = "com.streambox.player"
+              compileSdk = 34
+
               defaultConfig {
-                  applicationId '__PKG__'
-                  minSdk 21
-                  targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
+                  applicationId = "com.streambox.player"
+                  minSdk = 23
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
               }
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
+
               buildTypes {
                   release {
-                      minifyEnabled false
+                      isMinifyEnabled = false
+                      // signed with the debug key so the release APK is directly installable
+                      signingConfig = signingConfigs.getByName("debug")
                   }
               }
-          }
-          EOF
 
-          # ---------- AndroidManifest.xml ----------
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+                  freeCompilerArgs += listOf(
+                      "-opt-in=androidx.media3.common.util.UnstableApi",
+                      "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+                      "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi",
+                      "-opt-in=androidx.compose.ui.ExperimentalComposeUiApi"
+                  )
+              }
+              buildFeatures { compose = true }
+              lint {
+                  abortOnError = false
+                  checkReleaseBuilds = false
+              }
+              packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
+
+              val media3 = "1.4.1"
+              implementation("androidx.media3:media3-exoplayer:$media3")
+              implementation("androidx.media3:media3-exoplayer-hls:$media3")
+              implementation("androidx.media3:media3-exoplayer-dash:$media3")
+              implementation("androidx.media3:media3-ui:$media3")
+
+              implementation("io.coil-kt:coil-compose:2.7.0")
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'__SB_EOF__'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+
               <application
-                  android:label="__APP_NAME__"
-                  android:icon="__ICON_REF__"
-                  android:hardwareAccelerated="true"
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="StreamBox"
                   android:usesCleartextTraffic="true"
-                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  android:theme="@style/Theme.StreamBox">
+
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:hardwareAccelerated="true"
-                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|smallestScreenSize|screenLayout|uiMode|density|fontScale"
-                      android:windowSoftInputMode="adjustResize">
+                      android:launchMode="singleTask"
+                      android:supportsPictureInPicture="true"
+                      android:resizeableActivity="true"
+                      android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboard|keyboardHidden|navigation|uiMode|density|layoutDirection">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="http" />
+                          <data android:scheme="https" />
+                          <data android:mimeType="application/vnd.apple.mpegurl" />
+                          <data android:mimeType="application/x-mpegurl" />
                       </intent-filter>
                   </activity>
               </application>
           </manifest>
-          EOF
-
-          # ---------- MainActivity.java ----------
-          cat > app/src/main/java/$PKG_PATH/MainActivity.java <<'EOF'
-          package __PKG__;
-
-          import android.app.Activity;
-          import android.content.Intent;
-          import android.content.SharedPreferences;
-          import android.content.pm.ActivityInfo;
-          import android.graphics.Bitmap;
-          import android.graphics.Color;
-          import android.graphics.drawable.ColorDrawable;
-          import android.net.Uri;
-          import android.os.Build;
-          import android.os.Bundle;
-          import android.util.Log;
-          import android.view.DisplayCutout;
-          import android.view.View;
-          import android.view.Window;
-          import android.view.WindowInsets;
-          import android.view.WindowManager;
-          import android.webkit.CookieManager;
-          import android.webkit.WebChromeClient;
-          import android.webkit.WebResourceRequest;
-          import android.webkit.WebResourceResponse;
-          import android.webkit.WebSettings;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
-          import android.widget.FrameLayout;
-
-          import org.json.JSONArray;
-          import org.json.JSONObject;
-
-          import java.io.BufferedReader;
-          import java.io.ByteArrayInputStream;
-          import java.io.IOException;
-          import java.io.InputStream;
-          import java.io.InputStreamReader;
-          import java.io.OutputStream;
-          import java.net.HttpURLConnection;
-          import java.net.InetAddress;
-          import java.net.InetSocketAddress;
-          import java.net.ServerSocket;
-          import java.net.Socket;
-          import java.net.URL;
-          import java.net.URLDecoder;
-          import java.util.ArrayList;
-          import java.util.Collections;
-          import java.util.HashMap;
-          import java.util.HashSet;
-          import java.util.List;
-          import java.util.Locale;
-          import java.util.Map;
-          import java.util.Set;
-          import java.util.concurrent.CountDownLatch;
-          import java.util.concurrent.TimeUnit;
-          import java.util.concurrent.atomic.AtomicReference;
-
-          public class MainActivity extends Activity {
-
-              // Injected by the GitHub workflow
-              private static final String BASE_URL  = "__BASE_URL__";
-              private static final String BLOCK_API = "__BLOCK_API__";
-              private static final String TAG = "WebApp";
-
-              // Local capture/proxy server (only reachable from this phone)
-              private static final int SERVER_PORT = 8481;
-
-              private static final String DESKTOP_UA =
-                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      + "Chrome/124.0.0.0 Safari/537.36";
-
-              private static final int DESKTOP_WIDTH = 1024;
-
-              private static final String VIEWPORT_JS =
-                      "(function(){if(window.__dw)return;window.__dw=1;"
-                      + "var C='width=" + DESKTOP_WIDTH + ", user-scalable=yes';"
-                      + "function a(){var h=document.head||document.documentElement;if(!h)return;"
-                      + "var m=document.querySelector('meta[name=viewport]');"
-                      + "if(!m){m=document.createElement('meta');m.name='viewport';h.appendChild(m);}"
-                      + "if(m.getAttribute('content')!==C)m.setAttribute('content',C);}"
-                      + "a();new MutationObserver(a).observe(document.documentElement,"
-                      + "{childList:true,subtree:true,attributes:true,attributeFilter:['content']});})();";
-
-              // Muted autoplay of any <video>/<audio> (used by the hidden capture page)
-              private static final String AUTOPLAY_JS =
-                      "(function(){try{document.querySelectorAll('video,audio').forEach(function(v){"
-                      + "v.muted=true;var p=v.play();if(p&&p.catch)p.catch(function(){});});}catch(e){}})();";
-
-              private static final String CORS =
-                      "Access-Control-Allow-Origin: *\r\n"
-                      + "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
-                      + "Access-Control-Allow-Headers: *\r\n"
-                      + "Access-Control-Allow-Private-Network: true\r\n"
-                      + "Access-Control-Expose-Headers: *\r\n";
-
-              private FrameLayout frame;
-              private FrameLayout content;
-              private FrameLayout fullscreenContainer;
-              private WebView web;
-              private SharedPreferences prefs;
-
-              private View customView;
-              private WebChromeClient.CustomViewCallback customCallback;
-              private int padL, padT, padR, padB;
-
-              private ServerSocket serverSocket;
-              private volatile boolean serverRunning = false;
-
-              private final Set<String> blockDomains = Collections.synchronizedSet(new HashSet<String>());
-              private final Set<String> blockUrls = Collections.synchronizedSet(new HashSet<String>());
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  prefs = getSharedPreferences("blocklist", MODE_PRIVATE);
-
-                  Window w = getWindow();
-                  w.setBackgroundDrawable(new ColorDrawable(Color.BLACK));
-                  w.setStatusBarColor(Color.BLACK);
-                  w.setNavigationBarColor(Color.BLACK);
-                  if (Build.VERSION.SDK_INT >= 28) {
-                      WindowManager.LayoutParams lp = w.getAttributes();
-                      lp.layoutInDisplayCutoutMode = Build.VERSION.SDK_INT >= 30
-                              ? WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                              : WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                      w.setAttributes(lp);
-                  }
-
-                  frame = new FrameLayout(this);
-                  frame.setBackgroundColor(Color.BLACK);
-
-                  content = new FrameLayout(this);
-                  web = new WebView(this);
-                  content.addView(web, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-
-                  fullscreenContainer = new FrameLayout(this);
-                  fullscreenContainer.setBackgroundColor(Color.BLACK);
-                  fullscreenContainer.setVisibility(View.GONE);
-
-                  frame.addView(content, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-                  frame.addView(fullscreenContainer, new FrameLayout.LayoutParams(
-                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-                  setContentView(frame);
-
-                  applyNormalSystemUi();
-
-                  frame.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
-                      @Override
-                      public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
-                          int l = in.getSystemWindowInsetLeft();
-                          int t = in.getSystemWindowInsetTop();
-                          int r = in.getSystemWindowInsetRight();
-                          int b = in.getSystemWindowInsetBottom();
-                          if (Build.VERSION.SDK_INT >= 28) {
-                              DisplayCutout dc = in.getDisplayCutout();
-                              if (dc != null) {
-                                  l = Math.max(l, dc.getSafeInsetLeft());
-                                  t = Math.max(t, dc.getSafeInsetTop());
-                                  r = Math.max(r, dc.getSafeInsetRight());
-                                  b = Math.max(b, dc.getSafeInsetBottom());
-                              }
-                          }
-                          padL = l; padT = t; padR = r; padB = b;
-                          if (customView == null) content.setPadding(l, t, r, b);
-                          return in;
-                      }
-                  });
-                  frame.requestApplyInsets();
-
-                  // ---------- main WebView ----------
-                  configureWebView(web);
-
-                  web.setWebChromeClient(new WebChromeClient() {
-                      @Override
-                      public void onShowCustomView(View view, CustomViewCallback callback) {
-                          if (customView != null) {
-                              callback.onCustomViewHidden();
-                              return;
-                          }
-                          customView = view;
-                          customCallback = callback;
-                          fullscreenContainer.addView(view, new FrameLayout.LayoutParams(
-                                  FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-                          fullscreenContainer.setVisibility(View.VISIBLE);
-                          content.setVisibility(View.INVISIBLE);
-                          getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                          applyFullscreenSystemUi();
-                      }
-
-                      @Override
-                      public void onHideCustomView() {
-                          exitCustomView();
-                      }
-
-                      @Override
-                      public Bitmap getDefaultVideoPoster() {
-                          return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
-                      }
-                  });
-
-                  web.setWebViewClient(new WebViewClient() {
-                      @Override
-                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                          super.onPageStarted(view, url, favicon);
-                          view.evaluateJavascript(VIEWPORT_JS, null);
-                      }
-
-                      @Override
-                      public void onPageCommitVisible(WebView view, String url) {
-                          super.onPageCommitVisible(view, url);
-                          view.evaluateJavascript(VIEWPORT_JS, null);
-                      }
-
-                      @Override
-                      public void onPageFinished(WebView view, String url) {
-                          super.onPageFinished(view, url);
-                          view.evaluateJavascript(VIEWPORT_JS, null);
-                      }
-
-                      @Override
-                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                          String url = request.getUrl().toString();
-                          if (isBlocked(url)) {
-                              Log.d(TAG, "BLOCKED: " + url);
-                              return blockedResponse();
-                          }
-                          return super.shouldInterceptRequest(view, request);
-                      }
-
-                      @Override
-                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                          String url = request.getUrl().toString();
-                          if (isBlocked(url)) {
-                              Log.d(TAG, "BLOCKED NAV: " + url);
-                              return true;
-                          }
-                          String scheme = request.getUrl().getScheme();
-                          if ("http".equals(scheme) || "https".equals(scheme)) {
-                              return false;
-                          }
-                          try {
-                              startActivity(new Intent(Intent.ACTION_VIEW, request.getUrl()));
-                          } catch (Exception ignored) { }
-                          return true;
-                      }
-                  });
-
-                  // start local capture/proxy server
-                  startServer();
-
-                  String cached = prefs.getString("json", null);
-                  final boolean hadCache = cached != null && parse(cached);
-
-                  if (hadCache) web.loadUrl(BASE_URL);
-
-                  new Thread(new Runnable() {
-                      @Override
-                      public void run() {
-                          String json = download(BLOCK_API);
-                          if (json != null && parse(json)) {
-                              prefs.edit().putString("json", json).apply();
-                          }
-                          if (!hadCache) {
-                              runOnUiThread(new Runnable() {
-                                  @Override public void run() { web.loadUrl(BASE_URL); }
-                              });
-                          }
-                      }
-                  }).start();
-              }
-
-              // Shared WebView settings (main + hidden capture WebViews): always desktop mode
-              private void configureWebView(WebView v) {
-                  WebSettings s = v.getSettings();
-                  s.setJavaScriptEnabled(true);
-                  s.setDomStorageEnabled(true);
-                  s.setDatabaseEnabled(true);
-                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
-                  s.setMediaPlaybackRequiresUserGesture(false);
-                  s.setUserAgentString(DESKTOP_UA);
-                  s.setUseWideViewPort(true);
-                  s.setLoadWithOverviewMode(true);
-                  s.setSupportZoom(true);
-                  s.setBuiltInZoomControls(true);
-                  s.setDisplayZoomControls(false);
-                  s.setTextZoom(100);
-                  CookieManager.getInstance().setAcceptCookie(true);
-                  CookieManager.getInstance().setAcceptThirdPartyCookies(v, true);
-              }
-
-              private WebResourceResponse blockedResponse() {
-                  return new WebResourceResponse("text/plain", "UTF-8", 403, "Blocked",
-                          new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
-              }
-
-              // ======================================================================
-              //  LOCAL CAPTURE / PROXY SERVER  (127.0.0.1:8481)
-              //
-              //  GET /any?proxy=/home/newarticle&capdo=sample.com
-              //    proxy    = path on BASE_URL (or a full http(s) URL) to open
-              //    capdo    = domain to capture (exact host or any subdomain)
-              //    out      = proxy (default) | json | redirect
-              //    contains = optional text the captured URL must contain
-              //    timeout  = seconds to wait (default 25, max 60)
-              //    click    = optional CSS selector to click (retried)
-              //    js       = optional JavaScript to run (retried)
-              // ======================================================================
-
-              private void startServer() {
-                  if (serverRunning) return;
-                  serverRunning = true;
-                  new Thread(new Runnable() {
-                      @Override
-                      public void run() {
-                          try {
-                              serverSocket = new ServerSocket();
-                              serverSocket.setReuseAddress(true);
-                              serverSocket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), SERVER_PORT));
-                              Log.d(TAG, "Server listening on 127.0.0.1:" + SERVER_PORT);
-                              while (serverRunning) {
-                                  final Socket c = serverSocket.accept();
-                                  new Thread(new Runnable() {
-                                      @Override public void run() { handleClient(c); }
-                                  }).start();
-                              }
-                          } catch (Exception e) {
-                              Log.e(TAG, "server stopped", e);
-                          }
-                      }
-                  }).start();
-              }
-
-              private void stopServer() {
-                  serverRunning = false;
-                  try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) { }
-              }
-
-              private void handleClient(Socket c) {
-                  try {
-                      c.setSoTimeout(10000);
-                      BufferedReader in = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
-                      OutputStream out = c.getOutputStream();
-
-                      String reqLine = in.readLine();
-                      if (reqLine == null) return;
-                      String range = null;
-                      String line;
-                      while ((line = in.readLine()) != null && !line.isEmpty()) {
-                          if (line.toLowerCase(Locale.ROOT).startsWith("range:")) {
-                              range = line.substring(6).trim();
-                          }
-                      }
-                      String[] parts = reqLine.split(" ");
-                      String method = parts[0];
-                      String target = parts.length > 1 ? parts[1] : "/";
-
-                      if ("OPTIONS".equals(method)) {
-                          send(out, 204, "No Content", "text/plain", new byte[0], null);
-                          return;
-                      }
-
-                      Map<String, String> q = parseQuery(target);
-                      String proxy = q.get("proxy");
-                      String capdo = q.get("capdo");
-                      if (proxy == null || proxy.isEmpty() || capdo == null || capdo.isEmpty()) {
-                          JSONObject e = new JSONObject();
-                          e.put("ok", false);
-                          e.put("error", "use /path?proxy=/home/page&capdo=sample.com[&out=proxy|json|redirect][&contains=text][&timeout=25][&click=selector][&js=code]");
-                          send(out, 400, "Bad Request", "application/json; charset=utf-8", e.toString().getBytes("UTF-8"), null);
-                          return;
-                      }
-
-                      // normalise capdo: "https://Sample.com/x" -> "sample.com"
-                      capdo = capdo.trim().toLowerCase(Locale.ROOT);
-                      capdo = capdo.replaceFirst("^https?://", "");
-                      int slash = capdo.indexOf('/');
-                      if (slash >= 0) capdo = capdo.substring(0, slash);
-
-                      String contains = q.get("contains");
-                      if (contains != null) contains = contains.toLowerCase(Locale.ROOT);
-
-                      int timeout = 25;
-                      try { if (q.get("timeout") != null) timeout = Integer.parseInt(q.get("timeout")); }
-                      catch (Exception ignored) { }
-                      timeout = Math.max(1, Math.min(60, timeout));
-
-                      String mode = q.get("out") == null ? "proxy" : q.get("out").toLowerCase(Locale.ROOT);
-                      String pageUrl = buildPageUrl(proxy);
-
-                      String clickSel = q.get("click");
-                      String js = q.get("js");
-                      List<String> all = Collections.synchronizedList(new ArrayList<String>());
-                      List<String> seen = Collections.synchronizedList(new ArrayList<String>());
-                      String first = capture(pageUrl, capdo, contains, timeout, all, seen, clickSel, js);
-
-                      if (first == null) {
-                          JSONObject e = new JSONObject();
-                          e.put("ok", false);
-                          e.put("error", "timeout: no request to " + capdo + " seen");
-                          e.put("page", pageUrl);
-                          JSONArray sa = new JSONArray();
-                          synchronized (seen) { for (String s : seen) sa.put(s); }
-                          e.put("seen", sa);
-                          send(out, 504, "Gateway Timeout", "application/json; charset=utf-8", e.toString().getBytes("UTF-8"), null);
-                          return;
-                      }
-
-                      if ("json".equals(mode)) {
-                          JSONObject o = new JSONObject();
-                          o.put("ok", true);
-                          o.put("page", pageUrl);
-                          o.put("url", first);
-                          JSONArray arr = new JSONArray();
-                          synchronized (all) { for (String s : all) arr.put(s); }
-                          o.put("all", arr);
-                          send(out, 200, "OK", "application/json; charset=utf-8", o.toString().getBytes("UTF-8"), null);
-                      } else if ("redirect".equals(mode)) {
-                          send(out, 302, "Found", "text/plain", new byte[0], "Location: " + first + "\r\n");
-                      } else {
-                          proxyFetch(first, range, out);
-                      }
-                  } catch (Exception e) {
-                      Log.e(TAG, "client error", e);
-                      try {
-                          JSONObject o = new JSONObject();
-                          o.put("ok", false);
-                          o.put("error", String.valueOf(e));
-                          send(c.getOutputStream(), 500, "Server Error", "application/json; charset=utf-8",
-                                  o.toString().getBytes("UTF-8"), null);
-                      } catch (Exception ignored) { }
-                  } finally {
-                      try { c.close(); } catch (Exception ignored) { }
-                  }
-              }
-
-              private String buildPageUrl(String p) {
-                  if (p.startsWith("http://") || p.startsWith("https://")) return p;
-                  if (!p.startsWith("/")) p = "/" + p;
-                  return stripSlash(BASE_URL) + p;
-              }
-
-              private static Map<String, String> parseQuery(String target) {
-                  Map<String, String> m = new HashMap<String, String>();
-                  int qi = target.indexOf('?');
-                  if (qi < 0) return m;
-                  String qs = target.substring(qi + 1);
-                  int h = qs.indexOf('#');
-                  if (h >= 0) qs = qs.substring(0, h);
-                  for (String pair : qs.split("&")) {
-                      if (pair.isEmpty()) continue;
-                      int eq = pair.indexOf('=');
-                      try {
-                          String k = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), "UTF-8");
-                          String v = eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), "UTF-8");
-                          m.put(k, v);
-                      } catch (Exception ignored) { }
-                  }
-                  return m;
-              }
-
-              private void send(OutputStream o, int code, String reason, String ctype, byte[] body, String extra)
-                      throws IOException {
-                  StringBuilder h = new StringBuilder();
-                  h.append("HTTP/1.1 ").append(code).append(' ').append(reason).append("\r\n");
-                  h.append("Content-Type: ").append(ctype).append("\r\n");
-                  h.append("Content-Length: ").append(body.length).append("\r\n");
-                  h.append(CORS);
-                  if (extra != null) h.append(extra);
-                  h.append("Connection: close\r\n\r\n");
-                  o.write(h.toString().getBytes("UTF-8"));
-                  o.write(body);
-                  o.flush();
-              }
-
-              private void addSeen(List<String> seen, String url) {
-                  if (seen.size() < 500) seen.add(url);
-              }
-
-              // Opens pageUrl in a hidden WebView and waits for the first request to capdo
-              private String capture(final String pageUrl, final String capdo, final String contains,
-                                     int timeoutSec, final List<String> all, final List<String> seen,
-                                     final String clickSel, final String js) throws InterruptedException {
-                  final CountDownLatch latch = new CountDownLatch(1);
-                  final AtomicReference<String> first = new AtomicReference<String>(null);
-                  final AtomicReference<WebView> holder = new AtomicReference<WebView>(null);
-
-                  runOnUiThread(new Runnable() {
-                      @Override
-                      public void run() {
-                          final WebView wv = new WebView(MainActivity.this);
-                          holder.set(wv);
-                          configureWebView(wv);
-                          wv.onResume();
-                          wv.resumeTimers();
-                          wv.setWebViewClient(new WebViewClient() {
-                              @Override
-                              public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                                  super.onPageStarted(view, url, favicon);
-                                  view.evaluateJavascript(VIEWPORT_JS, null);
-                              }
-
-                              @Override
-                              public void onPageFinished(WebView view, String url) {
-                                  super.onPageFinished(view, url);
-                                  view.evaluateJavascript(VIEWPORT_JS, null);
-                                  poke(view, clickSel, js, latch, 8);
-                              }
-
-                              @Override
-                              public void onLoadResource(WebView view, String url) {
-                                  addSeen(seen, url);
-                                  tryCapture(url, capdo, contains, all, first, latch);
-                              }
-
-                              @Override
-                              public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                                  String u = request.getUrl().toString();
-                                  addSeen(seen, u);
-                                  if (tryCapture(u, capdo, contains, all, first, latch)) {
-                                      // answer empty so single-use tokens are NOT consumed by the page;
-                                      // the app fetches the URL itself afterwards
-                                      return new WebResourceResponse("text/plain", "UTF-8", 200, "OK",
-                                              new HashMap<String, String>(), new ByteArrayInputStream(new byte[0]));
-                                  }
-                                  if (isBlocked(u)) return blockedResponse();
-                                  return super.shouldInterceptRequest(view, request);
-                              }
-
-                              @Override
-                              public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                                  String u = request.getUrl().toString();
-                                  addSeen(seen, u);
-                                  if (tryCapture(u, capdo, contains, all, first, latch)) return true;
-                                  if (isBlocked(u)) return true;
-                                  String scheme = request.getUrl().getScheme();
-                                  return !("http".equals(scheme) || "https".equals(scheme));
-                              }
-                          });
-                          // sits underneath the visible content (index 0), user never sees it
-                          frame.addView(wv, 0, new FrameLayout.LayoutParams(
-                                  FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-                          wv.loadUrl(pageUrl);
-                      }
-                  });
-
-                  latch.await(timeoutSec, TimeUnit.SECONDS);
-
-                  runOnUiThread(new Runnable() {
-                      @Override
-                      public void run() {
-                          WebView wv = holder.get();
-                          if (wv != null) {
-                              try {
-                                  wv.stopLoading();
-                                  frame.removeView(wv);
-                                  wv.destroy();
-                              } catch (Exception ignored) { }
-                          }
-                      }
-                  });
-                  return first.get();
-              }
-
-              // Repeatedly autoplay / click / run user JS until captured
-              private void poke(final WebView v, final String clickSel, final String js,
-                                final CountDownLatch latch, final int left) {
-                  if (left <= 0 || latch.getCount() == 0) return;
-                  v.postDelayed(new Runnable() {
-                      @Override
-                      public void run() {
-                          if (latch.getCount() == 0) return;
-                          try {
-                              v.evaluateJavascript(AUTOPLAY_JS, null);
-                              if (clickSel != null && !clickSel.isEmpty()) {
-                                  v.evaluateJavascript("(function(){try{var e=document.querySelector("
-                                          + JSONObject.quote(clickSel) + ");if(e)e.click();}catch(x){}})();", null);
-                              }
-                              if (js != null && !js.isEmpty()) {
-                                  v.evaluateJavascript("(function(){try{" + js + "}catch(x){}})();", null);
-                              }
-                          } catch (Exception ignored) { }
-                          poke(v, clickSel, js, latch, left - 1);
-                      }
-                  }, 1500);
-              }
-
-              private boolean tryCapture(String url, String capdo, String contains, List<String> all,
-                                         AtomicReference<String> first, CountDownLatch latch) {
-                  try {
-                      String host = Uri.parse(url).getHost();
-                      if (host == null) return false;
-                      host = host.toLowerCase(Locale.ROOT);
-                      if (!(host.equals(capdo) || host.endsWith("." + capdo))) return false;
-                      if (contains != null && !contains.isEmpty()
-                              && !url.toLowerCase(Locale.ROOT).contains(contains)) return false;
-                      Log.d(TAG, "CAPTURED: " + url);
-                      if (!all.contains(url)) all.add(url);
-                      if (first.compareAndSet(null, url)) latch.countDown();
-                      return true;
-                  } catch (Exception e) {
-                      return false;
-                  }
-              }
-
-              // Fetches the captured URL and streams it back to the caller
-              private void proxyFetch(String url, String range, OutputStream out) throws IOException {
-                  HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
-                  try {
-                      h.setInstanceFollowRedirects(true);
-                      h.setConnectTimeout(10000);
-                      h.setReadTimeout(30000);
-                      h.setRequestProperty("User-Agent", DESKTOP_UA);
-                      h.setRequestProperty("Referer", stripSlash(BASE_URL) + "/");
-                      h.setRequestProperty("Origin", stripSlash(BASE_URL));
-                      String ck = CookieManager.getInstance().getCookie(url);
-                      if (ck != null && !ck.isEmpty()) h.setRequestProperty("Cookie", ck);
-                      if (range != null) h.setRequestProperty("Range", range);
-
-                      int code = h.getResponseCode();
-                      InputStream is = code >= 400 ? h.getErrorStream() : h.getInputStream();
-
-                      StringBuilder hd = new StringBuilder();
-                      hd.append("HTTP/1.1 ").append(code).append(' ')
-                        .append(h.getResponseMessage() == null ? "OK" : h.getResponseMessage()).append("\r\n");
-                      String ct = h.getContentType();
-                      hd.append("Content-Type: ").append(ct == null ? "application/octet-stream" : ct).append("\r\n");
-                      long len = h.getContentLengthLong();
-                      if (len >= 0) hd.append("Content-Length: ").append(len).append("\r\n");
-                      String cr = h.getHeaderField("Content-Range");
-                      if (cr != null) hd.append("Content-Range: ").append(cr).append("\r\n");
-                      String ar = h.getHeaderField("Accept-Ranges");
-                      if (ar != null) hd.append("Accept-Ranges: ").append(ar).append("\r\n");
-                      hd.append("X-Captured-Url: ").append(url.replace("\r", "").replace("\n", "")).append("\r\n");
-                      hd.append(CORS);
-                      hd.append("Connection: close\r\n\r\n");
-                      out.write(hd.toString().getBytes("UTF-8"));
-
-                      if (is != null) {
-                          byte[] buf = new byte[16384];
-                          int n;
-                          while ((n = is.read(buf)) != -1) out.write(buf, 0, n);
-                          is.close();
-                      }
-                      out.flush();
-                  } finally {
-                      h.disconnect();
-                  }
-              }
-
-              // ---------------- system UI helpers ----------------
-
-              private void applyNormalSystemUi() {
-                  getWindow().getDecorView().setSystemUiVisibility(
-                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-              }
-
-              private void applyFullscreenSystemUi() {
-                  getWindow().getDecorView().setSystemUiVisibility(
-                          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                          | View.SYSTEM_UI_FLAG_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                          | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-              }
-
-              private void exitCustomView() {
-                  if (customView == null) return;
-                  fullscreenContainer.removeView(customView);
-                  fullscreenContainer.setVisibility(View.GONE);
-                  content.setVisibility(View.VISIBLE);
-                  customView = null;
-                  WebChromeClient.CustomViewCallback cb = customCallback;
-                  customCallback = null;
-                  if (cb != null) cb.onCustomViewHidden();
-                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
-                  applyNormalSystemUi();
-                  content.setPadding(padL, padT, padR, padB);
-                  frame.requestApplyInsets();
-              }
-
-              @Override
-              public void onWindowFocusChanged(boolean hasFocus) {
-                  super.onWindowFocusChanged(hasFocus);
-                  if (hasFocus) {
-                      if (customView != null) applyFullscreenSystemUi();
-                      else applyNormalSystemUi();
-                  }
-              }
-
-              // ---------------- block list ----------------
-
-              private boolean parse(String json) {
-                  try {
-                      JSONObject o = new JSONObject(json);
-                      Set<String> d = new HashSet<String>();
-                      Set<String> u = new HashSet<String>();
-                      JSONArray da = o.optJSONArray("blockDomains");
-                      JSONArray ua = o.optJSONArray("blockUrls");
-                      if (da != null) for (int i = 0; i < da.length(); i++)
-                          d.add(da.getString(i).trim().toLowerCase(Locale.ROOT));
-                      if (ua != null) for (int i = 0; i < ua.length(); i++)
-                          u.add(endpointKey(ua.getString(i).trim()));
-                      blockDomains.clear(); blockDomains.addAll(d);
-                      blockUrls.clear();    blockUrls.addAll(u);
-                      Log.d(TAG, "Block list loaded: " + d.size() + " domains, " + u.size() + " urls");
-                      return true;
-                  } catch (Exception e) {
-                      Log.e(TAG, "parse error", e);
-                      return false;
-                  }
-              }
-
-              private static String stripSlash(String s) {
-                  while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
-                  return s;
-              }
-
-              private boolean isBlocked(String url) {
-                  try {
-                      String host = Uri.parse(url).getHost();
-                      if (host != null && blockDomains.contains(host.toLowerCase(Locale.ROOT))) {
-                          return true;
-                      }
-                      if (blockUrls.contains(endpointKey(url))) {
-                          return true;
-                      }
-                  } catch (Exception ignored) { }
-                  return false;
-              }
-
-              private static String endpointKey(String url) {
-                  Uri u = Uri.parse(url);
-                  String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
-                  String path = u.getPath() == null ? "" : u.getPath().toLowerCase(Locale.ROOT);
-                  return host + stripSlash(path);
-              }
-
-              private String download(String link) {
-                  HttpURLConnection c = null;
-                  try {
-                      c = (HttpURLConnection) new URL(link).openConnection();
-                      c.setConnectTimeout(5000);
-                      c.setReadTimeout(5000);
-                      if (c.getResponseCode() != 200) return null;
-                      BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
-                      StringBuilder sb = new StringBuilder();
-                      String line;
-                      while ((line = r.readLine()) != null) sb.append(line).append('\n');
-                      r.close();
-                      return sb.toString();
-                  } catch (Exception e) {
-                      Log.e(TAG, "download error", e);
-                      return null;
-                  } finally {
-                      if (c != null) c.disconnect();
-                  }
-              }
-
-              @Override
-              public void onBackPressed() {
-                  if (customView != null) {
-                      exitCustomView();
-                  } else if (web.canGoBack()) {
-                      web.goBack();
-                  } else {
-                      super.onBackPressed();
-                  }
-              }
-
-              @Override
-              protected void onPause() {
-                  super.onPause();
-                  web.onPause();
-              }
-
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  web.onResume();
-              }
-
-              @Override
-              protected void onDestroy() {
-                  stopServer();
-                  super.onDestroy();
+          __SB_EOF__
+
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'__SB_EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.StreamBox" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          __SB_EOF__
+
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'__SB_EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#0E1117" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#4C9AFF" android:pathData="M30,34h48a6,6 0 0 1 6,6v28a6,6 0 0 1 -6,6h-48a6,6 0 0 1 -6,-6v-28a6,6 0 0 1 6,-6z" />
+              <path android:fillColor="#0E1117" android:pathData="M48,44l18,10l-18,10z" />
+          </vector>
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/Models.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import android.content.Context
+          import android.util.Xml
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import org.xmlpull.v1.XmlPullParser
+          import java.io.BufferedInputStream
+          import java.io.File
+          import java.io.IOException
+          import java.io.InputStream
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.HashSet
+          import java.util.Locale
+          import java.util.TimeZone
+          import java.util.zip.GZIPInputStream
+
+          const val DEFAULT_UA = "VLC/3.0.20 LibVLC/3.0.20"
+
+          data class Channel(
+              val num: Int,
+              val name: String,
+              val url: String,
+              val logo: String,
+              val group: String,
+              val tvgId: String,
+              val ua: String = "",
+              val referer: String = ""
+          )
+
+          data class Playlist(
+              val id: String,
+              val name: String,
+              val source: String,
+              val isFile: Boolean,
+              val epg: String = "",
+              val updated: Long = 0L
+          )
+
+          data class Program(val start: Long, val stop: Long, val title: String, val desc: String)
+
+          class EpgData(val byId: Map<String, List<Program>>, val nameToId: Map<String, String>) {
+              companion object {
+                  val EMPTY = EpgData(emptyMap(), emptyMap())
               }
           }
-          EOF
 
-          # ---------- inject values (perl keeps special chars like & safe) ----------
-          export PKG="$PACKAGE_NAME"
-          for f in app/build.gradle app/src/main/AndroidManifest.xml app/src/main/java/$PKG_PATH/MainActivity.java; do
-            perl -pi -e 's/__PKG__/$ENV{PKG}/g; s/__BASE_URL__/$ENV{BASE_URL}/g; s/__BLOCK_API__/$ENV{BLOCK_API}/g; s/__APP_NAME__/$ENV{APP_NAME}/g; s/__ICON_REF__/$ENV{ICON_REF}/g' "$f"
-          done
+          data class Parsed(val channels: List<Channel>, val epgUrl: String)
 
-      - name: Build debug APK
-        working-directory: webapp
-        run: gradle assembleDebug --no-daemon --stacktrace
+          /* ---------------------------------------------------------------- storage */
 
-      - name: Rename APK
+          class Store(private val ctx: Context) {
+              private val sp = ctx.getSharedPreferences("streambox", Context.MODE_PRIVATE)
+
+              fun playlists(): List<Playlist> = try {
+                  val a = JSONArray(sp.getString("playlists", "[]"))
+                  (0 until a.length()).map { i ->
+                      val o = a.getJSONObject(i)
+                      Playlist(
+                          o.getString("id"), o.optString("name"), o.optString("source"),
+                          o.optBoolean("file"), o.optString("epg"), o.optLong("updated")
+                      )
+                  }
+              } catch (e: Exception) {
+                  emptyList()
+              }
+
+              fun savePlaylists(l: List<Playlist>) {
+                  val a = JSONArray()
+                  l.forEach {
+                      a.put(
+                          JSONObject().put("id", it.id).put("name", it.name).put("source", it.source)
+                              .put("file", it.isFile).put("epg", it.epg).put("updated", it.updated)
+                      )
+                  }
+                  sp.edit().putString("playlists", a.toString()).apply()
+              }
+
+              var activeId: String
+                  get() = sp.getString("active", "") ?: ""
+                  set(v) { sp.edit().putString("active", v).apply() }
+
+              var userAgent: String
+                  get() = sp.getString("ua", DEFAULT_UA) ?: DEFAULT_UA
+                  set(v) { sp.edit().putString("ua", v).apply() }
+
+              var autoRefresh: Boolean
+                  get() = sp.getBoolean("autoRefresh", true)
+                  set(v) { sp.edit().putBoolean("autoRefresh", v).apply() }
+
+              var resumeLast: Boolean
+                  get() = sp.getBoolean("resumeLast", false)
+                  set(v) { sp.edit().putBoolean("resumeLast", v).apply() }
+
+              var lastChannel: String
+                  get() = sp.getString("lastChannel", "") ?: ""
+                  set(v) { sp.edit().putString("lastChannel", v).apply() }
+
+              var aspect: Int
+                  get() = sp.getInt("aspect", 0)
+                  set(v) { sp.edit().putInt("aspect", v).apply() }
+
+              fun favorites(): Set<String> = sp.getStringSet("fav", emptySet())?.toSet() ?: emptySet()
+              fun saveFavorites(s: Set<String>) {
+                  sp.edit().putStringSet("fav", HashSet(s)).apply()
+              }
+
+              fun recents(): List<String> = try {
+                  val a = JSONArray(sp.getString("recents", "[]"))
+                  (0 until a.length()).map { a.getString(it) }
+              } catch (e: Exception) {
+                  emptyList()
+              }
+
+              fun saveRecents(l: List<String>) {
+                  val a = JSONArray()
+                  l.forEach { a.put(it) }
+                  sp.edit().putString("recents", a.toString()).apply()
+              }
+
+              fun file(id: String) = File(ctx.filesDir, "pl_$id.m3u")
+              fun epgFile(id: String) = File(ctx.filesDir, "epg_$id.xml")
+          }
+
+          /* ------------------------------------------------------------- networking */
+
+          object Net {
+              fun open(url: String, ua: String): InputStream {
+                  var u = url.trim()
+                  for (i in 0 until 6) {
+                      val c = URL(u).openConnection() as HttpURLConnection
+                      c.connectTimeout = 15000
+                      c.readTimeout = 30000
+                      c.instanceFollowRedirects = false
+                      c.setRequestProperty("User-Agent", ua)
+                      c.setRequestProperty("Accept-Encoding", "identity")
+                      val code = c.responseCode
+                      if (code in 300..399) {
+                          val loc = c.getHeaderField("Location") ?: throw IOException("Bad redirect")
+                          u = URL(URL(u), loc).toString()
+                          c.disconnect()
+                          continue
+                      }
+                      if (code !in 200..299) throw IOException("HTTP $code")
+                      return c.inputStream
+                  }
+                  throw IOException("Too many redirects")
+              }
+
+              /** Transparently un-gzips a stream when the gzip magic bytes are present. */
+              fun sniff(input: InputStream): InputStream {
+                  val b = BufferedInputStream(input, 16384)
+                  b.mark(2)
+                  val a = b.read()
+                  val c = b.read()
+                  b.reset()
+                  return if (a == 0x1f && c == 0x8b) GZIPInputStream(b) else b
+              }
+
+              fun download(url: String, ua: String, dest: File, validatePlaylist: Boolean = false) {
+                  val tmp = File(dest.path + ".tmp")
+                  try {
+                      sniff(open(url, ua)).use { inp -> tmp.outputStream().use { inp.copyTo(it) } }
+                      if (validatePlaylist) {
+                          val head = tmp.inputStream().use {
+                              val buf = ByteArray(4096)
+                              val n = it.read(buf)
+                              if (n > 0) String(buf, 0, n) else ""
+                          }
+                          if (!head.contains("#EXTM3U") && !head.contains("#EXTINF")) {
+                              throw IOException("Not a valid M3U playlist")
+                          }
+                      }
+                      if (dest.exists()) dest.delete()
+                      if (!tmp.renameTo(dest)) throw IOException("Could not save file")
+                  } finally {
+                      if (tmp.exists()) tmp.delete()
+                  }
+              }
+          }
+
+          /* --------------------------------------------------------------- M3U parse */
+
+          object M3uParser {
+              private val attr = Regex("([A-Za-z0-9_-]+)=\"([^\"]*)\"")
+
+              private fun attrs(line: String): Map<String, String> =
+                  attr.findAll(line).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
+
+              fun parse(text: String): Parsed {
+                  val out = ArrayList<Channel>()
+                  var epg = ""
+                  var name = ""
+                  var logo = ""
+                  var group = ""
+                  var tvg = ""
+                  var ua = ""
+                  var ref = ""
+                  var extGrp = ""
+                  var pending = false
+                  var n = 0
+
+                  for (raw in text.lineSequence()) {
+                      val line = raw.trim().trimStart('\uFEFF')
+                      if (line.isEmpty()) continue
+                      if (line.startsWith("#EXTM3U", true)) {
+                          val m = attrs(line)
+                          epg = (m["url-tvg"] ?: m["x-tvg-url"] ?: "").split(",").first().trim()
+                      } else if (line.startsWith("#EXTINF", true)) {
+                          val m = attrs(line)
+                          val q = line.lastIndexOf('"')
+                          val comma = line.indexOf(',', if (q > 0) q else 0)
+                          name = if (comma >= 0) line.substring(comma + 1).trim() else ""
+                          if (name.isEmpty()) name = m["tvg-name"] ?: "Channel"
+                          logo = m["tvg-logo"] ?: ""
+                          group = m["group-title"] ?: ""
+                          tvg = m["tvg-id"] ?: ""
+                          ua = ""
+                          ref = ""
+                          pending = true
+                      } else if (line.startsWith("#EXTGRP:", true)) {
+                          extGrp = line.substringAfter(':').trim()
+                      } else if (line.startsWith("#EXTVLCOPT:", true)) {
+                          val kv = line.substringAfter(':')
+                          val k = kv.substringBefore('=').lowercase()
+                          val v = kv.substringAfter('=', "")
+                          if (k == "http-user-agent") ua = v
+                          if (k == "http-referrer" || k == "http-referer") ref = v
+                      } else if (line.startsWith("#")) {
+                          // other directives ignored
+                      } else if (pending) {
+                          var url = line
+                          var u2 = ua
+                          var r2 = ref
+                          val bar = line.indexOf('|')
+                          if (bar > 0) {
+                              url = line.substring(0, bar)
+                              line.substring(bar + 1).split('&').forEach { p ->
+                                  val k = p.substringBefore('=').lowercase()
+                                  val v = p.substringAfter('=', "")
+                                  if (k == "user-agent") u2 = v
+                                  if (k == "referer" || k == "referrer") r2 = v
+                              }
+                          }
+                          val g = group.ifBlank { extGrp }.ifBlank { "Uncategorized" }
+                          n++
+                          out.add(Channel(n, name, url, logo, g.trim(), tvg.trim(), u2, r2))
+                          pending = false
+                          extGrp = ""
+                      }
+                  }
+                  return Parsed(out, epg)
+              }
+          }
+
+          /* -------------------------------------------------------------- XMLTV parse */
+
+          object EpgParser {
+              private val fmt = SimpleDateFormat("yyyyMMddHHmmss Z", Locale.US)
+
+              private fun time(s: String?): Long {
+                  if (s.isNullOrBlank()) return 0L
+                  val t = s.trim()
+                  return try {
+                      if (t.length > 14) {
+                          val zone = t.substring(14).trim().ifEmpty { "+0000" }
+                          fmt.parse(t.substring(0, 14) + " " + zone)!!.time
+                      } else {
+                          val f = SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
+                          f.timeZone = TimeZone.getTimeZone("UTC")
+                          f.parse(t)!!.time
+                      }
+                  } catch (e: Exception) {
+                      0L
+                  }
+              }
+
+              fun parse(input: InputStream, wantedIds: Set<String>, wantedNames: Set<String>, now: Long): EpgData {
+                  val p = Xml.newPullParser()
+                  p.setInput(input, null)
+                  val byId = HashMap<String, MutableList<Program>>()
+                  val nameToId = HashMap<String, String>()
+                  val ids = HashSet<String>(wantedIds)
+                  var curChan: String? = null
+                  var ev = p.eventType
+                  while (ev != XmlPullParser.END_DOCUMENT) {
+                      if (ev == XmlPullParser.START_TAG) {
+                          when (p.name) {
+                              "channel" -> curChan = p.getAttributeValue(null, "id")?.lowercase()
+                              "display-name" -> {
+                                  val dn = p.nextText().trim().lowercase()
+                                  val c = curChan
+                                  if (c != null) {
+                                      if (!nameToId.containsKey(dn)) nameToId[dn] = c
+                                      if (dn in wantedNames) ids.add(c)
+                                  }
+                              }
+                              "programme" -> {
+                                  val ch = p.getAttributeValue(null, "channel")?.lowercase() ?: ""
+                                  val st = time(p.getAttributeValue(null, "start"))
+                                  val en = time(p.getAttributeValue(null, "stop"))
+                                  var title = ""
+                                  var desc = ""
+                                  while (true) {
+                                      val e = p.next()
+                                      if (e == XmlPullParser.END_DOCUMENT) break
+                                      if (e == XmlPullParser.END_TAG && p.name == "programme") break
+                                      if (e == XmlPullParser.START_TAG) {
+                                          if (p.name == "title" && title.isEmpty()) title = p.nextText().trim()
+                                          else if (p.name == "desc" && desc.isEmpty()) desc = p.nextText().trim()
+                                      }
+                                  }
+                                  if (ch in ids && en > now - 2 * 3_600_000L && st < now + 36 * 3_600_000L) {
+                                      byId.getOrPut(ch) { ArrayList() }.add(Program(st, en, title, desc))
+                                  }
+                              }
+                          }
+                      } else if (ev == XmlPullParser.END_TAG && p.name == "channel") {
+                          curChan = null
+                      }
+                      ev = p.next()
+                  }
+                  val sorted = HashMap<String, List<Program>>()
+                  byId.forEach { (k, v) -> sorted[k] = v.sortedBy { it.start } }
+                  return EpgData(sorted, nameToId)
+              }
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/Vm.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import android.app.Application
+          import android.net.Uri
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableLongStateOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import java.util.UUID
+
+          const val G_ALL = "All channels"
+          const val G_FAV = "Favorites"
+          const val G_RECENT = "Recently watched"
+
+          class MainVM(app: Application) : AndroidViewModel(app) {
+              val store = Store(app)
+
+              var playlists by mutableStateOf(store.playlists())
+              var activeId by mutableStateOf(store.activeId)
+              var channels by mutableStateOf<List<Channel>>(emptyList())
+              var groups by mutableStateOf<List<String>>(emptyList())
+              var epg by mutableStateOf(EpgData.EMPTY)
+              var loading by mutableStateOf(false)
+              var toast by mutableStateOf<String?>(null)
+              var favorites by mutableStateOf(store.favorites())
+              var recents by mutableStateOf(store.recents())
+              var group by mutableStateOf(G_ALL)
+
+              var userAgent by mutableStateOf(store.userAgent)
+              var autoRefresh by mutableStateOf(store.autoRefresh)
+              var resumeLast by mutableStateOf(store.resumeLast)
+              var aspect by mutableIntStateOf(store.aspect)
+
+              var now by mutableLongStateOf(System.currentTimeMillis())
+              var current by mutableStateOf<Channel?>(null)
+              var previous by mutableStateOf<Channel?>(null)
+              var zapList by mutableStateOf<List<Channel>>(emptyList())
+              var fullscreen by mutableStateOf(false)
+              var playNonce by mutableIntStateOf(0)
+              var sleepAt by mutableLongStateOf(0L)
+
+              private var resumed = false
+
+              init {
+                  if (activeId.isEmpty() || playlists.none { it.id == activeId }) {
+                      activeId = playlists.firstOrNull()?.id ?: ""
+                      store.activeId = activeId
+                  }
+                  viewModelScope.launch {
+                      while (true) {
+                          delay(30_000)
+                          now = System.currentTimeMillis()
+                      }
+                  }
+                  viewModelScope.launch {
+                      loadLocal(false)
+                      val pl = active()
+                      if (pl != null && autoRefresh && !pl.isFile &&
+                          System.currentTimeMillis() - pl.updated > 12 * 3_600_000L
+                      ) doRefresh()
+                  }
+              }
+
+              fun active(): Playlist? = playlists.firstOrNull { it.id == activeId }
+
+              /* ------------------------------------------------------------ playlists */
+
+              fun addUrl(name: String, url: String, epgUrl: String) {
+                  val pl = Playlist(
+                      newId(), name.ifBlank { "Playlist ${playlists.size + 1}" },
+                      url.trim(), false, epgUrl.trim()
+                  )
+                  register(pl)
+              }
+
+              fun addXtream(name: String, server: String, user: String, pass: String) {
+                  var s = server.trim().trimEnd('/')
+                  if (!s.startsWith("http", true)) s = "http://$s"
+                  val m3u = "$s/get.php?username=$user&password=$pass&type=m3u_plus&output=ts"
+                  val epgUrl = "$s/xmltv.php?username=$user&password=$pass"
+                  register(Playlist(newId(), name.ifBlank { "Xtream" }, m3u, false, epgUrl))
+              }
+
+              fun addFile(uri: Uri, name: String) {
+                  val pl = Playlist(newId(), name.ifBlank { "Local playlist" }, "", true)
+                  viewModelScope.launch {
+                      try {
+                          withContext(Dispatchers.IO) {
+                              val input = getApplication<Application>().contentResolver.openInputStream(uri)
+                                  ?: throw Exception("Cannot open file")
+                              input.use { i -> store.file(pl.id).outputStream().use { i.copyTo(it) } }
+                          }
+                          register(pl)
+                      } catch (e: Exception) {
+                          toast = "Import failed: ${e.message}"
+                      }
+                  }
+              }
+
+              private fun newId() = UUID.randomUUID().toString().take(8)
+
+              private fun register(pl: Playlist) {
+                  playlists = playlists + pl
+                  store.savePlaylists(playlists)
+                  select(pl.id)
+              }
+
+              fun select(id: String) {
+                  activeId = id
+                  store.activeId = id
+                  channels = emptyList()
+                  groups = emptyList()
+                  epg = EpgData.EMPTY
+                  group = G_ALL
+                  viewModelScope.launch {
+                      if (store.file(id).exists()) loadLocal(false) else doRefresh()
+                  }
+              }
+
+              fun delete(id: String) {
+                  store.file(id).delete()
+                  store.epgFile(id).delete()
+                  playlists = playlists.filter { it.id != id }
+                  store.savePlaylists(playlists)
+                  if (activeId == id) {
+                      val next = playlists.firstOrNull()?.id ?: ""
+                      if (next.isEmpty()) {
+                          activeId = ""
+                          store.activeId = ""
+                          channels = emptyList()
+                          groups = emptyList()
+                          epg = EpgData.EMPTY
+                      } else select(next)
+                  }
+              }
+
+              fun refresh() {
+                  viewModelScope.launch { doRefresh() }
+              }
+
+              fun setEpgUrl(url: String) {
+                  val pl = active() ?: return
+                  playlists = playlists.map { if (it.id == pl.id) it.copy(epg = url.trim()) else it }
+                  store.savePlaylists(playlists)
+                  viewModelScope.launch { loadLocal(true) }
+              }
+
+              private suspend fun doRefresh() {
+                  val pl = active() ?: return
+                  loading = true
+                  try {
+                      if (!pl.isFile) {
+                          withContext(Dispatchers.IO) {
+                              Net.download(pl.source, userAgent, store.file(pl.id), true)
+                          }
+                      }
+                      playlists = playlists.map {
+                          if (it.id == pl.id) it.copy(updated = System.currentTimeMillis()) else it
+                      }
+                      store.savePlaylists(playlists)
+                      loadLocal(true)
+                      toast = "Loaded ${channels.size} channels"
+                  } catch (e: Exception) {
+                      toast = "Failed: ${e.message}"
+                  }
+                  loading = false
+              }
+
+              private suspend fun loadLocal(forceEpg: Boolean) {
+                  val pl = active() ?: return
+                  val f = store.file(pl.id)
+                  if (!f.exists()) return
+                  val parsed = withContext(Dispatchers.IO) { M3uParser.parse(f.readText()) }
+                  channels = parsed.channels
+                  groups = parsed.channels.map { it.group }.distinct()
+                  if (group != G_ALL && group != G_FAV && group != G_RECENT && group !in groups) group = G_ALL
+                  if (parsed.channels.isEmpty()) toast = "No channels found in this playlist"
+                  loadEpg(pl, parsed, forceEpg)
+
+                  if (!resumed) {
+                      resumed = true
+                      if (resumeLast && store.lastChannel.isNotEmpty()) {
+                          parsed.channels.firstOrNull { it.url == store.lastChannel }?.let {
+                              play(it, parsed.channels)
+                              fullscreen = true
+                          }
+                      }
+                  }
+              }
+
+              private fun loadEpg(pl: Playlist, parsed: Parsed, force: Boolean) {
+                  val url = pl.epg.ifBlank { parsed.epgUrl }
+                  val f = store.epgFile(pl.id)
+                  viewModelScope.launch {
+                      try {
+                          val data = withContext(Dispatchers.IO) {
+                              val stale = autoRefresh && f.exists() &&
+                                  System.currentTimeMillis() - f.lastModified() > 12 * 3_600_000L
+                              if ((force || !f.exists() || stale) && url.isNotBlank()) {
+                                  Net.download(url, userAgent, f)
+                              }
+                              if (!f.exists()) return@withContext null
+                              val ids = parsed.channels.filter { it.tvgId.isNotEmpty() }
+                                  .map { it.tvgId.lowercase() }.toSet()
+                              val names = parsed.channels.map { it.name.lowercase() }.toSet()
+                              Net.sniff(f.inputStream().buffered()).use {
+                                  EpgParser.parse(it, ids, names, System.currentTimeMillis())
+                              }
+                          }
+                          if (data != null && pl.id == activeId) epg = data
+                      } catch (e: Exception) {
+                          toast = "EPG failed: ${e.message}"
+                      }
+                  }
+              }
+
+              /* ------------------------------------------------------------- channels */
+
+              fun filter(g: String): List<Channel> = when (g) {
+                  G_ALL -> channels
+                  G_FAV -> channels.filter { it.url in favorites }
+                  G_RECENT -> recents.mapNotNull { u -> channels.firstOrNull { it.url == u } }
+                  else -> channels.filter { it.group == g }
+              }
+
+              fun search(q: String): List<Channel> {
+                  val s = q.trim().lowercase()
+                  if (s.length < 2) return emptyList()
+                  return channels.filter {
+                      it.name.lowercase().contains(s) ||
+                          it.group.lowercase().contains(s) ||
+                          (nowNext(it).first?.title?.lowercase()?.contains(s) == true)
+                  }.take(300)
+              }
+
+              fun toggleFav(ch: Channel) {
+                  favorites = if (ch.url in favorites) favorites - ch.url else favorites + ch.url
+                  store.saveFavorites(favorites)
+              }
+
+              fun programs(ch: Channel): List<Program> {
+                  val direct = if (ch.tvgId.isNotEmpty()) epg.byId[ch.tvgId.lowercase()] else null
+                  if (direct != null) return direct
+                  val id = epg.nameToId[ch.name.lowercase()] ?: return emptyList()
+                  return epg.byId[id] ?: emptyList()
+              }
+
+              fun nowNext(ch: Channel): Pair<Program?, Program?> {
+                  val l = programs(ch)
+                  if (l.isEmpty()) return Pair(null, null)
+                  val i = l.indexOfFirst { now >= it.start && now < it.stop }
+                  return if (i >= 0) Pair(l[i], l.getOrNull(i + 1))
+                  else Pair(null, l.firstOrNull { it.start > now })
+              }
+
+              /* -------------------------------------------------------------- playback */
+
+              fun play(ch: Channel, list: List<Channel>) {
+                  if (current?.url != ch.url) previous = current
+                  current = ch
+                  zapList = list
+                  store.lastChannel = ch.url
+                  recents = (listOf(ch.url) + recents.filter { it != ch.url }).take(30)
+                  store.saveRecents(recents)
+                  playNonce++
+              }
+
+              fun zap(d: Int) {
+                  val l = zapList
+                  if (l.isEmpty()) return
+                  val i = l.indexOfFirst { it.url == current?.url }
+                  play(l[(i + d + l.size).mod(l.size)], l)
+              }
+
+              fun recall() {
+                  previous?.let { play(it, zapList) }
+              }
+
+              fun quickPlay(url: String) {
+                  val u = url.trim()
+                  if (u.isEmpty()) return
+                  val nm = u.substringBefore('?').substringAfterLast('/').take(40).ifBlank { "Stream" }
+                  play(Channel(0, nm, u, "", "Direct", ""), emptyList())
+                  fullscreen = true
+              }
+
+              /* -------------------------------------------------------------- settings */
+
+              fun setUa(v: String) {
+                  userAgent = v
+                  store.userAgent = v
+              }
+
+              fun setAutoRefresh(v: Boolean) {
+                  autoRefresh = v
+                  store.autoRefresh = v
+              }
+
+              fun setResume(v: Boolean) {
+                  resumeLast = v
+                  store.resumeLast = v
+              }
+
+              fun setAspect(v: Int) {
+                  aspect = v
+                  store.aspect = v
+              }
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/PlayerController.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import android.content.Context
+          import android.os.Handler
+          import android.os.Looper
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.media3.common.AudioAttributes
+          import androidx.media3.common.C
+          import androidx.media3.common.Format
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.common.PlaybackException
+          import androidx.media3.common.Player
+          import androidx.media3.common.TrackSelectionOverride
+          import androidx.media3.common.Tracks
+          import androidx.media3.common.VideoSize
+          import androidx.media3.datasource.DefaultDataSource
+          import androidx.media3.datasource.DefaultHttpDataSource
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+          import java.util.Locale
+          import kotlin.math.roundToInt
+
+          data class TrackOpt(val label: String, val group: Tracks.Group, val index: Int, val selected: Boolean)
+
+          class PlayerController(ctx: Context) {
+              private val http = DefaultHttpDataSource.Factory()
+                  .setAllowCrossProtocolRedirects(true)
+                  .setConnectTimeoutMs(15000)
+                  .setReadTimeoutMs(20000)
+
+              val player: ExoPlayer = ExoPlayer.Builder(ctx)
+                  .setMediaSourceFactory(
+                      DefaultMediaSourceFactory(ctx).setDataSourceFactory(DefaultDataSource.Factory(ctx, http))
+                  )
+                  .setHandleAudioBecomingNoisy(true)
+                  .build()
+
+              var buffering by mutableStateOf(false)
+              var error by mutableStateOf<String?>(null)
+              var tracks by mutableStateOf(Tracks.EMPTY)
+              var playing by mutableStateOf(false)
+              var videoRes by mutableStateOf("")
+
+              private var retries = 0
+              private val handler = Handler(Looper.getMainLooper())
+
+              init {
+                  player.setAudioAttributes(
+                      AudioAttributes.Builder()
+                          .setUsage(C.USAGE_MEDIA)
+                          .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                          .build(),
+                      true
+                  )
+                  player.addListener(object : Player.Listener {
+                      override fun onPlaybackStateChanged(state: Int) {
+                          buffering = state == Player.STATE_BUFFERING
+                          if (state == Player.STATE_READY) {
+                              error = null
+                              retries = 0
+                          }
+                      }
+
+                      override fun onIsPlayingChanged(isPlaying: Boolean) {
+                          playing = isPlaying
+                      }
+
+                      override fun onTracksChanged(t: Tracks) {
+                          tracks = t
+                      }
+
+                      override fun onVideoSizeChanged(v: VideoSize) {
+                          videoRes = if (v.height > 0) "${v.width}x${v.height}" else ""
+                      }
+
+                      override fun onPlayerError(e: PlaybackException) {
+                          if (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                              player.seekToDefaultPosition()
+                              player.prepare()
+                              return
+                          }
+                          if (retries < 5) {
+                              retries++
+                              error = "Reconnecting ($retries/5)..."
+                              handler.postDelayed({ player.prepare() }, 2500)
+                          } else {
+                              error = "Stream unavailable (${e.errorCodeName})"
+                          }
+                      }
+                  })
+              }
+
+              fun play(url: String, ua: String, referer: String) {
+                  handler.removeCallbacksAndMessages(null)
+                  retries = 0
+                  error = null
+                  http.setUserAgent(ua)
+                  http.setDefaultRequestProperties(
+                      if (referer.isBlank()) emptyMap() else mapOf("Referer" to referer)
+                  )
+                  val b = MediaItem.Builder().setUri(url)
+                  val low = url.lowercase()
+                  if (low.contains(".m3u8")) b.setMimeType(MimeTypes.APPLICATION_M3U8)
+                  else if (low.contains(".mpd")) b.setMimeType(MimeTypes.APPLICATION_MPD)
+                  player.setMediaItem(b.build())
+                  player.prepare()
+                  player.playWhenReady = true
+              }
+
+              fun stop() {
+                  handler.removeCallbacksAndMessages(null)
+                  player.stop()
+              }
+
+              fun release() {
+                  handler.removeCallbacksAndMessages(null)
+                  player.release()
+              }
+
+              private fun label(f: Format, type: Int, i: Int): String {
+                  if (type == C.TRACK_TYPE_VIDEO) {
+                      val fps = if (f.frameRate > 0) " ${f.frameRate.roundToInt()}fps" else ""
+                      return if (f.height > 0) "${f.height}p$fps" else "Video ${i + 1}"
+                  }
+                  val lang = f.language?.let { Locale.forLanguageTag(it).displayLanguage } ?: ""
+                  var base = f.label ?: lang
+                  if (base.isBlank()) base = "Track ${i + 1}"
+                  if (type == C.TRACK_TYPE_AUDIO && f.channelCount > 0) base += " (${f.channelCount}ch)"
+                  return base
+              }
+
+              fun options(type: Int): List<TrackOpt> {
+                  val out = ArrayList<TrackOpt>()
+                  for (g in tracks.groups) {
+                      if (g.type != type) continue
+                      for (i in 0 until g.length) {
+                          if (!g.isTrackSupported(i)) continue
+                          out.add(TrackOpt(label(g.getTrackFormat(i), type, i), g, i, g.isTrackSelected(i)))
+                      }
+                  }
+                  return out
+              }
+
+              fun select(o: TrackOpt) {
+                  player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                      .setTrackTypeDisabled(o.group.type, false)
+                      .setOverrideForType(TrackSelectionOverride(o.group.mediaTrackGroup, o.index))
+                      .build()
+              }
+
+              fun disable(type: Int) {
+                  player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                      .clearOverridesOfType(type)
+                      .setTrackTypeDisabled(type, true)
+                      .build()
+              }
+
+              fun auto(type: Int) {
+                  player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                      .clearOverridesOfType(type)
+                      .setTrackTypeDisabled(type, false)
+                      .build()
+              }
+
+              fun isDisabled(type: Int): Boolean =
+                  player.trackSelectionParameters.disabledTrackTypes.contains(type)
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/Ui.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import android.net.Uri
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxHeight
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.LiveTv
+          import androidx.compose.material.icons.filled.Refresh
+          import androidx.compose.material.icons.filled.Schedule
+          import androidx.compose.material.icons.filled.Search
+          import androidx.compose.material.icons.filled.Settings
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.StarBorder
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.Card
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.FilterChip
+          import androidx.compose.material3.HorizontalDivider
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.NavigationBar
+          import androidx.compose.material3.NavigationBarItem
+          import androidx.compose.material3.NavigationRail
+          import androidx.compose.material3.NavigationRailItem
+          import androidx.compose.material3.OutlinedButton
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.RadioButton
+          import androidx.compose.material3.Scaffold
+          import androidx.compose.material3.SnackbarHost
+          import androidx.compose.material3.SnackbarHostState
+          import androidx.compose.material3.Switch
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableStateListOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.saveable.rememberSaveable
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.platform.LocalConfiguration
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.PasswordVisualTransformation
+          import androidx.compose.ui.text.input.VisualTransformation
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import coil.compose.AsyncImage
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          val Accent = Color(0xFF4C9AFF)
+
+          @Composable
+          fun AppTheme(content: @Composable () -> Unit) {
+              MaterialTheme(
+                  colorScheme = darkColorScheme(
+                      primary = Accent,
+                      onPrimary = Color.Black,
+                      background = Color(0xFF0E1117),
+                      surface = Color(0xFF151A23),
+                      surfaceVariant = Color(0xFF1E2430),
+                      onSurface = Color(0xFFE6EAF2),
+                      onBackground = Color(0xFFE6EAF2),
+                      onSurfaceVariant = Color(0xFF9AA4B5),
+                      secondaryContainer = Color(0xFF26324A)
+                  ),
+                  content = content
+              )
+          }
+
+          private val HM = SimpleDateFormat("HH:mm", Locale.getDefault())
+          fun hm(ms: Long): String = HM.format(Date(ms))
+
+          fun progressOf(p: Program, now: Long): Float =
+              ((now - p.start).toFloat() / (p.stop - p.start).coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+
+          /* ============================================================ common bits */
+
+          @Composable
+          fun Logo(ch: Channel, size: Dp = 44.dp) {
+              Box(
+                  Modifier.size(size).clip(RoundedCornerShape(8.dp))
+                      .background(MaterialTheme.colorScheme.surfaceVariant),
+                  contentAlignment = Alignment.Center
+              ) {
+                  if (ch.logo.isNotBlank()) {
+                      AsyncImage(
+                          model = ch.logo, contentDescription = null, contentScale = ContentScale.Fit,
+                          modifier = Modifier.fillMaxSize().padding(3.dp)
+                      )
+                  } else {
+                      Text(ch.name.take(1).uppercase(), fontWeight = FontWeight.Bold)
+                  }
+              }
+          }
+
+          @Composable
+          fun ChannelRow(vm: MainVM, ch: Channel, selected: Boolean, onClick: () -> Unit) {
+              val nn = vm.nowNext(ch)
+              val np = nn.first
+              Row(
+                  Modifier.fillMaxWidth()
+                      .background(if (selected) Accent.copy(alpha = 0.16f) else Color.Transparent)
+                      .clickable(onClick = onClick)
+                      .padding(horizontal = 12.dp, vertical = 8.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Text(
+                      if (ch.num > 0) ch.num.toString() else "",
+                      Modifier.width(40.dp), fontSize = 12.sp,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                  )
+                  Logo(ch)
+                  Spacer(Modifier.width(12.dp))
+                  Column(Modifier.weight(1f)) {
+                      Text(ch.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      if (np != null) {
+                          Text(
+                              np.title, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant
+                          )
+                          LinearProgressIndicator(
+                              progress = { progressOf(np, vm.now) },
+                              modifier = Modifier.fillMaxWidth().padding(top = 4.dp).height(3.dp)
+                          )
+                      } else {
+                          Text(
+                              ch.group, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant
+                          )
+                      }
+                  }
+                  if (ch.num > 0) {
+                      val fav = ch.url in vm.favorites
+                      IconButton(onClick = { vm.toggleFav(ch) }) {
+                          Icon(
+                              if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
+                              tint = if (fav) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun ChannelList(
+              vm: MainVM, list: List<Channel>, modifier: Modifier,
+              onOpen: (Channel, List<Channel>) -> Unit
+          ) {
+              if (list.isEmpty()) {
+                  Box(modifier, contentAlignment = Alignment.Center) {
+                      Text("Nothing here yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
+                  return
+              }
+              LazyColumn(modifier) {
+                  items(list, key = { it.num }) { ch ->
+                      ChannelRow(vm, ch, ch.url == vm.current?.url) { onOpen(ch, list) }
+                  }
+              }
+          }
+
+          @Composable
+          fun GroupList(vm: MainVM, modifier: Modifier) {
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.groups
+              LazyColumn(modifier.background(MaterialTheme.colorScheme.surface)) {
+                  items(all) { g ->
+                      val sel = g == vm.group
+                      Text(
+                          g,
+                          Modifier.fillMaxWidth()
+                              .background(if (sel) Accent.copy(alpha = 0.18f) else Color.Transparent)
+                              .clickable { vm.group = g }
+                              .padding(14.dp),
+                          maxLines = 1, overflow = TextOverflow.Ellipsis,
+                          color = if (sel) Accent else MaterialTheme.colorScheme.onSurface
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          fun GroupChips(vm: MainVM) {
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.groups
+              LazyRow(
+                  Modifier.fillMaxWidth(),
+                  contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  items(all) { g ->
+                      FilterChip(selected = g == vm.group, onClick = { vm.group = g }, label = { Text(g, maxLines = 1) })
+                  }
+              }
+          }
+
+          @Composable
+          fun PickRow(label: String, selected: Boolean, onClick: () -> Unit) {
+              Row(
+                  Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  RadioButton(selected = selected, onClick = null)
+                  Spacer(Modifier.width(12.dp))
+                  Text(label)
+              }
+          }
+
+          @Composable
+          fun FormDialog(
+              title: String, labels: List<String>, okLabel: String,
+              onDismiss: () -> Unit, onOk: (List<String>) -> Unit
+          ) {
+              val values = remember { mutableStateListOf<String>().apply { labels.forEach { add("") } } }
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  title = { Text(title) },
+                  text = {
+                      Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          labels.forEachIndexed { i, l ->
+                              OutlinedTextField(
+                                  value = values[i], onValueChange = { values[i] = it },
+                                  label = { Text(l) }, singleLine = true,
+                                  visualTransformation = if (l == "Password") PasswordVisualTransformation() else VisualTransformation.None,
+                                  modifier = Modifier.fillMaxWidth()
+                              )
+                          }
+                      }
+                  },
+                  confirmButton = { TextButton(onClick = { onOk(values.toList()); onDismiss() }) { Text(okLabel) } },
+                  dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+              )
+          }
+
+          @Composable
+          fun AddButtons(onAdd: (String) -> Unit) {
+              Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                  Button(onClick = { onAdd("url") }, modifier = Modifier.fillMaxWidth()) { Text("Add playlist URL (M3U / M3U8)") }
+                  OutlinedButton(onClick = { onAdd("file") }, modifier = Modifier.fillMaxWidth()) { Text("Import local playlist file") }
+                  OutlinedButton(onClick = { onAdd("xtream") }, modifier = Modifier.fillMaxWidth()) { Text("Xtream Codes login") }
+                  OutlinedButton(onClick = { onAdd("quick") }, modifier = Modifier.fillMaxWidth()) { Text("Quick play a stream URL") }
+              }
+          }
+
+          /* ================================================================== HOME */
+
+          @Composable
+          fun HomeScreen(vm: MainVM) {
+              var tab by rememberSaveable { mutableIntStateOf(0) }
+              var dlg by remember { mutableStateOf("") }
+              val snack = remember { SnackbarHostState() }
+              val wide = LocalConfiguration.current.screenWidthDp >= 720
+
+              val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+                  if (uri != null) {
+                      val nm = uri.lastPathSegment?.substringAfterLast('/')?.take(30) ?: "Local playlist"
+                      vm.addFile(uri, nm)
+                  }
+              }
+              val onAdd: (String) -> Unit = { kind ->
+                  if (kind == "file") picker.launch(arrayOf("*/*")) else dlg = kind
+              }
+              val onOpen: (Channel, List<Channel>) -> Unit = { ch, l ->
+                  vm.play(ch, l)
+                  vm.fullscreen = true
+              }
+
+              LaunchedEffect(vm.toast) {
+                  vm.toast?.let {
+                      snack.showSnackbar(it)
+                      vm.toast = null
+                  }
+              }
+
+              val tabs: List<Pair<String, ImageVector>> = listOf(
+                  "TV" to Icons.Filled.LiveTv,
+                  "Guide" to Icons.Filled.Schedule,
+                  "Search" to Icons.Filled.Search,
+                  "Settings" to Icons.Filled.Settings
+              )
+
+              Scaffold(
+                  snackbarHost = { SnackbarHost(snack) },
+                  bottomBar = {
+                      if (!wide) {
+                          NavigationBar {
+                              tabs.forEachIndexed { i, t ->
+                                  NavigationBarItem(
+                                      selected = tab == i, onClick = { tab = i },
+                                      icon = { Icon(t.second, t.first) }, label = { Text(t.first) }
+                                  )
+                              }
+                          }
+                      }
+                  }
+              ) { pad ->
+                  Row(Modifier.padding(pad).fillMaxSize()) {
+                      if (wide) {
+                          NavigationRail {
+                              Spacer(Modifier.height(12.dp))
+                              tabs.forEachIndexed { i, t ->
+                                  NavigationRailItem(
+                                      selected = tab == i, onClick = { tab = i },
+                                      icon = { Icon(t.second, t.first) }, label = { Text(t.first) }
+                                  )
+                              }
+                          }
+                      }
+                      Column(Modifier.weight(1f).fillMaxHeight()) {
+                          if (vm.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                          if (vm.playlists.isEmpty() && tab != 3) {
+                              Welcome(onAdd)
+                          } else when (tab) {
+                              0 -> ChannelsTab(vm, onOpen)
+                              1 -> GuideTab(vm, onOpen)
+                              2 -> SearchTab(vm, onOpen)
+                              else -> SettingsTab(vm, onAdd)
+                          }
+                      }
+                  }
+              }
+
+              when (dlg) {
+                  "url" -> FormDialog(
+                      "Add playlist", listOf("Name", "M3U / M3U8 URL", "EPG URL (optional)"), "Add",
+                      { dlg = "" }
+                  ) { v -> if (v[1].isNotBlank()) vm.addUrl(v[0], v[1], v[2]) }
+                  "xtream" -> FormDialog(
+                      "Xtream Codes", listOf("Name", "Server (http://host:port)", "Username", "Password"), "Add",
+                      { dlg = "" }
+                  ) { v -> if (v[1].isNotBlank() && v[2].isNotBlank()) vm.addXtream(v[0], v[1], v[2], v[3]) }
+                  "quick" -> FormDialog(
+                      "Quick play", listOf("Stream URL (m3u8, ts, mpd...)"), "Play",
+                      { dlg = "" }
+                  ) { v -> vm.quickPlay(v[0]) }
+              }
+          }
+
+          @Composable
+          fun Welcome(onAdd: (String) -> Unit) {
+              Column(
+                  Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.Center,
+                  horizontalAlignment = Alignment.CenterHorizontally
+              ) {
+                  Text("StreamBox", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Accent)
+                  Text(
+                      "Add your own IPTV playlist to get started",
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      modifier = Modifier.padding(top = 4.dp, bottom = 24.dp),
+                      textAlign = TextAlign.Center
+                  )
+                  Box(Modifier.width(360.dp)) { AddButtons(onAdd) }
+              }
+          }
+
+          @Composable
+          fun ChannelsTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
+              val wide = LocalConfiguration.current.screenWidthDp >= 720
+              val list = remember(vm.channels, vm.group, vm.favorites, vm.recents) { vm.filter(vm.group) }
+              Row(Modifier.fillMaxSize()) {
+                  if (wide) GroupList(vm, Modifier.width(240.dp).fillMaxHeight())
+                  Column(Modifier.weight(1f)) {
+                      if (!wide) GroupChips(vm)
+                      ChannelList(vm, list, Modifier.weight(1f).fillMaxWidth(), onOpen)
+                  }
+              }
+          }
+
+          @Composable
+          fun SearchTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
+              var q by rememberSaveable { mutableStateOf("") }
+              val res = remember(q, vm.channels, vm.epg) { vm.search(q) }
+              Column(Modifier.fillMaxSize()) {
+                  OutlinedTextField(
+                      value = q, onValueChange = { q = it }, singleLine = true,
+                      placeholder = { Text("Search channels, groups, programs") },
+                      leadingIcon = { Icon(Icons.Filled.Search, null) },
+                      modifier = Modifier.fillMaxWidth().padding(12.dp)
+                  )
+                  ChannelList(vm, res, Modifier.weight(1f).fillMaxWidth(), onOpen)
+              }
+          }
+
+          /* ================================================================= GUIDE */
+
+          @Composable
+          fun GuideTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
+              val slot = 30 * 60_000L
+              val start = remember(vm.now / slot) { vm.now / slot * slot }
+              val end = start + 6 * 3_600_000L
+              val list = remember(vm.group, vm.channels, vm.favorites, vm.recents) { vm.filter(vm.group) }
+              val dpm = 4
+              Column(Modifier.fillMaxSize()) {
+                  if (vm.epg.byId.isEmpty()) {
+                      Text(
+                          "No EPG loaded. Use a playlist with url-tvg or add an XMLTV URL in Settings.",
+                          Modifier.padding(12.dp), fontSize = 13.sp,
+                          color = MaterialTheme.colorScheme.onSurfaceVariant
+                      )
+                  }
+                  GroupChips(vm)
+                  Column(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+                      Row(Modifier.height(28.dp)) {
+                          Spacer(Modifier.width(150.dp))
+                          for (i in 0 until 12) {
+                              Box(Modifier.width((30 * dpm).dp)) {
+                                  Text(
+                                      hm(start + i * slot), fontSize = 12.sp,
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                                  )
+                              }
+                          }
+                      }
+                      LazyColumn(Modifier.weight(1f)) {
+                          items(list, key = { it.num }) { ch ->
+                              GuideRow(vm, ch, start, end, dpm) { onOpen(ch, list) }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun GuideRow(vm: MainVM, ch: Channel, start: Long, end: Long, dpm: Int, onClick: () -> Unit) {
+              val progs = vm.programs(ch)
+              Row(Modifier.height(56.dp)) {
+                  Row(
+                      Modifier.width(150.dp).fillMaxHeight()
+                          .background(MaterialTheme.colorScheme.surface)
+                          .clickable(onClick = onClick).padding(6.dp),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      Logo(ch, 36.dp)
+                      Spacer(Modifier.width(6.dp))
+                      Text(ch.name, maxLines = 2, fontSize = 13.sp, overflow = TextOverflow.Ellipsis)
+                  }
+                  var cursor = start
+                  var any = false
+                  for (p in progs) {
+                      val s = maxOf(p.start, cursor)
+                      val e = minOf(p.stop, end)
+                      if (e <= s) continue
+                      if (s > cursor) Spacer(Modifier.width(((s - cursor) / 60000f * dpm).dp))
+                      val live = vm.now >= p.start && vm.now < p.stop
+                      Box(
+                          Modifier.width(((e - s) / 60000f * dpm).dp).fillMaxHeight().padding(1.dp)
+                              .clip(RoundedCornerShape(4.dp))
+                              .background(if (live) Accent.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant)
+                              .clickable(onClick = onClick).padding(6.dp)
+                      ) {
+                          Column {
+                              Text(p.title, maxLines = 1, fontSize = 13.sp, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                              Text(
+                                  "${hm(p.start)} - ${hm(p.stop)}", fontSize = 11.sp, maxLines = 1,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant
+                              )
+                          }
+                      }
+                      cursor = e
+                      any = true
+                  }
+                  if (!any) {
+                      Box(
+                          Modifier.width((360 * dpm).dp).fillMaxHeight().padding(1.dp)
+                              .background(MaterialTheme.colorScheme.surfaceVariant)
+                              .clickable(onClick = onClick).padding(6.dp),
+                          contentAlignment = Alignment.CenterStart
+                      ) {
+                          Text("No information", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      }
+                  }
+              }
+          }
+
+          /* =============================================================== SETTINGS */
+
+          @Composable
+          fun SettingsTab(vm: MainVM, onAdd: (String) -> Unit) {
+              Column(
+                  Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                  verticalArrangement = Arrangement.spacedBy(12.dp)
+              ) {
+                  Text("Playlists", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                  vm.playlists.forEach { pl ->
+                      Card {
+                          Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                              RadioButton(selected = pl.id == vm.activeId, onClick = { vm.select(pl.id) })
+                              Column(Modifier.weight(1f)) {
+                                  Text(pl.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                  Text(
+                                      if (pl.isFile) "Local file" else pl.source.take(60),
+                                      fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                      color = MaterialTheme.colorScheme.onSurfaceVariant
+                                  )
+                              }
+                              IconButton(onClick = { if (pl.id == vm.activeId) vm.refresh() else vm.select(pl.id) }) {
+                                  Icon(Icons.Filled.Refresh, "Refresh")
+                              }
+                              IconButton(onClick = { vm.delete(pl.id) }) { Icon(Icons.Filled.Delete, "Delete") }
+                          }
+                      }
+                  }
+                  Text("Add", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                  AddButtons(onAdd)
+
+                  HorizontalDivider()
+
+                  val pl = vm.active()
+                  if (pl != null) {
+                      Text("EPG (XMLTV) for \"${pl.name}\"", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                      var epgUrl by remember(pl.id, pl.epg) { mutableStateOf(pl.epg) }
+                      OutlinedTextField(
+                          value = epgUrl, onValueChange = { epgUrl = it }, singleLine = true,
+                          label = { Text("XMLTV URL (.xml or .xml.gz)") }, modifier = Modifier.fillMaxWidth()
+                      )
+                      OutlinedButton(onClick = { vm.setEpgUrl(epgUrl) }) { Text("Save and reload EPG") }
+                      HorizontalDivider()
+                  }
+
+                  Text("Player", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                  OutlinedTextField(
+                      value = vm.userAgent, onValueChange = { vm.setUa(it) }, singleLine = true,
+                      label = { Text("User-Agent") }, modifier = Modifier.fillMaxWidth()
+                  )
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      Text("Auto refresh playlist and EPG every 12h", Modifier.weight(1f))
+                      Switch(checked = vm.autoRefresh, onCheckedChange = { vm.setAutoRefresh(it) })
+                  }
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      Text("Resume last channel on launch", Modifier.weight(1f))
+                      Switch(checked = vm.resumeLast, onCheckedChange = { vm.setResume(it) })
+                  }
+                  Text(
+                      "StreamBox does not provide any channels or content. Add only playlists you are allowed to use.",
+                      fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                  )
+              }
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/PlayerUi.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import android.content.pm.ActivityInfo
+          import android.view.KeyEvent
+          import androidx.activity.compose.BackHandler
+          import androidx.compose.animation.AnimatedVisibility
+          import androidx.compose.animation.fadeIn
+          import androidx.compose.animation.fadeOut
+          import androidx.compose.animation.slideInHorizontally
+          import androidx.compose.animation.slideOutHorizontally
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.focusable
+          import androidx.compose.foundation.gestures.detectTapGestures
+          import androidx.compose.foundation.gestures.detectVerticalDragGestures
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxHeight
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.lazy.rememberLazyListState
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.automirrored.filled.ArrowBack
+          import androidx.compose.material.icons.filled.AspectRatio
+          import androidx.compose.material.icons.filled.Audiotrack
+          import androidx.compose.material.icons.filled.ChevronLeft
+          import androidx.compose.material.icons.filled.ChevronRight
+          import androidx.compose.material.icons.filled.FormatListBulleted
+          import androidx.compose.material.icons.filled.HighQuality
+          import androidx.compose.material.icons.filled.PictureInPictureAlt
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.StarBorder
+          import androidx.compose.material.icons.filled.Subtitles
+          import androidx.compose.material.icons.filled.SwapHoriz
+          import androidx.compose.material.icons.filled.Timer
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.IconButton
+          import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.DisposableEffect
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.focus.FocusRequester
+          import androidx.compose.ui.focus.focusRequester
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.input.key.KeyEventType
+          import androidx.compose.ui.input.key.nativeKeyEvent
+          import androidx.compose.ui.input.key.onKeyEvent
+          import androidx.compose.ui.input.key.type
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+          import androidx.media3.common.C
+          import androidx.media3.ui.AspectRatioFrameLayout
+          import androidx.media3.ui.PlayerView
+          import kotlinx.coroutines.delay
+
+          /* ================================================================== ROOT */
+
+          @Composable
+          fun AppRoot(vm: MainVM, pc: PlayerController, act: MainActivity) {
+              // start / restart playback whenever a channel is (re)selected
+              LaunchedEffect(vm.playNonce) {
+                  vm.current?.let { pc.play(it.url, it.ua.ifBlank { vm.userAgent }, it.referer) }
+              }
+
+              // sleep timer
+              LaunchedEffect(vm.sleepAt) {
+                  if (vm.sleepAt > 0L) {
+                      val wait = vm.sleepAt - System.currentTimeMillis()
+                      if (wait > 0) delay(wait)
+                      pc.stop()
+                      vm.fullscreen = false
+                      vm.sleepAt = 0L
+                      vm.toast = "Sleep timer: playback stopped"
+                  }
+              }
+
+              // immersive landscape player
+              DisposableEffect(vm.fullscreen) {
+                  val w = act.window
+                  val c = WindowCompat.getInsetsController(w, w.decorView)
+                  if (vm.fullscreen) {
+                      act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                      c.hide(WindowInsetsCompat.Type.systemBars())
+                      c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                  }
+                  onDispose {
+                      act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                      c.show(WindowInsetsCompat.Type.systemBars())
+                  }
+              }
+
+              if (vm.fullscreen) PlayerScreen(vm, pc, act) else HomeScreen(vm)
+          }
+
+          /* ================================================================ PLAYER */
+
+          @Composable
+          fun PlayerScreen(vm: MainVM, pc: PlayerController, act: MainActivity) {
+              var showUi by remember { mutableStateOf(true) }
+              var showList by remember { mutableStateOf(false) }
+              var dialog by remember { mutableStateOf("") }
+              val focus = remember { FocusRequester() }
+              val ch = vm.current
+              val inPip = act.inPip
+
+              LaunchedEffect(showUi, showList, dialog, vm.playNonce) {
+                  if (showUi && !showList && dialog.isEmpty()) {
+                      delay(5000)
+                      showUi = false
+                  }
+              }
+              LaunchedEffect(vm.playNonce) { showUi = true }
+              LaunchedEffect(showList, dialog) {
+                  if (!showList && dialog.isEmpty()) {
+                      try {
+                          focus.requestFocus()
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
+
+              BackHandler {
+                  if (dialog.isNotEmpty()) dialog = ""
+                  else if (showList) showList = false
+                  else {
+                      pc.stop()
+                      vm.fullscreen = false
+                  }
+              }
+
+              val resize = when (vm.aspect) {
+                  1 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                  2 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                  else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+              }
+              val nn = if (ch != null) vm.nowNext(ch) else Pair<Program?, Program?>(null, null)
+
+              Box(
+                  Modifier.fillMaxSize().background(Color.Black)
+                      .onKeyEvent { e ->
+                          if (e.type != KeyEventType.KeyDown || showList || dialog.isNotEmpty()) {
+                              false
+                          } else {
+                              when (e.nativeKeyEvent.keyCode) {
+                                  KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> {
+                                      vm.zap(1); true
+                                  }
+                                  KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> {
+                                      vm.zap(-1); true
+                                  }
+                                  KeyEvent.KEYCODE_DPAD_LEFT -> {
+                                      showList = true; true
+                                  }
+                                  KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                                      if (!showUi) showUi = true else showList = true
+                                      true
+                                  }
+                                  KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_INFO -> {
+                                      showUi = !showUi; true
+                                  }
+                                  else -> false
+                              }
+                          }
+                      }
+                      .focusRequester(focus)
+                      .focusable()
+              ) {
+                  AndroidView(
+                      factory = { c ->
+                          PlayerView(c).apply {
+                              useController = false
+                              player = pc.player
+                              setShutterBackgroundColor(android.graphics.Color.BLACK)
+                              isFocusable = false
+                              isFocusableInTouchMode = false
+                              keepScreenOn = true
+                          }
+                      },
+                      update = { it.resizeMode = resize },
+                      modifier = Modifier.fillMaxSize()
+                  )
+
+                  // gesture layer: tap = toggle UI, double tap = last channel, swipe up/down = zap
+                  Box(
+                      Modifier.fillMaxSize()
+                          .pointerInput(Unit) {
+                              detectTapGestures(
+                                  onTap = { if (showList) showList = false else showUi = !showUi },
+                                  onDoubleTap = { vm.recall() }
+                              )
+                          }
+                          .pointerInput(Unit) {
+                              var total = 0f
+                              detectVerticalDragGestures(
+                                  onDragStart = { total = 0f },
+                                  onDragEnd = {
+                                      if (total < -120f) vm.zap(1) else if (total > 120f) vm.zap(-1)
+                                  }
+                              ) { _, dy -> total += dy }
+                          }
+                  )
+
+                  if (pc.buffering && !inPip) {
+                      CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+                  }
+                  pc.error?.let {
+                      Text(
+                          it, Modifier.align(Alignment.Center).background(Color(0xAA000000)).padding(12.dp),
+                          color = Color.White, textAlign = TextAlign.Center
+                      )
+                  }
+
+                  AnimatedVisibility(visible = showUi && !inPip, enter = fadeIn(), exit = fadeOut()) {
+                      Column(Modifier.fillMaxSize()) {
+                          // ---- top bar
+                          Row(
+                              Modifier.fillMaxWidth()
+                                  .background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)))
+                                  .padding(8.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              IconButton(onClick = {
+                                  pc.stop()
+                                  vm.fullscreen = false
+                              }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+                              Text(
+                                  ch?.name ?: "", Modifier.weight(1f), color = Color.White,
+                                  fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis
+                              )
+                              if (ch != null && ch.num > 0) {
+                                  val fav = ch.url in vm.favorites
+                                  IconButton(onClick = { vm.toggleFav(ch) }) {
+                                      Icon(
+                                          if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
+                                          tint = if (fav) Color(0xFFFFC107) else Color.White
+                                      )
+                                  }
+                              }
+                              IconButton(onClick = { vm.recall() }) { Icon(Icons.Filled.SwapHoriz, "Last channel", tint = Color.White) }
+                              IconButton(onClick = { dialog = "audio" }) { Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White) }
+                              IconButton(onClick = { dialog = "sub" }) { Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White) }
+                              IconButton(onClick = { dialog = "video" }) { Icon(Icons.Filled.HighQuality, "Quality", tint = Color.White) }
+                              IconButton(onClick = { dialog = "aspect" }) { Icon(Icons.Filled.AspectRatio, "Aspect", tint = Color.White) }
+                              IconButton(onClick = { dialog = "sleep" }) { Icon(Icons.Filled.Timer, "Sleep timer", tint = Color.White) }
+                              IconButton(onClick = { act.enterPip() }) { Icon(Icons.Filled.PictureInPictureAlt, "PiP", tint = Color.White) }
+                              IconButton(onClick = { showList = true }) { Icon(Icons.Filled.FormatListBulleted, "Channels", tint = Color.White) }
+                          }
+
+                          Spacer(Modifier.weight(1f))
+
+                          // ---- bottom info bar
+                          if (ch != null) {
+                              Row(
+                                  Modifier.fillMaxWidth()
+                                      .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD000000))))
+                                      .padding(16.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Logo(ch, 56.dp)
+                                  Spacer(Modifier.width(14.dp))
+                                  Column(Modifier.weight(1f)) {
+                                      Text(
+                                          (if (ch.num > 0) "${ch.num}  " else "") + ch.name,
+                                          color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp
+                                      )
+                                      val now = nn.first
+                                      val next = nn.second
+                                      if (now != null) {
+                                          Text(
+                                              "${hm(now.start)} - ${hm(now.stop)}  ${now.title}",
+                                              color = Color.White, fontSize = 14.sp, maxLines = 1,
+                                              overflow = TextOverflow.Ellipsis
+                                          )
+                                          LinearProgressIndicator(
+                                              progress = { progressOf(now, vm.now) },
+                                              modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).height(3.dp)
+                                          )
+                                      }
+                                      if (next != null) {
+                                          Text(
+                                              "Next ${hm(next.start)}  ${next.title}",
+                                              color = Color(0xFFB8C0CF), fontSize = 12.sp, maxLines = 1,
+                                              overflow = TextOverflow.Ellipsis
+                                          )
+                                      }
+                                  }
+                                  if (pc.videoRes.isNotEmpty()) {
+                                      Text(pc.videoRes, color = Color(0xFFB8C0CF), fontSize = 12.sp)
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  // ---- channel panel
+                  AnimatedVisibility(
+                      visible = showList && !inPip,
+                      enter = slideInHorizontally { -it },
+                      exit = slideOutHorizontally { -it }
+                  ) {
+                      ChannelPanel(vm) { showList = false }
+                  }
+              }
+
+              // ---- dialogs
+              when (dialog) {
+                  "audio" -> TrackDialog("Audio", C.TRACK_TYPE_AUDIO, pc, null) { dialog = "" }
+                  "sub" -> TrackDialog("Subtitles", C.TRACK_TYPE_TEXT, pc, "Off") { dialog = "" }
+                  "video" -> TrackDialog("Video quality", C.TRACK_TYPE_VIDEO, pc, "Auto") { dialog = "" }
+                  "aspect" -> SimpleDialog("Aspect ratio", listOf("Fit", "Zoom", "Stretch"), vm.aspect, { vm.setAspect(it) }) { dialog = "" }
+                  "sleep" -> {
+                      val mins = listOf(15, 30, 45, 60, 90, 120)
+                      SimpleDialog(
+                          if (vm.sleepAt > 0) "Sleep timer (running)" else "Sleep timer",
+                          mins.map { "$it minutes" } + "Off", -1,
+                          { i ->
+                              vm.sleepAt = if (i < mins.size) System.currentTimeMillis() + mins[i] * 60_000L else 0L
+                          }
+                      ) { dialog = "" }
+                  }
+              }
+          }
+
+          @Composable
+          fun ChannelPanel(vm: MainVM, onPick: () -> Unit) {
+              var g by remember { mutableStateOf(vm.group) }
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.groups
+              val list = remember(g, vm.channels, vm.favorites, vm.recents) { vm.filter(g) }
+              val state = rememberLazyListState()
+              LaunchedEffect(Unit) {
+                  val i = list.indexOfFirst { it.url == vm.current?.url }
+                  if (i > 0) state.scrollToItem(i)
+              }
+              Column(Modifier.width(400.dp).fillMaxHeight().background(Color(0xF00E1117))) {
+                  Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                      IconButton(onClick = { g = all[(all.indexOf(g) - 1 + all.size).mod(all.size)] }) {
+                          Icon(Icons.Filled.ChevronLeft, "Previous group")
+                      }
+                      Text(g, Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold, maxLines = 1)
+                      IconButton(onClick = { g = all[(all.indexOf(g) + 1).mod(all.size)] }) {
+                          Icon(Icons.Filled.ChevronRight, "Next group")
+                      }
+                  }
+                  if (list.isEmpty()) {
+                      Text("Nothing here yet", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
+                  LazyColumn(state = state) {
+                      items(list, key = { it.num }) { ch ->
+                          ChannelRow(vm, ch, ch.url == vm.current?.url) {
+                              vm.play(ch, list)
+                              onPick()
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun SimpleDialog(
+              title: String, options: List<String>, selected: Int,
+              onPick: (Int) -> Unit, onDismiss: () -> Unit
+          ) {
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  title = { Text(title) },
+                  text = {
+                      LazyColumn {
+                          itemsIndexed(options) { i, o ->
+                              PickRow(o, i == selected) {
+                                  onPick(i)
+                                  onDismiss()
+                              }
+                          }
+                      }
+                  },
+                  confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+              )
+          }
+
+          @Composable
+          fun TrackDialog(title: String, type: Int, pc: PlayerController, offLabel: String?, onDismiss: () -> Unit) {
+              val opts = pc.options(type)
+              val disabled = pc.isDisabled(type)
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  title = { Text(title) },
+                  text = {
+                      LazyColumn {
+                          if (offLabel != null) {
+                              item {
+                                  PickRow(offLabel, if (type == C.TRACK_TYPE_VIDEO) false else disabled) {
+                                      if (type == C.TRACK_TYPE_VIDEO) pc.auto(type) else pc.disable(type)
+                                      onDismiss()
+                                  }
+                              }
+                          }
+                          if (opts.isEmpty()) {
+                              item { Text("No tracks available", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                          }
+                          itemsIndexed(opts) { _, o ->
+                              PickRow(o.label, o.selected && !disabled && type != C.TRACK_TYPE_VIDEO) {
+                                  pc.select(o)
+                                  onDismiss()
+                              }
+                          }
+                      }
+                  },
+                  confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+              )
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/MainActivity.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import android.app.PictureInPictureParams
+          import android.content.Intent
+          import android.os.Build
+          import android.os.Bundle
+          import android.util.Rational
+          import androidx.activity.ComponentActivity
+          import androidx.activity.SystemBarStyle
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.activity.viewModels
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Surface
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Modifier
+          import androidx.core.util.Consumer
+
+          class MainActivity : ComponentActivity() {
+              private val vm: MainVM by viewModels()
+              private lateinit var pc: PlayerController
+
+              var inPip by mutableStateOf(false)
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  enableEdgeToEdge(
+                      statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+                      navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                  )
+                  super.onCreate(savedInstanceState)
+                  pc = PlayerController(this)
+
+                  addOnPictureInPictureModeChangedListener(Consumer { info ->
+                      inPip = info.isInPictureInPictureMode
+                  })
+
+                  setContent {
+                      AppTheme {
+                          Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                              AppRoot(vm, pc, this@MainActivity)
+                          }
+                      }
+                  }
+                  handleIntent(intent)
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  handleIntent(intent)
+              }
+
+              private fun handleIntent(i: Intent?) {
+                  if (i?.action == Intent.ACTION_VIEW) {
+                      i.data?.toString()?.let { vm.quickPlay(it) }
+                  }
+              }
+
+              fun enterPip() {
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      try {
+                          enterPictureInPictureMode(
+                              PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9)).build()
+                          )
+                      } catch (e: Exception) {
+                          // device without PiP support
+                      }
+                  }
+              }
+
+              override fun onUserLeaveHint() {
+                  super.onUserLeaveHint()
+                  if (vm.fullscreen && pc.player.isPlaying) enterPip()
+              }
+
+              override fun onStart() {
+                  super.onStart()
+                  // resume after having been stopped in the background
+                  if (vm.fullscreen && vm.current != null) vm.playNonce++
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  pc.stop()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  if (isFinishing) pc.release()
+              }
+          }
+          __SB_EOF__
+
+      - name: Build APKs
+        working-directory: StreamBoxApp
+        run: gradle assembleDebug assembleRelease --no-daemon --stacktrace
+
+      - name: Collect APKs
         run: |
           mkdir -p out
-          cp webapp/app/build/outputs/apk/debug/app-debug.apk "out/webapp.apk"
+          cp StreamBoxApp/app/build/outputs/apk/debug/app-debug.apk out/StreamBox-debug.apk
+          cp StreamBoxApp/app/build/outputs/apk/release/app-release.apk out/StreamBox-release.apk
+          ls -lh out
 
-      - name: Upload APK
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: web-apk
-          path: out/webapp.apk
-          if-no-files-found: error
+          name: StreamBox-APK
+          path: out/*.apk
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: StreamBox build ${{ github.run_number }}
+          files: out/*.apk
