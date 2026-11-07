@@ -1,8 +1,8 @@
-name: Build StreamBox APK
+name: Build Live TV APK
 
-# StreamBox - a TiviMate-inspired IPTV / M3U8 player for Android (phone + Android TV).
-# This single workflow generates the whole Android project, builds it and uploads the APKs.
-# Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "StreamBox-APK".
+# Live TV - token-gated live channel app for Android (phone + Android TV).
+# Liquid-glass UI, Apple-TV style focus glow, DRM (ClearKey / Widevine), auto session refresh, Jio EPG.
+# Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "LiveTV-APK".
 
 on:
   workflow_dispatch:
@@ -40,9 +40,9 @@ jobs:
       - name: Generate project files
         run: |
           set -e
-          rm -rf StreamBoxApp
-          mkdir -p StreamBoxApp
-          cd StreamBoxApp
+          rm -rf LiveTVApp
+          mkdir -p LiveTVApp
+          cd LiveTVApp
           cat > settings.gradle.kts <<'__SB_EOF__'
           pluginManagement {
               repositories {
@@ -58,7 +58,7 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "StreamBox"
+          rootProject.name = "LiveTV"
           include(":app")
           __SB_EOF__
 
@@ -88,15 +88,15 @@ jobs:
           }
 
           android {
-              namespace = "com.streambox.player"
+              namespace = "com.livetv.glass"
               compileSdk = 34
 
               defaultConfig {
-                  applicationId = "com.streambox.player"
+                  applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
 
               buildTypes {
@@ -132,6 +132,7 @@ jobs:
               implementation(platform("androidx.compose:compose-bom:2024.09.00"))
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.animation:animation")
               implementation("androidx.compose.material3:material3")
               implementation("androidx.compose.material:material-icons-extended")
 
@@ -166,9 +167,10 @@ jobs:
               <application
                   android:allowBackup="true"
                   android:icon="@drawable/ic_launcher"
-                  android:label="StreamBox"
+                  android:banner="@drawable/ic_launcher"
+                  android:label="Live TV"
                   android:usesCleartextTraffic="true"
-                  android:theme="@style/Theme.StreamBox">
+                  android:theme="@style/Theme.LiveTV">
 
                   <activity
                       android:name=".MainActivity"
@@ -182,15 +184,6 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                           <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                       </intent-filter>
-                      <intent-filter>
-                          <action android:name="android.intent.action.VIEW" />
-                          <category android:name="android.intent.category.DEFAULT" />
-                          <category android:name="android.intent.category.BROWSABLE" />
-                          <data android:scheme="http" />
-                          <data android:scheme="https" />
-                          <data android:mimeType="application/vnd.apple.mpegurl" />
-                          <data android:mimeType="application/x-mpegurl" />
-                      </intent-filter>
                   </activity>
               </application>
           </manifest>
@@ -200,7 +193,7 @@ jobs:
           cat > app/src/main/res/values/themes.xml <<'__SB_EOF__'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <style name="Theme.StreamBox" parent="android:Theme.Material.NoActionBar">
+              <style name="Theme.LiveTV" parent="android:Theme.Material.NoActionBar">
                   <item name="android:windowBackground">@android:color/black</item>
                   <item name="android:statusBarColor">@android:color/transparent</item>
                   <item name="android:navigationBarColor">@android:color/transparent</item>
@@ -216,52 +209,68 @@ jobs:
               android:height="108dp"
               android:viewportWidth="108"
               android:viewportHeight="108">
-              <path android:fillColor="#0E1117" android:pathData="M0,0h108v108h-108z" />
-              <path android:fillColor="#4C9AFF" android:pathData="M30,34h48a6,6 0 0 1 6,6v28a6,6 0 0 1 -6,6h-48a6,6 0 0 1 -6,-6v-28a6,6 0 0 1 6,-6z" />
-              <path android:fillColor="#0E1117" android:pathData="M48,44l18,10l-18,10z" />
+              <path android:fillColor="#05070D" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#7AB8FF" android:pathData="M30,34h48a6,6 0 0 1 6,6v28a6,6 0 0 1 -6,6h-48a6,6 0 0 1 -6,-6v-28a6,6 0 0 1 6,-6z" />
+              <path android:fillColor="#05070D" android:pathData="M48,44l18,10l-18,10z" />
           </vector>
           __SB_EOF__
 
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/Models.kt <<'__SB_EOF__'
-          package com.streambox.player
+          mkdir -p app/src/main/java/com/livetv/glass
+          cat > app/src/main/java/com/livetv/glass/Models.kt <<'__SB_EOF__'
+          package com.livetv.glass
 
           import android.content.Context
-          import android.util.Xml
+          import okhttp3.HttpUrl.Companion.toHttpUrl
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
           import org.json.JSONArray
           import org.json.JSONObject
-          import org.xmlpull.v1.XmlPullParser
-          import java.io.BufferedInputStream
-          import java.io.File
           import java.io.IOException
-          import java.io.InputStream
-          import java.net.HttpURLConnection
-          import java.net.URL
           import java.net.URLDecoder
-          import java.text.SimpleDateFormat
-          import java.util.HashSet
-          import java.util.Locale
-          import java.util.TimeZone
-          import java.util.zip.GZIPInputStream
+          import java.util.concurrent.TimeUnit
 
           const val DEFAULT_UA = "VLC/3.0.20 LibVLC/3.0.20"
+          const val API_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+          const val API_BASE = "https://ayush8481tvpl8481.pages.dev/live/"
+          const val EPG_API = "https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get"
+          const val IMG_BASE = "https://jiotvimages.cdn.jio.com/dare_images/shows/"
 
           data class Channel(
-              val num: Int,
+              val id: String,
               val name: String,
-              val url: String,
+              val category: String,
               val logo: String,
-              val group: String,
-              val tvgId: String,
-              val ua: String = "",
-              val referer: String = "",
-              val drmType: String = "",
-              val drmKey: String = "",
-              val mime: String = "",
+              val license: String,
+              val url: String,
               val headers: Map<String, String> = emptyMap()
           )
 
-          /** Kodi style header strings ("A=b&C=d", values may be url-encoded). */
+          data class Program(
+              val start: Long,
+              val stop: Long,
+              val title: String,
+              val desc: String,
+              val thumb: String,
+              val genre: String,
+              val category: String
+          )
+
+          data class Session(val expire: Long, val channels: List<Channel>)
+
+          sealed class ApiResult {
+              class Ok(val session: Session) : ApiResult()
+              object Invalid : ApiResult()
+              class NetErr(val msg: String) : ApiResult()
+          }
+
+          /** Program banner through Jio's image optimizer. */
+          fun bannerUrl(p: Program): String {
+              val t = p.thumb.trim()
+              if (t.isEmpty()) return ""
+              if (t.startsWith("http")) return t
+              return IMG_BASE + t.removePrefix("/") + "?width=700&optimize=medium&format=jpg"
+          }
+
           fun decodeHv(v: String): String =
               if (v.contains('%')) {
                   try { URLDecoder.decode(v.replace("+", "%2B"), "UTF-8") } catch (e: Exception) { v }
@@ -281,6 +290,7 @@ jobs:
               return m
           }
 
+          /** "A=b&C=d" (Kodi style, values may be url-encoded). */
           fun parseHeaderString(s: String): Map<String, String> {
               val m = LinkedHashMap<String, String>()
               s.split('&').forEach { p ->
@@ -290,57 +300,23 @@ jobs:
               return m
           }
 
-          data class Playlist(
-              val id: String,
-              val name: String,
-              val source: String,
-              val isFile: Boolean,
-              val epg: String = "",
-              val updated: Long = 0L
-          )
+          private fun JSONObject.str(k: String): String = if (isNull(k)) "" else optString(k).trim()
 
-          data class Program(val start: Long, val stop: Long, val title: String, val desc: String)
-
-          class EpgData(val byId: Map<String, List<Program>>, val nameToId: Map<String, String>) {
-              companion object {
-                  val EMPTY = EpgData(emptyMap(), emptyMap())
-              }
+          private fun niceCat(s: String): String {
+              val t = s.trim()
+              if (t.isEmpty()) return "Other"
+              return t.lowercase().split(' ').filter { it.isNotEmpty() }
+                  .joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercase() } }
           }
-
-          data class Parsed(val channels: List<Channel>, val epgUrl: String)
 
           /* ---------------------------------------------------------------- storage */
 
-          class Store(private val ctx: Context) {
-              private val sp = ctx.getSharedPreferences("streambox", Context.MODE_PRIVATE)
+          class Store(ctx: Context) {
+              private val sp = ctx.getSharedPreferences("livetv", Context.MODE_PRIVATE)
 
-              fun playlists(): List<Playlist> = try {
-                  val a = JSONArray(sp.getString("playlists", "[]"))
-                  (0 until a.length()).map { i ->
-                      val o = a.getJSONObject(i)
-                      Playlist(
-                          o.getString("id"), o.optString("name"), o.optString("source"),
-                          o.optBoolean("file"), o.optString("epg"), o.optLong("updated")
-                      )
-                  }
-              } catch (e: Exception) {
-                  emptyList()
-              }
-
-              fun savePlaylists(l: List<Playlist>) {
-                  val a = JSONArray()
-                  l.forEach {
-                      a.put(
-                          JSONObject().put("id", it.id).put("name", it.name).put("source", it.source)
-                              .put("file", it.isFile).put("epg", it.epg).put("updated", it.updated)
-                      )
-                  }
-                  sp.edit().putString("playlists", a.toString()).apply()
-              }
-
-              var activeId: String
-                  get() = sp.getString("active", "") ?: ""
-                  set(v) { sp.edit().putString("active", v).apply() }
+              var token: String
+                  get() = sp.getString("token", "") ?: ""
+                  set(v) { sp.edit().putString("token", v).apply() }
 
               var userAgent: String
                   get() = sp.getString("ua", DEFAULT_UA) ?: DEFAULT_UA
@@ -349,10 +325,6 @@ jobs:
               var extraHeaders: String
                   get() = sp.getString("xh", "") ?: ""
                   set(v) { sp.edit().putString("xh", v).apply() }
-
-              var autoRefresh: Boolean
-                  get() = sp.getBoolean("autoRefresh", true)
-                  set(v) { sp.edit().putBoolean("autoRefresh", v).apply() }
 
               var resumeLast: Boolean
                   get() = sp.getBoolean("resumeLast", false)
@@ -383,594 +355,107 @@ jobs:
                   l.forEach { a.put(it) }
                   sp.edit().putString("recents", a.toString()).apply()
               }
-
-              fun file(id: String) = File(ctx.filesDir, "pl_$id.m3u")
-              fun epgFile(id: String) = File(ctx.filesDir, "epg_$id.xml")
           }
 
-          /* ------------------------------------------------------------- networking */
+          /* ---------------------------------------------------------------- API */
 
-          object Net {
-              fun open(url: String, ua: String): InputStream {
-                  var u = url.trim()
-                  for (i in 0 until 6) {
-                      val c = URL(u).openConnection() as HttpURLConnection
-                      c.connectTimeout = 15000
-                      c.readTimeout = 30000
-                      c.instanceFollowRedirects = false
-                      c.setRequestProperty("User-Agent", ua)
-                      c.setRequestProperty("Accept-Encoding", "identity")
-                      val code = c.responseCode
-                      if (code in 300..399) {
-                          val loc = c.getHeaderField("Location") ?: throw IOException("Bad redirect")
-                          u = URL(URL(u), loc).toString()
-                          c.disconnect()
-                          continue
-                      }
-                      if (code !in 200..299) throw IOException("HTTP $code")
-                      return c.inputStream
-                  }
-                  throw IOException("Too many redirects")
-              }
+          object Api {
+              val client: OkHttpClient = OkHttpClient.Builder()
+                  .connectTimeout(15, TimeUnit.SECONDS)
+                  .readTimeout(25, TimeUnit.SECONDS)
+                  .build()
 
-              /** Transparently un-gzips a stream when the gzip magic bytes are present. */
-              fun sniff(input: InputStream): InputStream {
-                  val b = BufferedInputStream(input, 16384)
-                  b.mark(2)
-                  val a = b.read()
-                  val c = b.read()
-                  b.reset()
-                  return if (a == 0x1f && c == 0x8b) GZIPInputStream(b) else b
-              }
-
-              fun download(url: String, ua: String, dest: File, validatePlaylist: Boolean = false) {
-                  val tmp = File(dest.path + ".tmp")
-                  try {
-                      sniff(open(url, ua)).use { inp -> tmp.outputStream().use { inp.copyTo(it) } }
-                      if (validatePlaylist) {
-                          val head = tmp.inputStream().use {
-                              val buf = ByteArray(4096)
-                              val n = it.read(buf)
-                              if (n > 0) String(buf, 0, n) else ""
-                          }
-                          if (!head.contains("#EXTM3U") && !head.contains("#EXTINF")) {
-                              throw IOException("Not a valid M3U playlist")
-                          }
-                      }
-                      if (dest.exists()) dest.delete()
-                      if (!tmp.renameTo(dest)) throw IOException("Could not save file")
-                  } finally {
-                      if (tmp.exists()) tmp.delete()
-                  }
-              }
-          }
-
-          /* --------------------------------------------------------------- M3U parse */
-
-          object M3uParser {
-              private val attr = Regex("([A-Za-z0-9_-]+)=\"([^\"]*)\"")
-
-              private fun attrs(line: String): Map<String, String> =
-                  attr.findAll(line).associate { it.groupValues[1].lowercase() to it.groupValues[2] }
-
-              fun parse(text: String): Parsed {
-                  val out = ArrayList<Channel>()
-                  var epg = ""
-                  var name = ""
-                  var logo = ""
-                  var group = ""
-                  var tvg = ""
-                  var ua = ""
-                  var ref = ""
-                  var extGrp = ""
-                  var dType = ""
-                  var dKey = ""
-                  var mime = ""
-                  val hdr = LinkedHashMap<String, String>()
-                  var pending = false
-                  var n = 0
-
-                  for (raw in text.lineSequence()) {
-                      val line = raw.trim().trimStart('\uFEFF')
-                      if (line.isEmpty()) continue
-                      if (line.startsWith("#EXTM3U", true)) {
-                          val m = attrs(line)
-                          epg = (m["url-tvg"] ?: m["x-tvg-url"] ?: "").split(",").first().trim()
-                      } else if (line.startsWith("#EXTINF", true)) {
-                          val m = attrs(line)
-                          val q = line.lastIndexOf('"')
-                          val comma = line.indexOf(',', if (q > 0) q else 0)
-                          name = if (comma >= 0) line.substring(comma + 1).trim() else ""
-                          if (name.isEmpty()) name = m["tvg-name"] ?: "Channel"
-                          logo = m["tvg-logo"] ?: ""
-                          group = m["group-title"] ?: ""
-                          tvg = m["tvg-id"] ?: ""
-                          ua = ""
-                          ref = ""
-                          pending = true
-                      } else if (line.startsWith("#EXTGRP:", true)) {
-                          extGrp = line.substringAfter(':').trim()
-                      } else if (line.startsWith("#KODIPROP:", true)) {
-                          val kv = line.substringAfter(':')
-                          val k = kv.substringBefore('=').trim().lowercase()
-                          val v = kv.substringAfter('=', "").trim()
-                          if (k == "inputstream.adaptive.license_type") dType = v
-                          else if (k == "inputstream.adaptive.license_key") dKey = v
-                          else if (k == "inputstream.adaptive.manifest_type") mime = v.lowercase()
-                          else if (k == "inputstream.adaptive.stream_headers" || k == "inputstream.adaptive.manifest_headers") {
-                              hdr.putAll(parseHeaderString(v))
-                              v.split('&').forEach { p ->
-                                  val hk = p.substringBefore('=').trim().lowercase()
-                                  val hv = p.substringAfter('=', "").trim()
-                                  if (hk == "user-agent") ua = hv
-                                  if (hk == "referer" || hk == "referrer") ref = hv
-                              }
-                          }
-                      } else if (line.startsWith("#EXTHTTP:", true)) {
-                          try {
-                              val jo = JSONObject(line.substringAfter(':').trim())
-                              val it = jo.keys()
-                              while (it.hasNext()) {
-                                  val hk = it.next()
-                                  hdr[hk] = jo.optString(hk)
-                              }
-                          } catch (e: Exception) {
-                              // ignore malformed json
-                          }
-                      } else if (line.startsWith("#EXTVLCOPT:", true)) {
-                          val kv = line.substringAfter(':')
-                          val k = kv.substringBefore('=').lowercase()
-                          val v = kv.substringAfter('=', "")
-                          if (k == "http-user-agent") ua = v
-                          if (k == "http-referrer" || k == "http-referer") ref = v
-                          if (k == "http-cookie") hdr["Cookie"] = v
-                      } else if (line.startsWith("#")) {
-                          // other directives ignored
-                      } else if (pending) {
-                          var url = line
-                          var u2 = ua
-                          var r2 = ref
-                          var dt = dType
-                          var dk = dKey
-                          val h2 = LinkedHashMap<String, String>(hdr)
-                          val bar = line.indexOf('|')
-                          if (bar > 0) {
-                              url = line.substring(0, bar)
-                              line.substring(bar + 1).split('&').forEach { p ->
-                                  val k = p.substringBefore('=').lowercase()
-                                  val v = p.substringAfter('=', "")
-                                  if (k == "user-agent") u2 = v
-                                  if (k == "referer" || k == "referrer") r2 = v
-                                  if (k == "drmscheme") dt = v
-                                  if (k == "drmlicense") dk = v
-                                  if (k != "drmscheme" && k != "drmlicense" && p.contains('=')) {
-                                      h2[p.substringBefore('=').trim()] = decodeHv(v)
-                                  }
-                              }
-                          }
-                          val g = group.ifBlank { extGrp }.ifBlank { "Uncategorized" }
-                          n++
-                          out.add(Channel(n, name, url, logo, g.trim(), tvg.trim(), u2, r2, dt, dk, mime, h2))
-                          pending = false
-                          extGrp = ""
-                          dType = ""
-                          dKey = ""
-                          mime = ""
-                          hdr.clear()
-                      }
-                  }
-                  return Parsed(out, epg)
-              }
-          }
-
-          /* -------------------------------------------------------------- XMLTV parse */
-
-          object EpgParser {
-              private val fmt = SimpleDateFormat("yyyyMMddHHmmss Z", Locale.US)
-
-              private fun time(s: String?): Long {
-                  if (s.isNullOrBlank()) return 0L
-                  val t = s.trim()
+              /** Blocking: call from Dispatchers.IO. */
+              fun channels(token: String): ApiResult {
+                  val t = token.trim()
+                  if (t.isEmpty()) return ApiResult.Invalid
                   return try {
-                      if (t.length > 14) {
-                          val zone = t.substring(14).trim().ifEmpty { "+0000" }
-                          fmt.parse(t.substring(0, 14) + " " + zone)!!.time
-                      } else {
-                          val f = SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
-                          f.timeZone = TimeZone.getTimeZone("UTC")
-                          f.parse(t)!!.time
+                      val url = API_BASE.toHttpUrl().newBuilder().addPathSegment(t).build()
+                      val req = Request.Builder().url(url)
+                          .header("User-Agent", API_UA)
+                          .header("Accept", "application/json")
+                          .build()
+                      client.newCall(req).execute().use { r ->
+                          val code = r.code
+                          val body = r.body?.string() ?: ""
+                          if (code == 401 || code == 403 || code == 404) ApiResult.Invalid
+                          else if (code !in 200..299) ApiResult.NetErr("HTTP $code")
+                          else parse(body)
                       }
+                  } catch (e: IOException) {
+                      ApiResult.NetErr(e.message ?: "Network error")
                   } catch (e: Exception) {
-                      0L
+                      ApiResult.NetErr(e.message ?: "Unexpected error")
                   }
               }
 
-              fun parse(input: InputStream, wantedIds: Set<String>, wantedNames: Set<String>, now: Long): EpgData {
-                  val p = Xml.newPullParser()
-                  p.setInput(input, null)
-                  val byId = HashMap<String, MutableList<Program>>()
-                  val nameToId = HashMap<String, String>()
-                  val ids = HashSet<String>(wantedIds)
-                  var curChan: String? = null
-                  var ev = p.eventType
-                  while (ev != XmlPullParser.END_DOCUMENT) {
-                      if (ev == XmlPullParser.START_TAG) {
-                          when (p.name) {
-                              "channel" -> curChan = p.getAttributeValue(null, "id")?.lowercase()
-                              "display-name" -> {
-                                  val dn = p.nextText().trim().lowercase()
-                                  val c = curChan
-                                  if (c != null) {
-                                      if (!nameToId.containsKey(dn)) nameToId[dn] = c
-                                      if (dn in wantedNames) ids.add(c)
-                                  }
-                              }
-                              "programme" -> {
-                                  val ch = p.getAttributeValue(null, "channel")?.lowercase() ?: ""
-                                  val st = time(p.getAttributeValue(null, "start"))
-                                  val en = time(p.getAttributeValue(null, "stop"))
-                                  var title = ""
-                                  var desc = ""
-                                  while (true) {
-                                      val e = p.next()
-                                      if (e == XmlPullParser.END_DOCUMENT) break
-                                      if (e == XmlPullParser.END_TAG && p.name == "programme") break
-                                      if (e == XmlPullParser.START_TAG) {
-                                          if (p.name == "title" && title.isEmpty()) title = p.nextText().trim()
-                                          else if (p.name == "desc" && desc.isEmpty()) desc = p.nextText().trim()
-                                      }
-                                  }
-                                  if (ch in ids && en > now - 2 * 3_600_000L && st < now + 36 * 3_600_000L) {
-                                      byId.getOrPut(ch) { ArrayList() }.add(Program(st, en, title, desc))
-                                  }
-                              }
-                          }
-                      } else if (ev == XmlPullParser.END_TAG && p.name == "channel") {
-                          curChan = null
+              private fun parse(body: String): ApiResult {
+                  val o = try { JSONObject(body) } catch (e: Exception) { return ApiResult.Invalid }
+                  val arr = o.optJSONArray("channels") ?: return ApiResult.Invalid
+                  val list = ArrayList<Channel>()
+                  for (i in 0 until arr.length()) {
+                      val c = arr.optJSONObject(i) ?: continue
+                      val raw = c.str("url")
+                      if (raw.isEmpty()) continue
+                      var url = raw
+                      var h: Map<String, String> = emptyMap()
+                      val bar = raw.indexOf('|')
+                      if (bar > 0) {
+                          url = raw.substring(0, bar)
+                          h = parseHeaderString(raw.substring(bar + 1))
                       }
-                      ev = p.next()
+                      val id = c.str("id").ifEmpty { i.toString() }
+                      list.add(
+                          Channel(
+                              id = id,
+                              name = c.str("name").ifEmpty { "Channel ${i + 1}" },
+                              category = niceCat(c.str("category")),
+                              logo = c.str("logo"),
+                              license = c.str("license"),
+                              url = url,
+                              headers = h
+                          )
+                      )
                   }
-                  val sorted = HashMap<String, List<Program>>()
-                  byId.forEach { (k, v) -> sorted[k] = v.sortedBy { it.start } }
-                  return EpgData(sorted, nameToId)
+                  return ApiResult.Ok(Session(o.optLong("expire", 0L), list.distinctBy { it.id }))
+              }
+          }
+
+          object EpgApi {
+              /** Blocking: call from Dispatchers.IO. offset 0 = today (resets by UTC), up to 10. */
+              fun fetch(id: String, offset: Int): List<Program> {
+                  val url = EPG_API.toHttpUrl().newBuilder()
+                      .addQueryParameter("channel_id", id)
+                      .addQueryParameter("offset", offset.toString())
+                      .build()
+                  val req = Request.Builder().url(url).header("User-Agent", API_UA).build()
+                  Api.client.newCall(req).execute().use { r ->
+                      if (!r.isSuccessful) throw IOException("EPG HTTP ${r.code}")
+                      val body = r.body?.string() ?: ""
+                      val arr = JSONObject(body).optJSONArray("epg") ?: return emptyList()
+                      val out = ArrayList<Program>()
+                      for (i in 0 until arr.length()) {
+                          val p = arr.optJSONObject(i) ?: continue
+                          val st = p.optLong("startEpoch", 0L)
+                          val en = p.optLong("endEpoch", 0L)
+                          if (en <= st) continue
+                          val genre = p.optJSONArray("showGenre")?.optString(0) ?: ""
+                          val thumb = p.str("episodeThumbnail").ifEmpty { p.str("episodePoster") }
+                          out.add(
+                              Program(
+                                  st, en, p.str("showname"), p.str("description"),
+                                  thumb, genre, p.str("showCategory")
+                              )
+                          )
+                      }
+                      return out.sortedBy { it.start }
+                  }
               }
           }
           __SB_EOF__
 
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/Vm.kt <<'__SB_EOF__'
-          package com.streambox.player
-
-          import android.app.Application
-          import android.net.Uri
-          import androidx.compose.runtime.getValue
-          import androidx.compose.runtime.mutableIntStateOf
-          import androidx.compose.runtime.mutableLongStateOf
-          import androidx.compose.runtime.mutableStateOf
-          import androidx.compose.runtime.setValue
-          import androidx.lifecycle.AndroidViewModel
-          import androidx.lifecycle.viewModelScope
-          import kotlinx.coroutines.Dispatchers
-          import kotlinx.coroutines.delay
-          import kotlinx.coroutines.launch
-          import kotlinx.coroutines.withContext
-          import java.util.UUID
-
-          const val G_ALL = "All channels"
-          const val G_FAV = "Favorites"
-          const val G_RECENT = "Recently watched"
-
-          class MainVM(app: Application) : AndroidViewModel(app) {
-              val store = Store(app)
-
-              var playlists by mutableStateOf(store.playlists())
-              var activeId by mutableStateOf(store.activeId)
-              var channels by mutableStateOf<List<Channel>>(emptyList())
-              var groups by mutableStateOf<List<String>>(emptyList())
-              var epg by mutableStateOf(EpgData.EMPTY)
-              var loading by mutableStateOf(false)
-              var toast by mutableStateOf<String?>(null)
-              var favorites by mutableStateOf(store.favorites())
-              var recents by mutableStateOf(store.recents())
-              var group by mutableStateOf(G_ALL)
-
-              var userAgent by mutableStateOf(store.userAgent)
-              var extraHeaders by mutableStateOf(store.extraHeaders)
-              var autoRefresh by mutableStateOf(store.autoRefresh)
-              var resumeLast by mutableStateOf(store.resumeLast)
-              var aspect by mutableIntStateOf(store.aspect)
-
-              var now by mutableLongStateOf(System.currentTimeMillis())
-              var current by mutableStateOf<Channel?>(null)
-              var previous by mutableStateOf<Channel?>(null)
-              var zapList by mutableStateOf<List<Channel>>(emptyList())
-              var fullscreen by mutableStateOf(false)
-              var playNonce by mutableIntStateOf(0)
-              var sleepAt by mutableLongStateOf(0L)
-
-              private var resumed = false
-
-              init {
-                  if (activeId.isEmpty() || playlists.none { it.id == activeId }) {
-                      activeId = playlists.firstOrNull()?.id ?: ""
-                      store.activeId = activeId
-                  }
-                  viewModelScope.launch {
-                      while (true) {
-                          delay(30_000)
-                          now = System.currentTimeMillis()
-                      }
-                  }
-                  viewModelScope.launch {
-                      loadLocal(false)
-                      val pl = active()
-                      if (pl != null && autoRefresh && !pl.isFile &&
-                          System.currentTimeMillis() - pl.updated > 12 * 3_600_000L
-                      ) doRefresh()
-                  }
-              }
-
-              fun active(): Playlist? = playlists.firstOrNull { it.id == activeId }
-
-              /* ------------------------------------------------------------ playlists */
-
-              fun addUrl(name: String, url: String, epgUrl: String) {
-                  val pl = Playlist(
-                      newId(), name.ifBlank { "Playlist ${playlists.size + 1}" },
-                      url.trim(), false, epgUrl.trim()
-                  )
-                  register(pl)
-              }
-
-              fun addXtream(name: String, server: String, user: String, pass: String) {
-                  var s = server.trim().trimEnd('/')
-                  if (!s.startsWith("http", true)) s = "http://$s"
-                  val m3u = "$s/get.php?username=$user&password=$pass&type=m3u_plus&output=ts"
-                  val epgUrl = "$s/xmltv.php?username=$user&password=$pass"
-                  register(Playlist(newId(), name.ifBlank { "Xtream" }, m3u, false, epgUrl))
-              }
-
-              fun addFile(uri: Uri, name: String) {
-                  val pl = Playlist(newId(), name.ifBlank { "Local playlist" }, "", true)
-                  viewModelScope.launch {
-                      try {
-                          withContext(Dispatchers.IO) {
-                              val input = getApplication<Application>().contentResolver.openInputStream(uri)
-                                  ?: throw Exception("Cannot open file")
-                              input.use { i -> store.file(pl.id).outputStream().use { i.copyTo(it) } }
-                          }
-                          register(pl)
-                      } catch (e: Exception) {
-                          toast = "Import failed: ${e.message}"
-                      }
-                  }
-              }
-
-              private fun newId() = UUID.randomUUID().toString().take(8)
-
-              private fun register(pl: Playlist) {
-                  playlists = playlists + pl
-                  store.savePlaylists(playlists)
-                  select(pl.id)
-              }
-
-              fun select(id: String) {
-                  activeId = id
-                  store.activeId = id
-                  channels = emptyList()
-                  groups = emptyList()
-                  epg = EpgData.EMPTY
-                  group = G_ALL
-                  viewModelScope.launch {
-                      if (store.file(id).exists()) loadLocal(false) else doRefresh()
-                  }
-              }
-
-              fun delete(id: String) {
-                  store.file(id).delete()
-                  store.epgFile(id).delete()
-                  playlists = playlists.filter { it.id != id }
-                  store.savePlaylists(playlists)
-                  if (activeId == id) {
-                      val next = playlists.firstOrNull()?.id ?: ""
-                      if (next.isEmpty()) {
-                          activeId = ""
-                          store.activeId = ""
-                          channels = emptyList()
-                          groups = emptyList()
-                          epg = EpgData.EMPTY
-                      } else select(next)
-                  }
-              }
-
-              fun refresh() {
-                  viewModelScope.launch { doRefresh() }
-              }
-
-              fun setEpgUrl(url: String) {
-                  val pl = active() ?: return
-                  playlists = playlists.map { if (it.id == pl.id) it.copy(epg = url.trim()) else it }
-                  store.savePlaylists(playlists)
-                  viewModelScope.launch { loadLocal(true) }
-              }
-
-              private suspend fun doRefresh() {
-                  val pl = active() ?: return
-                  loading = true
-                  try {
-                      if (!pl.isFile) {
-                          withContext(Dispatchers.IO) {
-                              Net.download(pl.source, userAgent, store.file(pl.id), true)
-                          }
-                      }
-                      playlists = playlists.map {
-                          if (it.id == pl.id) it.copy(updated = System.currentTimeMillis()) else it
-                      }
-                      store.savePlaylists(playlists)
-                      loadLocal(true)
-                      toast = "Loaded ${channels.size} channels"
-                  } catch (e: Exception) {
-                      toast = "Failed: ${e.message}"
-                  }
-                  loading = false
-              }
-
-              private suspend fun loadLocal(forceEpg: Boolean) {
-                  val pl = active() ?: return
-                  val f = store.file(pl.id)
-                  if (!f.exists()) return
-                  val parsed = withContext(Dispatchers.IO) { M3uParser.parse(f.readText()) }
-                  channels = parsed.channels
-                  groups = parsed.channels.map { it.group }.distinct()
-                  if (group != G_ALL && group != G_FAV && group != G_RECENT && group !in groups) group = G_ALL
-                  if (parsed.channels.isEmpty()) toast = "No channels found in this playlist"
-                  loadEpg(pl, parsed, forceEpg)
-
-                  if (!resumed) {
-                      resumed = true
-                      if (resumeLast && store.lastChannel.isNotEmpty()) {
-                          parsed.channels.firstOrNull { it.url == store.lastChannel }?.let {
-                              play(it, parsed.channels)
-                              fullscreen = true
-                          }
-                      }
-                  }
-              }
-
-              private fun loadEpg(pl: Playlist, parsed: Parsed, force: Boolean) {
-                  val url = pl.epg.ifBlank { parsed.epgUrl }
-                  val f = store.epgFile(pl.id)
-                  viewModelScope.launch {
-                      try {
-                          val data = withContext(Dispatchers.IO) {
-                              val stale = autoRefresh && f.exists() &&
-                                  System.currentTimeMillis() - f.lastModified() > 12 * 3_600_000L
-                              if ((force || !f.exists() || stale) && url.isNotBlank()) {
-                                  Net.download(url, userAgent, f)
-                              }
-                              if (!f.exists()) return@withContext null
-                              val ids = parsed.channels.filter { it.tvgId.isNotEmpty() }
-                                  .map { it.tvgId.lowercase() }.toSet()
-                              val names = parsed.channels.map { it.name.lowercase() }.toSet()
-                              Net.sniff(f.inputStream().buffered()).use {
-                                  EpgParser.parse(it, ids, names, System.currentTimeMillis())
-                              }
-                          }
-                          if (data != null && pl.id == activeId) epg = data
-                      } catch (e: Exception) {
-                          toast = "EPG failed: ${e.message}"
-                      }
-                  }
-              }
-
-              /* ------------------------------------------------------------- channels */
-
-              fun filter(g: String): List<Channel> = when (g) {
-                  G_ALL -> channels
-                  G_FAV -> channels.filter { it.url in favorites }
-                  G_RECENT -> recents.mapNotNull { u -> channels.firstOrNull { it.url == u } }
-                  else -> channels.filter { it.group == g }
-              }
-
-              fun search(q: String): List<Channel> {
-                  val s = q.trim().lowercase()
-                  if (s.length < 2) return emptyList()
-                  return channels.filter {
-                      it.name.lowercase().contains(s) ||
-                          it.group.lowercase().contains(s) ||
-                          (nowNext(it).first?.title?.lowercase()?.contains(s) == true)
-                  }.take(300)
-              }
-
-              fun toggleFav(ch: Channel) {
-                  favorites = if (ch.url in favorites) favorites - ch.url else favorites + ch.url
-                  store.saveFavorites(favorites)
-              }
-
-              fun programs(ch: Channel): List<Program> {
-                  val direct = if (ch.tvgId.isNotEmpty()) epg.byId[ch.tvgId.lowercase()] else null
-                  if (direct != null) return direct
-                  val id = epg.nameToId[ch.name.lowercase()] ?: return emptyList()
-                  return epg.byId[id] ?: emptyList()
-              }
-
-              fun nowNext(ch: Channel): Pair<Program?, Program?> {
-                  val l = programs(ch)
-                  if (l.isEmpty()) return Pair(null, null)
-                  val i = l.indexOfFirst { now >= it.start && now < it.stop }
-                  return if (i >= 0) Pair(l[i], l.getOrNull(i + 1))
-                  else Pair(null, l.firstOrNull { it.start > now })
-              }
-
-              /* -------------------------------------------------------------- playback */
-
-              fun play(ch: Channel, list: List<Channel>) {
-                  if (current?.url != ch.url) previous = current
-                  current = ch
-                  zapList = list
-                  store.lastChannel = ch.url
-                  recents = (listOf(ch.url) + recents.filter { it != ch.url }).take(30)
-                  store.saveRecents(recents)
-                  playNonce++
-              }
-
-              fun zap(d: Int) {
-                  val l = zapList
-                  if (l.isEmpty()) return
-                  val i = l.indexOfFirst { it.url == current?.url }
-                  play(l[(i + d + l.size).mod(l.size)], l)
-              }
-
-              fun recall() {
-                  previous?.let { play(it, zapList) }
-              }
-
-              fun quickPlay(url: String, drmType: String = "", drmKey: String = "") {
-                  var u = url.trim()
-                  if (u.isEmpty()) return
-                  var h: Map<String, String> = emptyMap()
-                  val bar = u.indexOf('|')
-                  if (bar > 0) {
-                      h = parseHeaderString(u.substring(bar + 1))
-                      u = u.substring(0, bar)
-                  }
-                  val nm = u.substringBefore('?').substringAfterLast('/').take(40).ifBlank { "Stream" }
-                  play(Channel(0, nm, u, "", "Direct", "", "", "", drmType.trim(), drmKey.trim(), "", h), emptyList())
-                  fullscreen = true
-              }
-
-              /* -------------------------------------------------------------- settings */
-
-              fun setUa(v: String) {
-                  userAgent = v
-                  store.userAgent = v
-              }
-
-              fun updateExtraHeaders(v: String) {
-                  extraHeaders = v
-                  store.extraHeaders = v
-              }
-
-              fun updateAutoRefresh(v: Boolean) {
-                  autoRefresh = v
-                  store.autoRefresh = v
-              }
-
-              fun setResume(v: Boolean) {
-                  resumeLast = v
-                  store.resumeLast = v
-              }
-
-              fun updateAspect(v: Int) {
-                  aspect = v
-                  store.aspect = v
-              }
-          }
-          __SB_EOF__
-
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/Http.kt <<'__SB_EOF__'
-          package com.streambox.player
+          cat > app/src/main/java/com/livetv/glass/Http.kt <<'__SB_EOF__'
+          package com.livetv.glass
 
           import okhttp3.Cookie
           import okhttp3.CookieJar
@@ -979,8 +464,9 @@ jobs:
           import okhttp3.OkHttpClient
           import java.io.IOException
           import java.util.concurrent.TimeUnit
+          import kotlin.math.abs
 
-          /** Small ring buffer of recent HTTP activity, shown in the player's "Network log" dialog. */
+          /** Ring buffer of recent HTTP activity, shown in the player's "Network log" dialog. */
           object NetLog {
               private val lines = ArrayDeque<String>()
 
@@ -1003,31 +489,76 @@ jobs:
           }
 
           /**
-           * RFC 6265 cookie jar (OkHttp's own matching rules: domain, path, secure, expiry).
-           * Cookies set by the manifest / CDN are replayed on segment, key and license requests.
-           * [fixed] holds a manual "Cookie: a=b; c=d" value from the playlist, sent to every host.
+           * Cookie jar tuned for CDN streams:
+           *  - cookies from the manifest / redirects / key responses are replayed on every later request;
+           *  - cookies are also sent to sibling hosts of the same site;
+           *  - expiry is judged on the SERVER clock (Date header), so a wrong device clock cannot break tokens;
+           *  - Set-Cookie lines OkHttp refuses to parse are still kept (lenient fallback).
            */
           class MemoryCookieJar : CookieJar {
-              private val store = ArrayList<Cookie>()
+              private class Entry(val c: Cookie, val origin: String)
+
+              private val store = ArrayList<Entry>()
 
               @Volatile
               var fixed: String = ""
 
+              @Volatile
+              var skew: Long = 0L
+
+              private fun now(): Long = System.currentTimeMillis() + skew
+
+              private val secondLevel = setOf("co", "com", "org", "net", "gov", "edu", "ac", "or", "ne", "go")
+
+              private fun base(host: String): String {
+                  if (host.contains(':') || host.all { it.isDigit() || it == '.' }) return host
+                  val p = host.split('.')
+                  if (p.size <= 2) return host
+                  val n = if (p.last().length == 2 && p[p.size - 2] in secondLevel) 3 else 2
+                  return p.takeLast(n).joinToString(".")
+              }
+
+              private fun sibling(e: Entry, url: HttpUrl): Boolean {
+                  if (base(e.origin) != base(url.host)) return false
+                  if (e.c.secure && !url.isHttps) return false
+                  val p = e.c.path
+                  return p == "/" || url.encodedPath.startsWith(p)
+              }
+
               @Synchronized
               override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                  val now = System.currentTimeMillis()
+                  val now = now()
                   for (c in cookies) {
-                      store.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
-                      if (c.expiresAt > now) store.add(c) // an already-expired cookie is a delete request
+                      store.removeAll { it.c.name == c.name && it.c.domain == c.domain && it.c.path == c.path }
+                      if (c.expiresAt > now && c.value.isNotEmpty()) store.add(Entry(c, url.host))
+                  }
+              }
+
+              @Synchronized
+              fun addLoose(url: HttpUrl, name: String, value: String) {
+                  if (name.isEmpty() || value.isEmpty()) return
+                  try {
+                      val c = Cookie.Builder().name(name).value(value).hostOnlyDomain(url.host).path("/").build()
+                      store.removeAll { it.c.name == name && it.c.domain == c.domain && it.c.path == "/" }
+                      store.add(Entry(c, url.host))
+                  } catch (e: Exception) {
+                      // ignore
                   }
               }
 
               @Synchronized
               override fun loadForRequest(url: HttpUrl): List<Cookie> {
-                  val now = System.currentTimeMillis()
-                  store.removeAll { it.expiresAt <= now }
+                  val now = now()
+                  store.removeAll { it.c.expiresAt <= now }
                   val out = ArrayList<Cookie>()
-                  for (c in store) if (c.matches(url)) out.add(c)
+                  val seen = HashSet<String>()
+                  for (e in store.sortedByDescending { it.c.path.length }) {
+                      if (e.c.name in seen) continue
+                      if (e.c.matches(url) || sibling(e, url)) {
+                          out.add(e.c)
+                          seen.add(e.c.name)
+                      }
+                  }
                   val f = fixed
                   if (f.isNotBlank()) {
                       for (part in f.split(';')) {
@@ -1035,7 +566,7 @@ jobs:
                           if (i <= 0) continue
                           val n = part.substring(0, i).trim()
                           val v = part.substring(i + 1).trim()
-                          if (n.isEmpty() || out.any { it.name == n }) continue
+                          if (n.isEmpty() || n in seen) continue
                           try {
                               out.add(Cookie.Builder().name(n).value(v).domain(url.host).build())
                           } catch (e: Exception) {
@@ -1049,6 +580,7 @@ jobs:
               @Synchronized
               fun clear() {
                   store.clear()
+                  skew = 0L
               }
           }
 
@@ -1063,7 +595,26 @@ jobs:
                   val sent = req.header("Cookie")?.split(';')?.map { it.substringBefore('=').trim() } ?: emptyList()
                   try {
                       val resp = chain.proceed(req)
-                      val set = resp.headers("Set-Cookie").map { it.substringBefore('=').trim() }
+
+                      resp.headers.getDate("Date")?.let { d ->
+                          val diff = d.time - System.currentTimeMillis()
+                          jar.skew = if (abs(diff) > 300_000L) diff else 0L
+                      }
+
+                      val rawSet = resp.headers("Set-Cookie")
+                      for (h in rawSet) {
+                          if (Cookie.parse(req.url, h) == null) {
+                              val nv = h.substringBefore(';')
+                              val i = nv.indexOf('=')
+                              if (i > 0) {
+                                  val n = nv.substring(0, i).trim()
+                                  jar.addLoose(req.url, n, nv.substring(i + 1).trim())
+                                  NetLog.add("lenient cookie kept: $n")
+                              }
+                          }
+                      }
+
+                      val set = rawSet.map { it.substringBefore('=').trim() }
                       val loc = resp.header("Location")?.let { req.url.resolve(it)?.host }
                       val sb = StringBuilder()
                       sb.append(resp.code).append(' ').append(req.method).append(' ').append(where(req.url))
@@ -1091,7 +642,6 @@ jobs:
 
               private val tokenRe = Regex("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
-              /** Drop headers OkHttp would reject (it throws on control / non-ASCII chars). */
               fun cleanHeaders(m: Map<String, String>): LinkedHashMap<String, String> {
                   val out = LinkedHashMap<String, String>()
                   for ((k, v0) in m) {
@@ -1108,9 +658,323 @@ jobs:
           }
           __SB_EOF__
 
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/PlayerController.kt <<'__SB_EOF__'
-          package com.streambox.player
+          cat > app/src/main/java/com/livetv/glass/Vm.kt <<'__SB_EOF__'
+          package com.livetv.glass
+
+          import android.app.Application
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
+          import androidx.compose.runtime.mutableLongStateOf
+          import androidx.compose.runtime.mutableStateMapOf
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.Job
+          import kotlinx.coroutines.coroutineScope
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.sync.Semaphore
+          import kotlinx.coroutines.sync.withPermit
+          import kotlinx.coroutines.withContext
+
+          const val G_ALL = "All channels"
+          const val G_FAV = "Favorites"
+          const val G_RECENT = "Recently watched"
+
+          /** The session is reloaded this long before the server says keys / stream urls expire. */
+          const val REFRESH_BEFORE_MS = 10 * 60_000L
+
+          enum class Phase { TOKEN, LOADING, READY }
+
+          class MainVM(app: Application) : AndroidViewModel(app) {
+              val store = Store(app)
+
+              var token by mutableStateOf(store.token)
+              var phase by mutableStateOf(if (store.token.isEmpty()) Phase.TOKEN else Phase.LOADING)
+              var tokenError by mutableStateOf<String?>(null)
+
+              var channels by mutableStateOf<List<Channel>>(emptyList())
+              var categories by mutableStateOf<List<String>>(emptyList())
+              var category by mutableStateOf(G_ALL)
+              var expire by mutableLongStateOf(0L)
+              val epg = mutableStateMapOf<String, List<Program>>()
+
+              var toast by mutableStateOf<String?>(null)
+              var favorites by mutableStateOf(store.favorites())
+              var recents by mutableStateOf(store.recents())
+
+              var userAgent by mutableStateOf(store.userAgent)
+              var extraHeaders by mutableStateOf(store.extraHeaders)
+              var resumeLast by mutableStateOf(store.resumeLast)
+              var aspect by mutableIntStateOf(store.aspect)
+
+              var now by mutableLongStateOf(System.currentTimeMillis())
+              var current by mutableStateOf<Channel?>(null)
+              var previous by mutableStateOf<Channel?>(null)
+              var focused by mutableStateOf<Channel?>(null)
+              var zapList by mutableStateOf<List<Channel>>(emptyList())
+              var fullscreen by mutableStateOf(false)
+              var playNonce by mutableIntStateOf(0)
+              var sleepAt by mutableLongStateOf(0L)
+
+              private var resumed = false
+              private var busy = false
+              private var epgJob: Job? = null
+              private val epgAt = HashMap<String, Long>()
+
+              init {
+                  if (token.isNotEmpty()) viewModelScope.launch { login(token) }
+
+                  // clock tick (progress bars, live markers) + periodic EPG top-up
+                  viewModelScope.launch {
+                      var n = 0
+                      while (true) {
+                          delay(30_000)
+                          now = System.currentTimeMillis()
+                          n++
+                          if (n % 60 == 0 && phase == Phase.READY) prefetchEpg()
+                      }
+                  }
+
+                  // session loop: reload 10 minutes before expiry, retry every 20s on failure
+                  viewModelScope.launch {
+                      while (true) {
+                          val wait = if (expire > 0) expire * 1000 - REFRESH_BEFORE_MS - clock() else 30_000L
+                          delay(wait.coerceIn(20_000L, 3_600_000L))
+                          if (phase == Phase.READY && due()) login(token)
+                      }
+                  }
+              }
+
+              private fun clock(): Long = System.currentTimeMillis() + Http.jar.skew
+              private fun due(): Boolean = expire > 0 && clock() >= expire * 1000 - REFRESH_BEFORE_MS
+
+              fun checkExpiry() {
+                  if (phase == Phase.READY && due()) viewModelScope.launch { login(token) }
+              }
+
+              /* ------------------------------------------------------------ session */
+
+              fun submitToken(t: String) {
+                  val s = t.trim()
+                  if (s.isEmpty()) {
+                      tokenError = "Enter your access token"
+                      return
+                  }
+                  tokenError = null
+                  phase = Phase.LOADING
+                  viewModelScope.launch { login(s) }
+              }
+
+              fun refresh() {
+                  viewModelScope.launch {
+                      login(token)
+                      if (phase == Phase.READY) toast = "Refreshed - ${channels.size} channels"
+                  }
+              }
+
+              fun logout(msg: String? = null) {
+                  epgJob?.cancel()
+                  fullscreen = false
+                  current = null
+                  previous = null
+                  focused = null
+                  channels = emptyList()
+                  categories = emptyList()
+                  epg.clear()
+                  epgAt.clear()
+                  expire = 0L
+                  token = ""
+                  store.token = ""
+                  tokenError = msg
+                  phase = Phase.TOKEN
+              }
+
+              private suspend fun login(t: String) {
+                  if (busy) return
+                  busy = true
+                  val first = channels.isEmpty()
+                  val r = withContext(Dispatchers.IO) { Api.channels(t) }
+                  busy = false
+                  when (r) {
+                      is ApiResult.Ok -> {
+                          token = t.trim()
+                          store.token = token
+                          tokenError = null
+                          apply(r.session)
+                          phase = Phase.READY
+                      }
+                      is ApiResult.Invalid -> {
+                          if (first) {
+                              store.token = ""
+                              token = ""
+                              tokenError = "Invalid access token"
+                              phase = Phase.TOKEN
+                          } else {
+                              logout("Access token expired or revoked")
+                          }
+                      }
+                      is ApiResult.NetErr -> {
+                          if (first) {
+                              tokenError = "Cannot reach server: ${r.msg}"
+                              phase = Phase.TOKEN
+                          } else {
+                              toast = "Refresh failed (${r.msg}) - retrying"
+                          }
+                      }
+                  }
+              }
+
+              private fun apply(s: Session) {
+                  channels = s.channels
+                  categories = s.channels.map { it.category }.distinct()
+                  expire = s.expire
+                  if (category != G_ALL && category != G_FAV && category != G_RECENT && category !in categories) {
+                      category = G_ALL
+                  }
+                  val cur = current
+                  if (cur != null) {
+                      val n = channels.firstOrNull { it.id == cur.id }
+                      if (n != null) {
+                          val changed = n.url != cur.url || n.license != cur.license
+                          current = n
+                          if (changed && fullscreen) playNonce++
+                      }
+                  }
+                  zapList = zapList.mapNotNull { z -> channels.firstOrNull { it.id == z.id } }
+                  prefetchEpg()
+
+                  if (!resumed) {
+                      resumed = true
+                      if (resumeLast && store.lastChannel.isNotEmpty()) {
+                          channels.firstOrNull { it.id == store.lastChannel }?.let {
+                              play(it, channels)
+                              fullscreen = true
+                          }
+                      }
+                  }
+              }
+
+              /* ---------------------------------------------------------------- EPG */
+
+              private fun prefetchEpg() {
+                  epgJob?.cancel()
+                  val list = channels
+                  epgJob = viewModelScope.launch {
+                      val sem = Semaphore(4)
+                      coroutineScope {
+                          list.forEach { c ->
+                              launch {
+                                  sem.withPermit {
+                                      ensureEpg(c.id, 0)
+                                      ensureEpg(c.id, 1)
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              suspend fun ensureEpg(id: String, offset: Int) {
+                  val k = "$id:$offset"
+                  val t = epgAt[k] ?: 0L
+                  if (System.currentTimeMillis() - t < 3 * 3_600_000L) return
+                  epgAt[k] = System.currentTimeMillis()
+                  val l = withContext(Dispatchers.IO) {
+                      try { EpgApi.fetch(id, offset) } catch (e: Exception) { null }
+                  }
+                  if (l != null) epg[k] = l else epgAt.remove(k)
+              }
+
+              fun nowNext(ch: Channel): Pair<Program?, Program?> {
+                  val a = epg["${ch.id}:0"] ?: emptyList()
+                  val b = epg["${ch.id}:1"] ?: emptyList()
+                  var i = a.indexOfFirst { now >= it.start && now < it.stop }
+                  if (i >= 0) {
+                      val cur = a[i]
+                      return Pair(cur, a.getOrNull(i + 1) ?: b.firstOrNull { it.start >= cur.stop })
+                  }
+                  i = b.indexOfFirst { now >= it.start && now < it.stop }
+                  if (i >= 0) return Pair(b[i], b.getOrNull(i + 1))
+                  return Pair(null, a.firstOrNull { it.start > now } ?: b.firstOrNull { it.start > now })
+              }
+
+              /* ------------------------------------------------------------- channels */
+
+              fun filter(g: String): List<Channel> = when (g) {
+                  G_ALL -> channels
+                  G_FAV -> channels.filter { it.id in favorites }
+                  G_RECENT -> recents.mapNotNull { id -> channels.firstOrNull { it.id == id } }
+                  else -> channels.filter { it.category == g }
+              }
+
+              fun search(q: String): List<Channel> {
+                  val s = q.trim().lowercase()
+                  if (s.length < 2) return emptyList()
+                  return channels.filter {
+                      it.name.lowercase().contains(s) ||
+                          it.category.lowercase().contains(s) ||
+                          (nowNext(it).first?.title?.lowercase()?.contains(s) == true)
+                  }.take(200)
+              }
+
+              fun toggleFav(ch: Channel) {
+                  favorites = if (ch.id in favorites) favorites - ch.id else favorites + ch.id
+                  store.saveFavorites(favorites)
+              }
+
+              /* -------------------------------------------------------------- playback */
+
+              fun play(ch: Channel, list: List<Channel>) {
+                  if (current?.id != ch.id) previous = current
+                  current = ch
+                  focused = ch
+                  zapList = list
+                  store.lastChannel = ch.id
+                  recents = (listOf(ch.id) + recents.filter { it != ch.id }).take(30)
+                  store.saveRecents(recents)
+                  playNonce++
+              }
+
+              fun zap(d: Int) {
+                  val l = zapList
+                  if (l.isEmpty()) return
+                  val i = l.indexOfFirst { it.id == current?.id }
+                  play(l[(i + d + l.size).mod(l.size)], l)
+              }
+
+              fun recall() {
+                  previous?.let { play(it, zapList) }
+              }
+
+              /* -------------------------------------------------------------- settings */
+
+              fun setUa(v: String) {
+                  userAgent = v
+                  store.userAgent = v
+              }
+
+              fun updateExtraHeaders(v: String) {
+                  extraHeaders = v
+                  store.extraHeaders = v
+              }
+
+              fun setResume(v: Boolean) {
+                  resumeLast = v
+                  store.resumeLast = v
+              }
+
+              fun updateAspect(v: Int) {
+                  aspect = v
+                  store.aspect = v
+              }
+          }
+          __SB_EOF__
+
+          cat > app/src/main/java/com/livetv/glass/PlayerController.kt <<'__SB_EOF__'
+          package com.livetv.glass
 
           import android.content.Context
           import android.media.MediaDrm
@@ -1120,8 +984,6 @@ jobs:
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.setValue
-          import org.json.JSONArray
-          import org.json.JSONObject
           import androidx.media3.common.AudioAttributes
           import androidx.media3.common.C
           import androidx.media3.common.Format
@@ -1133,8 +995,8 @@ jobs:
           import androidx.media3.common.Tracks
           import androidx.media3.common.VideoSize
           import androidx.media3.datasource.DefaultDataSource
-          import androidx.media3.datasource.okhttp.OkHttpDataSource
           import androidx.media3.datasource.HttpDataSource
+          import androidx.media3.datasource.okhttp.OkHttpDataSource
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
           import androidx.media3.exoplayer.drm.DefaultDrmSessionManagerProvider
@@ -1142,13 +1004,15 @@ jobs:
           import androidx.media3.exoplayer.drm.FrameworkMediaDrm
           import androidx.media3.exoplayer.drm.LocalMediaDrmCallback
           import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+          import org.json.JSONArray
+          import org.json.JSONObject
           import java.util.Locale
           import java.util.UUID
           import kotlin.math.roundToInt
 
           data class TrackOpt(val label: String, val group: Tracks.Group, val index: Int, val selected: Boolean)
 
-          /** Helpers to turn "KID:KEY" (hex or base64) pairs into a ClearKey JSON license. */
+          /** Helpers to turn license strings into a DRM configuration. */
           object Drm {
               private val hex = Regex("^[0-9a-fA-F]+$")
 
@@ -1188,7 +1052,6 @@ jobs:
                                   pairs.add(Pair(o.getString("kid"), o.getString("k")))
                               }
                           } else {
-                              // {"kid":"key", ...} map form
                               val iter = root.keys()
                               while (iter.hasNext()) {
                                   val kk = iter.next()
@@ -1219,20 +1082,18 @@ jobs:
                   return build(pairs)
               }
 
-              fun scheme(type: String, key: String): UUID? {
-                  val t = type.lowercase()
-                  if (t.contains("clearkey")) return C.CLEARKEY_UUID
-                  if (t.contains("widevine")) return C.WIDEVINE_UUID
-                  if (t.contains("playready")) return C.PLAYREADY_UUID
-                  if (t.isBlank() && key.isNotBlank()) {
-                      val k = key.trim()
-                      return if (k.startsWith("{") || (!k.startsWith("http", true) && k.contains(':'))) C.CLEARKEY_UUID
-                      else C.WIDEVINE_UUID
+              /** JSON keys / "kid:key" -> ClearKey, http(s) url -> Widevine license server, empty -> clear stream. */
+              fun scheme(license: String): UUID? {
+                  val k = license.trim()
+                  if (k.isEmpty()) return null
+                  return if (k.startsWith("{") || k.startsWith("[") || (!k.startsWith("http", true) && k.contains(':'))) {
+                      C.CLEARKEY_UUID
+                  } else {
+                      C.WIDEVINE_UUID
                   }
-                  return null
               }
 
-              /** "https://license|Header=a&Header2=b|..." (Kodi style) -> url + headers */
+              /** "https://license|Header=a&Header2=b" (Kodi style) -> url + headers */
               fun license(k: String): Pair<String, Map<String, String>> {
                   val parts = k.trim().split('|')
                   val hdr = HashMap<String, String>()
@@ -1247,7 +1108,6 @@ jobs:
           }
 
           class PlayerController(private val ctx: Context) {
-              // OkHttp + RFC 6265 cookie jar: Set-Cookie from the manifest/CDN is replayed on every later request
               private val http = OkHttpDataSource.Factory(Http.client)
 
               private val defaultDrm = DefaultDrmSessionManagerProvider().apply { setDrmHttpDataSourceFactory(http) }
@@ -1308,10 +1168,10 @@ jobs:
                           }
                           val detail = describe(e)
                           val isDrm = e.errorCode in 6000..6999
-                          if (!isDrm && retries < 3) {
+                          if (!isDrm && retries < 5) {
                               retries++
-                              error = "Reconnecting ($retries/3)\n$detail" + netTail()
-                              handler.postDelayed({ player.prepare() }, 2500)
+                              error = "Reconnecting ($retries/5)\n$detail" + netTail()
+                              handler.postDelayed({ player.prepare() }, 1200)
                           } else {
                               error = "Playback failed\n$detail" + hint(e.errorCode) + netTail()
                           }
@@ -1340,12 +1200,12 @@ jobs:
               private fun hint(code: Int): String = when (code) {
                   6001 -> "\n\nThis device does not support the DRM scheme used by the stream."
                   6002 -> "\n\nDRM provisioning failed (device certificate could not be fetched)."
-                  6003 -> "\n\nThe license server rejected the request. Check the license URL, its headers, and that the stream/token has not expired."
+                  6003 -> "\n\nThe license server rejected the request. The session may have expired."
                   6004 -> "\n\nDRM operation not allowed on this device."
                   6006 -> "\n\nThis device's DRM certificate was revoked."
                   6007 -> "\n\nThe DRM license has expired."
                   6008 -> "\n\nDRM content error - for ClearKey this usually means a wrong KID:KEY."
-                  2004 -> "\n\nThe server answered with an HTTP error. The link may be expired or need different headers/User-Agent."
+                  2004 -> "\n\nThe server answered with an HTTP error. The link may be expired or need a different User-Agent."
                   2001 -> "\n\nNo network connection."
                   3001, 3002 -> "\n\nThe manifest could not be parsed. Is it really an MPD/HLS stream?"
                   else -> ""
@@ -1370,26 +1230,24 @@ jobs:
                   Http.jar.clear()
                   val hdr = LinkedHashMap<String, String>(parseHeaderLines(extra))
                   hdr.putAll(ch.headers)
-                  if (ch.referer.isNotBlank() && hdr.keys.none { it.equals("Referer", true) }) hdr["Referer"] = ch.referer
                   val cookieKey = hdr.keys.firstOrNull { it.equals("Cookie", true) }
                   Http.jar.fixed = if (cookieKey != null) (hdr.remove(cookieKey) ?: "") else ""
                   val uaOverride = hdr.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value
                   hdr.keys.removeAll { it.equals("User-Agent", true) }
-                  val ua = uaOverride ?: ch.ua.ifBlank { defaultUa }
+                  val ua = uaOverride ?: defaultUa
                   val clean = Http.cleanHeaders(hdr)
                   http.setUserAgent(ua)
                   http.setDefaultRequestProperties(clean)
+                  val scheme = Drm.scheme(ch.license)
                   NetLog.add(
-                      "PLAY " + ch.url.substringAfter("://").substringBefore('?').take(70) +
-                          "  UA=" + ua.take(40) + "  headers=" + clean.keys.joinToString(",").ifEmpty { "none" } +
-                          "  manual cookie=" + (if (Http.jar.fixed.isBlank()) "no" else "yes") +
-                          "  drm=" + (if (ch.drmType.isBlank() && ch.drmKey.isBlank()) "no" else ch.drmType.ifBlank { "auto" })
+                      "PLAY " + ch.name + "  " + ch.url.substringAfter("://").substringBefore('?').take(60) +
+                          "  UA=" + ua.take(30) + "  headers=" + clean.keys.joinToString(",").ifEmpty { "none" } +
+                          "  drm=" + (if (scheme == null) "no" else if (scheme == C.CLEARKEY_UUID) "clearkey" else "widevine")
                   )
 
                   val url = ch.url
                   val low = url.lowercase()
                   val b = MediaItem.Builder().setUri(url)
-                  val scheme = Drm.scheme(ch.drmType, ch.drmKey)
 
                   if (scheme != null) {
                       if (!supported(scheme)) {
@@ -1401,28 +1259,27 @@ jobs:
                           error = "This device does not support $nm DRM.\n(MediaDrm.isCryptoSchemeSupported = false)"
                           return
                       }
-                      val key = ch.drmKey.trim()
+                      val key = ch.license.trim()
                       val dc = MediaItem.DrmConfiguration.Builder(scheme).setMultiSession(true)
-                      if (scheme == C.CLEARKEY_UUID && key.isNotEmpty() && !key.startsWith("http", true)) {
+                      if (scheme == C.CLEARKEY_UUID) {
                           val json = Drm.clearKeyJson(key)
                           if (json == null) {
-                              error = "Invalid ClearKey.\nExpected KID:KEY (hex), e.g. 0123...:abcd... \nMultiple keys: separate with a comma."
+                              error = "Invalid ClearKey received from the server."
                               return
                           }
                           localDrm = DefaultDrmSessionManager.Builder()
                               .setUuidAndExoMediaDrmProvider(C.CLEARKEY_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
                               .setMultiSession(true)
                               .build(LocalMediaDrmCallback(json.toByteArray()))
-                      } else if (key.isNotEmpty()) {
-                          val (licUrl, hdr) = Drm.license(key)
-                          dc.setLicenseUri(licUrl).setLicenseRequestHeaders(hdr).setForceDefaultLicenseUri(true)
+                      } else {
+                          val (licUrl, lh) = Drm.license(key)
+                          dc.setLicenseUri(licUrl).setLicenseRequestHeaders(lh).setForceDefaultLicenseUri(true)
                       }
                       b.setDrmConfiguration(dc.build())
                   }
 
-                  val isHls = ch.mime == "hls" || low.contains(".m3u8")
-                  val isMpd = ch.mime == "mpd" || ch.mime == "dash" || low.contains(".mpd") ||
-                      (scheme != null && !isHls)
+                  val isHls = low.contains(".m3u8")
+                  val isMpd = low.contains(".mpd") || (scheme != null && !isHls)
                   if (isMpd) b.setMimeType(MimeTypes.APPLICATION_MPD)
                   else if (isHls) b.setMimeType(MimeTypes.APPLICATION_M3U8)
 
@@ -1491,86 +1348,379 @@ jobs:
           }
           __SB_EOF__
 
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/Ui.kt <<'__SB_EOF__'
-          package com.streambox.player
+          cat > app/src/main/java/com/livetv/glass/Glass.kt <<'__SB_EOF__'
+          package com.livetv.glass
 
-          import android.net.Uri
-          import androidx.activity.compose.rememberLauncherForActivityResult
-          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.animation.core.LinearEasing
+          import androidx.compose.animation.core.RepeatMode
+          import androidx.compose.animation.core.animateFloat
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.infiniteRepeatable
+          import androidx.compose.animation.core.rememberInfiniteTransition
+          import androidx.compose.animation.core.spring
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.ExperimentalFoundationApi
           import androidx.compose.foundation.background
-          import androidx.compose.foundation.clickable
-          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.combinedClickable
+          import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.interaction.collectIsFocusedAsState
+          import androidx.compose.foundation.interaction.collectIsPressedAsState
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Icon
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedTextFieldDefaults
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.CompositionLocalProvider
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.State
+          import androidx.compose.runtime.compositionLocalOf
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberUpdatedState
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.draw.drawWithContent
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Shape
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.graphics.lerp
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlin.math.PI
+          import kotlin.math.cos
+          import kotlin.math.maxOf
+          import kotlin.math.sin
+
+          val Accent = Color(0xFF7AB8FF)
+          val Accent2 = Color(0xFFB69CFF)
+          val Ink = Color(0xFF05070D)
+          val Dim = Color(0xFFB5BDCC)
+
+          /** Shared 0..360 phase that drives every glow / aurora animation (read only in draw phase). */
+          val LocalGlow = compositionLocalOf<State<Float>> { mutableStateOf(0f) }
+
+          @Composable
+          fun AppTheme(content: @Composable () -> Unit) {
+              val t = rememberInfiniteTransition(label = "glow")
+              val phase = t.animateFloat(
+                  initialValue = 0f,
+                  targetValue = 360f,
+                  animationSpec = infiniteRepeatable(animation = tween(9000, easing = LinearEasing), repeatMode = RepeatMode.Restart),
+                  label = "phase"
+              )
+              CompositionLocalProvider(LocalGlow provides phase) {
+                  MaterialTheme(
+                      colorScheme = darkColorScheme(
+                          primary = Accent,
+                          onPrimary = Color.Black,
+                          background = Ink,
+                          surface = Color(0xFF121826),
+                          surfaceVariant = Color(0x33FFFFFF),
+                          onSurface = Color.White,
+                          onBackground = Color.White,
+                          onSurfaceVariant = Dim,
+                          secondaryContainer = Color(0xFF26324A)
+                      ),
+                      content = content
+                  )
+              }
+          }
+
+          /** Slowly drifting colour blobs - gives the glass something to refract. */
+          @Composable
+          fun Aurora(modifier: Modifier = Modifier) {
+              val phase = LocalGlow.current
+              Canvas(modifier.fillMaxSize()) {
+                  drawRect(Ink)
+                  val r = phase.value * (PI.toFloat() / 180f)
+                  val w = size.width
+                  val h = size.height
+                  val big = maxOf(w, h)
+                  fun blob(c: Color, cx: Float, cy: Float, rad: Float) {
+                      drawCircle(
+                          brush = Brush.radialGradient(listOf(c, Color.Transparent), center = Offset(cx, cy), radius = rad),
+                          radius = rad,
+                          center = Offset(cx, cy)
+                      )
+                  }
+                  blob(Color(0x663D7BFF), w * (0.2f + 0.12f * sin(r)), h * (0.25f + 0.10f * cos(r)), big * 0.6f)
+                  blob(Color(0x55A855FF), w * (0.8f + 0.10f * cos(r)), h * (0.30f + 0.12f * sin(r * 2f)), big * 0.55f)
+                  blob(Color(0x4422D3EE), w * (0.5f + 0.15f * sin(r * 2f)), h * (0.90f + 0.06f * cos(r * 3f)), big * 0.6f)
+              }
+          }
+
+          /** Frosted "liquid glass" surface: tinted gradient, specular top sheen, bright rim. */
+          fun Modifier.glass(
+              shape: Shape = RoundedCornerShape(24.dp),
+              alpha: Float = 0.12f,
+              tint: Color = Color.White
+          ): Modifier = this
+              .clip(shape)
+              .background(Brush.linearGradient(listOf(tint.copy(alpha = alpha * 1.7f), tint.copy(alpha = alpha * 0.6f))))
+              .drawWithContent {
+                  drawContent()
+                  drawRect(
+                      brush = Brush.verticalGradient(
+                          listOf(Color.White.copy(alpha = 0.16f), Color.Transparent),
+                          startY = 0f,
+                          endY = size.height * 0.45f
+                      ),
+                      size = Size(size.width, size.height * 0.45f)
+                  )
+              }
+              .border(
+                  1.dp,
+                  Brush.linearGradient(listOf(Color.White.copy(alpha = 0.55f), Color.White.copy(alpha = 0.08f), Color.White.copy(alpha = 0.28f))),
+                  shape
+              )
+
+          /**
+           * Apple TV style focus: springy scale-up, soft halo, and a travelling light on the rim.
+           * Apply BEFORE .glass() so the scale/halo wrap the glass surface.
+           */
+          @OptIn(ExperimentalFoundationApi::class)
+          @Composable
+          fun Modifier.focusGlow(
+              corner: Dp = 22.dp,
+              focusScale: Float = 1.07f,
+              onFocused: (() -> Unit)? = null,
+              onLongClick: (() -> Unit)? = null,
+              onClick: () -> Unit
+          ): Modifier {
+              val src = remember { MutableInteractionSource() }
+              val focused by src.collectIsFocusedAsState()
+              val pressed by src.collectIsPressedAsState()
+              val scale by animateFloatAsState(
+                  if (pressed) 0.96f else if (focused) focusScale else 1f,
+                  spring(dampingRatio = 0.6f, stiffness = 380f),
+                  label = "scale"
+              )
+              val glow by animateFloatAsState(if (focused) 1f else 0f, tween(280), label = "glow")
+              val phase = LocalGlow.current
+              val cb by rememberUpdatedState(onFocused)
+              LaunchedEffect(focused) { if (focused) cb?.invoke() }
+
+              return this
+                  .graphicsLayer {
+                      scaleX = scale
+                      scaleY = scale
+                  }
+                  .drawBehind {
+                      if (glow > 0.01f) {
+                          val r = corner.toPx()
+                          for (i in 1..4) {
+                              val g = i * 5.dp.toPx()
+                              drawRoundRect(
+                                  color = Accent.copy(alpha = 0.16f * glow / i),
+                                  topLeft = Offset(-g, -g),
+                                  size = Size(size.width + 2 * g, size.height + 2 * g),
+                                  cornerRadius = CornerRadius(r + g)
+                              )
+                          }
+                      }
+                  }
+                  .drawWithContent {
+                      drawContent()
+                      if (glow > 0.01f) {
+                          val rad = phase.value * (PI.toFloat() / 180f)
+                          val n = 24
+                          val cols = List(n + 1) { i ->
+                              val k = i % n
+                              val s = 0.5f + 0.5f * sin(2f * PI.toFloat() * k / n - rad)
+                              lerp(Accent2, Color.White, s * s)
+                          }
+                          drawRoundRect(
+                              brush = Brush.sweepGradient(cols),
+                              cornerRadius = CornerRadius(corner.toPx()),
+                              style = Stroke(width = 2.5.dp.toPx()),
+                              alpha = glow
+                          )
+                      }
+                  }
+                  .combinedClickable(
+                      interactionSource = src,
+                      indication = null,
+                      onLongClick = onLongClick,
+                      onClick = onClick
+                  )
+          }
+
+          @Composable
+          fun GlassButton(
+              label: String,
+              modifier: Modifier = Modifier,
+              icon: ImageVector? = null,
+              primary: Boolean = false,
+              onClick: () -> Unit
+          ) {
+              Row(
+                  modifier
+                      .focusGlow(corner = 100.dp, focusScale = 1.08f, onClick = onClick)
+                      .glass(RoundedCornerShape(50), if (primary) 0.30f else 0.12f, if (primary) Accent else Color.White)
+                      .padding(horizontal = 22.dp, vertical = 12.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.Center
+              ) {
+                  if (icon != null) {
+                      Icon(icon, null, tint = Color.White)
+                      Spacer(Modifier.width(8.dp))
+                  }
+                  Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1)
+              }
+          }
+
+          @Composable
+          fun GlassIconButton(
+              icon: ImageVector,
+              desc: String,
+              modifier: Modifier = Modifier,
+              tint: Color = Color.White,
+              size: Dp = 44.dp,
+              onClick: () -> Unit
+          ) {
+              Box(
+                  modifier.size(size)
+                      .focusGlow(corner = 100.dp, focusScale = 1.15f, onClick = onClick)
+                      .glass(CircleShape, 0.14f),
+                  contentAlignment = Alignment.Center
+              ) {
+                  Icon(icon, desc, tint = tint, modifier = Modifier.size(size * 0.5f))
+              }
+          }
+
+          @Composable
+          fun GlassPill(
+              label: String,
+              selected: Boolean,
+              modifier: Modifier = Modifier,
+              icon: ImageVector? = null,
+              onClick: () -> Unit
+          ) {
+              Row(
+                  modifier
+                      .focusGlow(corner = 100.dp, focusScale = 1.08f, onClick = onClick)
+                      .glass(RoundedCornerShape(50), if (selected) 0.30f else 0.10f, if (selected) Accent else Color.White)
+                      .padding(horizontal = if (label.isEmpty()) 12.dp else 16.dp, vertical = 9.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  if (icon != null) {
+                      Icon(icon, null, tint = if (selected) Color.White else Dim, modifier = Modifier.size(20.dp))
+                      if (label.isNotEmpty()) Spacer(Modifier.width(8.dp))
+                  }
+                  if (label.isNotEmpty()) {
+                      Text(
+                          label, color = if (selected) Color.White else Dim, fontSize = 14.sp,
+                          fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                          maxLines = 1, overflow = TextOverflow.Ellipsis
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          fun glassFieldColors() = OutlinedTextFieldDefaults.colors(
+              focusedBorderColor = Accent,
+              unfocusedBorderColor = Color.White.copy(alpha = 0.28f),
+              focusedContainerColor = Color.White.copy(alpha = 0.07f),
+              unfocusedContainerColor = Color.White.copy(alpha = 0.04f),
+              cursorColor = Accent,
+              focusedLabelColor = Accent,
+              unfocusedLabelColor = Dim
+          )
+          __SB_EOF__
+
+          cat > app/src/main/java/com/livetv/glass/Ui.kt <<'__SB_EOF__'
+          package com.livetv.glass
+
+          import androidx.compose.animation.Crossfade
+          import androidx.compose.foundation.background
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
           import androidx.compose.foundation.layout.Row
           import androidx.compose.foundation.layout.Spacer
-          import androidx.compose.foundation.layout.fillMaxHeight
+          import androidx.compose.foundation.layout.aspectRatio
           import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.foundation.layout.fillMaxWidth
           import androidx.compose.foundation.layout.height
           import androidx.compose.foundation.layout.padding
           import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.systemBarsPadding
           import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.layout.widthIn
           import androidx.compose.foundation.lazy.LazyColumn
           import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.GridItemSpan
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
           import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.lazy.rememberLazyListState
           import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardActions
+          import androidx.compose.foundation.text.KeyboardOptions
           import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.Add
-          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.Lock
           import androidx.compose.material.icons.filled.LiveTv
+          import androidx.compose.material.icons.filled.PlayArrow
           import androidx.compose.material.icons.filled.Refresh
           import androidx.compose.material.icons.filled.Schedule
           import androidx.compose.material.icons.filled.Search
           import androidx.compose.material.icons.filled.Settings
           import androidx.compose.material.icons.filled.Star
-          import androidx.compose.material.icons.filled.StarBorder
-          import androidx.compose.material3.Button
-          import androidx.compose.material3.Card
           import androidx.compose.material3.CircularProgressIndicator
-          import androidx.compose.material3.AlertDialog
-          import androidx.compose.material3.FilterChip
-          import androidx.compose.material3.HorizontalDivider
           import androidx.compose.material3.Icon
-          import androidx.compose.material3.IconButton
           import androidx.compose.material3.LinearProgressIndicator
           import androidx.compose.material3.MaterialTheme
-          import androidx.compose.material3.NavigationBar
-          import androidx.compose.material3.NavigationBarItem
-          import androidx.compose.material3.NavigationRail
-          import androidx.compose.material3.NavigationRailItem
-          import androidx.compose.material3.OutlinedButton
           import androidx.compose.material3.OutlinedTextField
-          import androidx.compose.material3.RadioButton
-          import androidx.compose.material3.Scaffold
-          import androidx.compose.material3.SnackbarHost
-          import androidx.compose.material3.SnackbarHostState
           import androidx.compose.material3.Switch
           import androidx.compose.material3.Text
-          import androidx.compose.material3.TextButton
-          import androidx.compose.material3.darkColorScheme
           import androidx.compose.runtime.Composable
           import androidx.compose.runtime.LaunchedEffect
           import androidx.compose.runtime.getValue
           import androidx.compose.runtime.mutableIntStateOf
-          import androidx.compose.runtime.mutableStateListOf
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.remember
           import androidx.compose.runtime.saveable.rememberSaveable
           import androidx.compose.runtime.setValue
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.alpha
+          import androidx.compose.ui.draw.blur
           import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.graphics.vector.ImageVector
           import androidx.compose.ui.layout.ContentScale
           import androidx.compose.ui.platform.LocalConfiguration
-          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.ImeAction
           import androidx.compose.ui.text.input.PasswordVisualTransformation
           import androidx.compose.ui.text.input.VisualTransformation
           import androidx.compose.ui.text.style.TextAlign
@@ -1583,45 +1733,34 @@ jobs:
           import java.util.Date
           import java.util.Locale
 
-          val Accent = Color(0xFF4C9AFF)
-
-          @Composable
-          fun AppTheme(content: @Composable () -> Unit) {
-              MaterialTheme(
-                  colorScheme = darkColorScheme(
-                      primary = Accent,
-                      onPrimary = Color.Black,
-                      background = Color(0xFF0E1117),
-                      surface = Color(0xFF151A23),
-                      surfaceVariant = Color(0xFF1E2430),
-                      onSurface = Color(0xFFE6EAF2),
-                      onBackground = Color(0xFFE6EAF2),
-                      onSurfaceVariant = Color(0xFF9AA4B5),
-                      secondaryContainer = Color(0xFF26324A)
-                  ),
-                  content = content
-              )
-          }
-
           private val HM = SimpleDateFormat("HH:mm", Locale.getDefault())
           fun hm(ms: Long): String = HM.format(Date(ms))
 
           fun progressOf(p: Program, now: Long): Float =
               ((now - p.start).toFloat() / (p.stop - p.start).coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
 
+          fun dayLabel(offset: Int, now: Long): String = when (offset) {
+              0 -> "Today"
+              1 -> "Tomorrow"
+              else -> SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(Date(now + offset * 86_400_000L))
+          }
+
+          @Composable
+          fun isWide(): Boolean = LocalConfiguration.current.screenWidthDp >= 640
+
           /* ============================================================ common bits */
 
           @Composable
           fun Logo(ch: Channel, size: Dp = 44.dp) {
               Box(
-                  Modifier.size(size).clip(RoundedCornerShape(8.dp))
-                      .background(MaterialTheme.colorScheme.surfaceVariant),
+                  Modifier.size(size).clip(RoundedCornerShape(size / 4))
+                      .background(Color.White.copy(alpha = 0.12f)),
                   contentAlignment = Alignment.Center
               ) {
                   if (ch.logo.isNotBlank()) {
                       AsyncImage(
                           model = ch.logo, contentDescription = null, contentScale = ContentScale.Fit,
-                          modifier = Modifier.fillMaxSize().padding(3.dp)
+                          modifier = Modifier.fillMaxSize().padding(size / 12)
                       )
                   } else {
                       Text(ch.name.take(1).uppercase(), fontWeight = FontWeight.Bold)
@@ -1630,459 +1769,470 @@ jobs:
           }
 
           @Composable
-          fun ChannelRow(vm: MainVM, ch: Channel, selected: Boolean, onClick: () -> Unit) {
-              val nn = vm.nowNext(ch)
-              val np = nn.first
-              Row(
-                  Modifier.fillMaxWidth()
-                      .background(if (selected) Accent.copy(alpha = 0.16f) else Color.Transparent)
-                      .clickable(onClick = onClick)
-                      .padding(horizontal = 12.dp, vertical = 8.dp),
-                  verticalAlignment = Alignment.CenterVertically
+          fun Banner(url: String, modifier: Modifier = Modifier) {
+              if (url.isNotBlank()) {
+                  AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = modifier)
+              }
+          }
+
+          @Composable
+          fun Loading(text: String) {
+              Column(
+                  Modifier.fillMaxSize(),
+                  verticalArrangement = Arrangement.Center,
+                  horizontalAlignment = Alignment.CenterHorizontally
               ) {
-                  Text(
-                      if (ch.num > 0) ch.num.toString() else "",
-                      Modifier.width(40.dp), fontSize = 12.sp,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant
-                  )
-                  Logo(ch)
-                  Spacer(Modifier.width(12.dp))
-                  Column(Modifier.weight(1f)) {
-                      Text(ch.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                      if (np != null) {
-                          Text(
-                              np.title, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant
-                          )
-                          LinearProgressIndicator(
-                              progress = { progressOf(np, vm.now) },
-                              modifier = Modifier.fillMaxWidth().padding(top = 4.dp).height(3.dp)
-                          )
-                      } else {
-                          Text(
-                              ch.group, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant
-                          )
-                      }
-                  }
-                  if (ch.num > 0) {
-                      val fav = ch.url in vm.favorites
-                      IconButton(onClick = { vm.toggleFav(ch) }) {
-                          Icon(
-                              if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
-                              tint = if (fav) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant
-                          )
-                      }
-                  }
+                  CircularProgressIndicator(color = Accent)
+                  Spacer(Modifier.height(16.dp))
+                  Text(text, color = Dim)
               }
           }
 
-          @Composable
-          fun ChannelList(
-              vm: MainVM, list: List<Channel>, modifier: Modifier,
-              onOpen: (Channel, List<Channel>) -> Unit
-          ) {
-              if (list.isEmpty()) {
-                  Box(modifier, contentAlignment = Alignment.Center) {
-                      Text("Nothing here yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                  }
-                  return
-              }
-              LazyColumn(modifier) {
-                  items(list, key = { it.num }) { ch ->
-                      ChannelRow(vm, ch, ch.url == vm.current?.url) { onOpen(ch, list) }
-                  }
-              }
-          }
+          /* ============================================================== TOKEN */
 
           @Composable
-          fun GroupList(vm: MainVM, modifier: Modifier) {
-              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.groups
-              LazyColumn(modifier.background(MaterialTheme.colorScheme.surface)) {
-                  items(all) { g ->
-                      val sel = g == vm.group
+          fun TokenScreen(vm: MainVM) {
+              var text by rememberSaveable { mutableStateOf(vm.token) }
+              Box(Modifier.fillMaxSize().systemBarsPadding(), contentAlignment = Alignment.Center) {
+                  Column(
+                      Modifier.padding(24.dp).widthIn(max = 460.dp).fillMaxWidth()
+                          .glass(RoundedCornerShape(34.dp), 0.12f)
+                          .padding(30.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally,
+                      verticalArrangement = Arrangement.spacedBy(14.dp)
+                  ) {
+                      Icon(Icons.Filled.LiveTv, null, tint = Accent, modifier = Modifier.size(52.dp))
+                      Text("Live TV", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold)
                       Text(
-                          g,
-                          Modifier.fillMaxWidth()
-                              .background(if (sel) Accent.copy(alpha = 0.18f) else Color.Transparent)
-                              .clickable { vm.group = g }
-                              .padding(14.dp),
-                          maxLines = 1, overflow = TextOverflow.Ellipsis,
-                          color = if (sel) Accent else MaterialTheme.colorScheme.onSurface
+                          "Enter your access token to unlock your channels",
+                          color = Dim, textAlign = TextAlign.Center
                       )
-                  }
-              }
-          }
-
-          @Composable
-          fun GroupChips(vm: MainVM) {
-              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.groups
-              LazyRow(
-                  Modifier.fillMaxWidth(),
-                  contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                  horizontalArrangement = Arrangement.spacedBy(8.dp)
-              ) {
-                  items(all) { g ->
-                      FilterChip(selected = g == vm.group, onClick = { vm.group = g }, label = { Text(g, maxLines = 1) })
-                  }
-              }
-          }
-
-          @Composable
-          fun PickRow(label: String, selected: Boolean, onClick: () -> Unit) {
-              Row(
-                  Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  RadioButton(selected = selected, onClick = null)
-                  Spacer(Modifier.width(12.dp))
-                  Text(label)
-              }
-          }
-
-          @Composable
-          fun FormDialog(
-              title: String, labels: List<String>, okLabel: String,
-              onDismiss: () -> Unit, onOk: (List<String>) -> Unit
-          ) {
-              val values = remember { mutableStateListOf<String>().apply { labels.forEach { add("") } } }
-              AlertDialog(
-                  onDismissRequest = onDismiss,
-                  title = { Text(title) },
-                  text = {
-                      Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                          labels.forEachIndexed { i, l ->
-                              OutlinedTextField(
-                                  value = values[i], onValueChange = { values[i] = it },
-                                  label = { Text(l) }, singleLine = true,
-                                  visualTransformation = if (l == "Password") PasswordVisualTransformation() else VisualTransformation.None,
-                                  modifier = Modifier.fillMaxWidth()
-                              )
-                          }
+                      OutlinedTextField(
+                          value = text, onValueChange = { text = it },
+                          label = { Text("Access token") }, singleLine = true,
+                          visualTransformation = VisualTransformation.None,
+                          keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                          keyboardActions = KeyboardActions(onGo = { vm.submitToken(text) }),
+                          colors = glassFieldColors(),
+                          shape = RoundedCornerShape(18.dp),
+                          modifier = Modifier.fillMaxWidth()
+                      )
+                      vm.tokenError?.let {
+                          Text(it, color = Color(0xFFFF8A80), fontSize = 13.sp, textAlign = TextAlign.Center)
                       }
-                  },
-                  confirmButton = { TextButton(onClick = { onOk(values.toList()); onDismiss() }) { Text(okLabel) } },
-                  dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-              )
-          }
-
-          @Composable
-          fun AddButtons(onAdd: (String) -> Unit) {
-              Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                  Button(onClick = { onAdd("url") }, modifier = Modifier.fillMaxWidth()) { Text("Add playlist URL (M3U / M3U8)") }
-                  OutlinedButton(onClick = { onAdd("file") }, modifier = Modifier.fillMaxWidth()) { Text("Import local playlist file") }
-                  OutlinedButton(onClick = { onAdd("xtream") }, modifier = Modifier.fillMaxWidth()) { Text("Xtream Codes login") }
-                  OutlinedButton(onClick = { onAdd("quick") }, modifier = Modifier.fillMaxWidth()) { Text("Quick play a stream URL") }
+                      GlassButton("Unlock", Modifier.fillMaxWidth(), Icons.Filled.Lock, primary = true) {
+                          vm.submitToken(text)
+                      }
+                  }
               }
           }
 
-          /* ================================================================== HOME */
+          /* =============================================================== HOME */
+
+          private val TABS = listOf(
+              "Live" to Icons.Filled.LiveTv,
+              "Guide" to Icons.Filled.Schedule,
+              "Search" to Icons.Filled.Search,
+              "Settings" to Icons.Filled.Settings
+          )
 
           @Composable
           fun HomeScreen(vm: MainVM) {
               var tab by rememberSaveable { mutableIntStateOf(0) }
-              var dlg by remember { mutableStateOf("") }
-              val snack = remember { SnackbarHostState() }
-              val wide = LocalConfiguration.current.screenWidthDp >= 720
-
-              val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-                  if (uri != null) {
-                      val nm = uri.lastPathSegment?.substringAfterLast('/')?.take(30) ?: "Local playlist"
-                      vm.addFile(uri, nm)
-                  }
-              }
-              val onAdd: (String) -> Unit = { kind ->
-                  if (kind == "file") picker.launch(arrayOf("*/*")) else dlg = kind
-              }
               val onOpen: (Channel, List<Channel>) -> Unit = { ch, l ->
                   vm.play(ch, l)
                   vm.fullscreen = true
               }
+              val bgCh = vm.focused ?: vm.current ?: vm.channels.firstOrNull()
+              val bgUrl = bgCh?.let { c -> vm.nowNext(c).first?.let { bannerUrl(it) } } ?: ""
 
-              LaunchedEffect(vm.toast) {
-                  vm.toast?.let {
-                      snack.showSnackbar(it)
-                      vm.toast = null
-                  }
-              }
-
-              val tabs: List<Pair<String, ImageVector>> = listOf(
-                  "TV" to Icons.Filled.LiveTv,
-                  "Guide" to Icons.Filled.Schedule,
-                  "Search" to Icons.Filled.Search,
-                  "Settings" to Icons.Filled.Settings
-              )
-
-              Scaffold(
-                  snackbarHost = { SnackbarHost(snack) },
-                  bottomBar = {
-                      if (!wide) {
-                          NavigationBar {
-                              tabs.forEachIndexed { i, t ->
-                                  NavigationBarItem(
-                                      selected = tab == i, onClick = { tab = i },
-                                      icon = { Icon(t.second, t.first) }, label = { Text(t.first) }
-                                  )
-                              }
-                          }
+              Box(Modifier.fillMaxSize()) {
+                  // blurred banner of the focused programme behind the glass
+                  Crossfade(bgUrl, label = "bg") { u ->
+                      if (u.isNotBlank()) {
+                          AsyncImage(
+                              model = u, contentDescription = null, contentScale = ContentScale.Crop,
+                              modifier = Modifier.fillMaxSize().blur(36.dp).alpha(0.38f)
+                          )
                       }
                   }
-              ) { pad ->
-                  Row(Modifier.padding(pad).fillMaxSize()) {
-                      if (wide) {
-                          NavigationRail {
-                              Spacer(Modifier.height(12.dp))
-                              tabs.forEachIndexed { i, t ->
-                                  NavigationRailItem(
-                                      selected = tab == i, onClick = { tab = i },
-                                      icon = { Icon(t.second, t.first) }, label = { Text(t.first) }
-                                  )
-                              }
-                          }
-                      }
-                      Column(Modifier.weight(1f).fillMaxHeight()) {
-                          if (vm.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                          if (vm.playlists.isEmpty() && tab != 3) {
-                              Welcome(onAdd)
-                          } else when (tab) {
-                              0 -> ChannelsTab(vm, onOpen)
+                  Box(
+                      Modifier.fillMaxSize().background(
+                          Brush.verticalGradient(listOf(Color(0x6605070D), Color(0xCC05070D)))
+                      )
+                  )
+                  Column(Modifier.fillMaxSize().systemBarsPadding()) {
+                      TopBar(tab) { tab = it }
+                      Box(Modifier.weight(1f).fillMaxWidth()) {
+                          when (tab) {
+                              0 -> LiveTab(vm, onOpen)
                               1 -> GuideTab(vm, onOpen)
                               2 -> SearchTab(vm, onOpen)
-                              else -> SettingsTab(vm, onAdd)
+                              else -> SettingsTab(vm)
                           }
                       }
                   }
               }
-
-              when (dlg) {
-                  "url" -> FormDialog(
-                      "Add playlist", listOf("Name", "M3U / M3U8 URL", "EPG URL (optional)"), "Add",
-                      { dlg = "" }
-                  ) { v -> if (v[1].isNotBlank()) vm.addUrl(v[0], v[1], v[2]) }
-                  "xtream" -> FormDialog(
-                      "Xtream Codes", listOf("Name", "Server (http://host:port)", "Username", "Password"), "Add",
-                      { dlg = "" }
-                  ) { v -> if (v[1].isNotBlank() && v[2].isNotBlank()) vm.addXtream(v[0], v[1], v[2], v[3]) }
-                  "quick" -> FormDialog(
-                      "Quick play",
-                      listOf("Stream URL (m3u8, ts, mpd...)", "DRM: clearkey or widevine (optional)", "License URL or KID:KEY (optional)"),
-                      "Play",
-                      { dlg = "" }
-                  ) { v -> vm.quickPlay(v[0], v[1], v[2]) }
-              }
           }
 
           @Composable
-          fun Welcome(onAdd: (String) -> Unit) {
-              Column(
-                  Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
-                  verticalArrangement = Arrangement.Center,
-                  horizontalAlignment = Alignment.CenterHorizontally
+          fun TopBar(tab: Int, onTab: (Int) -> Unit) {
+              val wide = isWide()
+              Row(
+                  Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                  verticalAlignment = Alignment.CenterVertically
               ) {
-                  Text("StreamBox", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Accent)
-                  Text(
-                      "Add your own IPTV playlist to get started",
-                      color = MaterialTheme.colorScheme.onSurfaceVariant,
-                      modifier = Modifier.padding(top = 4.dp, bottom = 24.dp),
-                      textAlign = TextAlign.Center
-                  )
-                  Box(Modifier.width(360.dp)) { AddButtons(onAdd) }
-              }
-          }
-
-          @Composable
-          fun ChannelsTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
-              val wide = LocalConfiguration.current.screenWidthDp >= 720
-              val list = remember(vm.channels, vm.group, vm.favorites, vm.recents) { vm.filter(vm.group) }
-              Row(Modifier.fillMaxSize()) {
-                  if (wide) GroupList(vm, Modifier.width(240.dp).fillMaxHeight())
-                  Column(Modifier.weight(1f)) {
-                      if (!wide) GroupChips(vm)
-                      ChannelList(vm, list, Modifier.weight(1f).fillMaxWidth(), onOpen)
+                  Icon(Icons.Filled.LiveTv, null, tint = Accent)
+                  Spacer(Modifier.width(10.dp))
+                  Text("Live TV", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+                  Spacer(Modifier.weight(1f))
+                  Row(
+                      Modifier.glass(RoundedCornerShape(50), 0.10f).padding(5.dp),
+                      horizontalArrangement = Arrangement.spacedBy(4.dp)
+                  ) {
+                      TABS.forEachIndexed { i, t ->
+                          GlassPill(if (wide) t.first else "", tab == i, icon = t.second) { onTab(i) }
+                      }
                   }
               }
           }
+
+          @Composable
+          fun CategoryRow(vm: MainVM) {
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
+              LazyRow(
+                  contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
+                  horizontalArrangement = Arrangement.spacedBy(10.dp)
+              ) {
+                  items(all) { g -> GlassPill(g, g == vm.category) { vm.category = g } }
+              }
+          }
+
+          @Composable
+          fun LiveTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
+              val list = remember(vm.channels, vm.category, vm.favorites, vm.recents) { vm.filter(vm.category) }
+              val heroCh = vm.focused ?: vm.current ?: vm.channels.firstOrNull()
+              Column(Modifier.fillMaxSize()) {
+                  CategoryRow(vm)
+                  ChannelGrid(vm, list, Modifier.weight(1f), onOpen) {
+                      if (heroCh != null) Hero(vm, heroCh) { onOpen(heroCh, list) }
+                  }
+              }
+          }
+
+          @Composable
+          fun ChannelGrid(
+              vm: MainVM,
+              list: List<Channel>,
+              modifier: Modifier,
+              onOpen: (Channel, List<Channel>) -> Unit,
+              header: (@Composable () -> Unit)? = null
+          ) {
+              val wide = isWide()
+              LazyVerticalGrid(
+                  columns = GridCells.Adaptive(if (wide) 230.dp else 160.dp),
+                  contentPadding = PaddingValues(horizontal = 22.dp, vertical = 18.dp),
+                  horizontalArrangement = Arrangement.spacedBy(18.dp),
+                  verticalArrangement = Arrangement.spacedBy(18.dp),
+                  modifier = modifier.fillMaxWidth()
+              ) {
+                  if (header != null) {
+                      item(span = { GridItemSpan(maxLineSpan) }) { header() }
+                  }
+                  if (list.isEmpty()) {
+                      item(span = { GridItemSpan(maxLineSpan) }) {
+                          Text("Nothing here yet", color = Dim, modifier = Modifier.padding(24.dp))
+                      }
+                  }
+                  items(list, key = { it.id }) { ch ->
+                      ChannelCard(vm, ch) { onOpen(ch, list) }
+                  }
+              }
+          }
+
+          @Composable
+          fun Hero(vm: MainVM, ch: Channel, onWatch: () -> Unit) {
+              val wide = isWide()
+              val nn = vm.nowNext(ch)
+              val np = nn.first
+              val url = if (np != null) bannerUrl(np) else ""
+              Box(
+                  Modifier.fillMaxWidth().height(if (wide) 280.dp else 220.dp)
+                      .glass(RoundedCornerShape(30.dp), 0.08f)
+              ) {
+                  Crossfade(url, label = "hero") { u ->
+                      if (u.isNotBlank()) Banner(u, Modifier.fillMaxSize())
+                  }
+                  Box(
+                      Modifier.fillMaxSize().background(
+                          Brush.horizontalGradient(listOf(Color(0xEE05070D), Color(0x9905070D), Color.Transparent))
+                      )
+                  )
+                  Column(
+                      Modifier.align(Alignment.BottomStart).padding(22.dp)
+                          .fillMaxWidth(if (wide) 0.58f else 0.92f),
+                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Logo(ch, 34.dp)
+                          Spacer(Modifier.width(10.dp))
+                          Text(ch.name, color = Dim, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      }
+                      Text(
+                          np?.title ?: "Live now", fontSize = if (wide) 26.sp else 21.sp,
+                          fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+                      )
+                      if (np != null) {
+                          Text(
+                              "${hm(np.start)} - ${hm(np.stop)}" + (if (np.genre.isNotBlank()) "  -  ${np.genre}" else ""),
+                              color = Accent, fontSize = 13.sp
+                          )
+                          LinearProgressIndicator(
+                              progress = { progressOf(np, vm.now) },
+                              modifier = Modifier.fillMaxWidth(0.6f).height(3.dp),
+                              color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
+                          )
+                          if (np.desc.isNotBlank()) {
+                              Text(np.desc, color = Dim, fontSize = 13.sp, maxLines = if (wide) 3 else 2, overflow = TextOverflow.Ellipsis)
+                          }
+                      }
+                      Spacer(Modifier.height(4.dp))
+                      GlassButton("Watch live", icon = Icons.Filled.PlayArrow, primary = true, onClick = onWatch)
+                  }
+              }
+          }
+
+          @Composable
+          fun ChannelCard(vm: MainVM, ch: Channel, onOpen: () -> Unit) {
+              val np = vm.nowNext(ch).first
+              val fav = ch.id in vm.favorites
+              val url = if (np != null) bannerUrl(np) else ""
+              Column(
+                  Modifier.fillMaxWidth()
+                      .focusGlow(
+                          corner = 22.dp, focusScale = 1.08f,
+                          onFocused = { vm.focused = ch },
+                          onLongClick = { vm.toggleFav(ch) },
+                          onClick = onOpen
+                      )
+                      .glass(RoundedCornerShape(22.dp), 0.10f)
+              ) {
+                  Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                      if (url.isNotBlank()) {
+                          Banner(url, Modifier.fillMaxSize())
+                      } else {
+                          Box(
+                              Modifier.fillMaxSize().background(
+                                  Brush.linearGradient(listOf(Accent.copy(alpha = 0.22f), Accent2.copy(alpha = 0.12f)))
+                              )
+                          )
+                      }
+                      Box(
+                          Modifier.fillMaxSize().background(
+                              Brush.verticalGradient(listOf(Color.Transparent, Color(0xAA05070D)))
+                          )
+                      )
+                      Box(Modifier.align(Alignment.BottomStart).padding(8.dp)) { Logo(ch, 36.dp) }
+                      if (fav) {
+                          Icon(
+                              Icons.Filled.Star, "Favorite", tint = Color(0xFFFFC107),
+                              modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).size(20.dp)
+                          )
+                      }
+                  }
+                  Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                      Text(ch.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      Text(
+                          np?.title ?: ch.category, fontSize = 12.sp, color = Dim,
+                          maxLines = 1, overflow = TextOverflow.Ellipsis
+                      )
+                      if (np != null) {
+                          LinearProgressIndicator(
+                              progress = { progressOf(np, vm.now) },
+                              modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(3.dp),
+                              color = Accent, trackColor = Color.White.copy(alpha = 0.15f)
+                          )
+                      }
+                  }
+              }
+          }
+
+          /* ============================================================== SEARCH */
 
           @Composable
           fun SearchTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
               var q by rememberSaveable { mutableStateOf("") }
-              val res = remember(q, vm.channels, vm.epg) { vm.search(q) }
+              val res = vm.search(q)
               Column(Modifier.fillMaxSize()) {
                   OutlinedTextField(
                       value = q, onValueChange = { q = it }, singleLine = true,
-                      placeholder = { Text("Search channels, groups, programs") },
-                      leadingIcon = { Icon(Icons.Filled.Search, null) },
-                      modifier = Modifier.fillMaxWidth().padding(12.dp)
+                      placeholder = { Text("Search channels, categories, programmes", color = Dim) },
+                      leadingIcon = { Icon(Icons.Filled.Search, null, tint = Dim) },
+                      colors = glassFieldColors(),
+                      shape = RoundedCornerShape(50),
+                      modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp)
                   )
-                  ChannelList(vm, res, Modifier.weight(1f).fillMaxWidth(), onOpen)
+                  ChannelGrid(vm, res, Modifier.weight(1f), onOpen)
               }
           }
 
-          /* ================================================================= GUIDE */
+          /* =============================================================== GUIDE */
 
           @Composable
           fun GuideTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
-              val slot = 30 * 60_000L
-              val start = remember(vm.now / slot) { vm.now / slot * slot }
-              val end = start + 6 * 3_600_000L
-              val list = remember(vm.group, vm.channels, vm.favorites, vm.recents) { vm.filter(vm.group) }
-              val dpm = 4
+              var selId by rememberSaveable { mutableStateOf(vm.current?.id ?: vm.channels.firstOrNull()?.id ?: "") }
+              var day by rememberSaveable { mutableIntStateOf(0) }
+              val ch = vm.channels.firstOrNull { it.id == selId } ?: vm.channels.firstOrNull()
+              LaunchedEffect(ch?.id, day) { ch?.let { vm.ensureEpg(it.id, day) } }
+              val progs = if (ch != null) (vm.epg["${ch.id}:$day"] ?: emptyList()) else emptyList()
+              val state = rememberLazyListState()
+              LaunchedEffect(ch?.id, day, progs.size) {
+                  val li = if (day == 0) progs.indexOfFirst { System.currentTimeMillis() >= it.start && System.currentTimeMillis() < it.stop } else 0
+                  state.scrollToItem(if (li > 0) li else 0)
+              }
               Column(Modifier.fillMaxSize()) {
-                  if (vm.epg.byId.isEmpty()) {
-                      Text(
-                          "No EPG loaded. Use a playlist with url-tvg or add an XMLTV URL in Settings.",
-                          Modifier.padding(12.dp), fontSize = 13.sp,
-                          color = MaterialTheme.colorScheme.onSurfaceVariant
-                      )
-                  }
-                  GroupChips(vm)
-                  Column(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
-                      Row(Modifier.height(28.dp)) {
-                          Spacer(Modifier.width(150.dp))
-                          for (i in 0 until 12) {
-                              Box(Modifier.width((30 * dpm).dp)) {
-                                  Text(
-                                      hm(start + i * slot), fontSize = 12.sp,
-                                      color = MaterialTheme.colorScheme.onSurfaceVariant
-                                  )
-                              }
-                          }
-                      }
-                      LazyColumn(Modifier.weight(1f)) {
-                          items(list, key = { it.num }) { ch ->
-                              GuideRow(vm, ch, start, end, dpm) { onOpen(ch, list) }
-                          }
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          fun GuideRow(vm: MainVM, ch: Channel, start: Long, end: Long, dpm: Int, onClick: () -> Unit) {
-              val progs = vm.programs(ch)
-              Row(Modifier.height(56.dp)) {
-                  Row(
-                      Modifier.width(150.dp).fillMaxHeight()
-                          .background(MaterialTheme.colorScheme.surface)
-                          .clickable(onClick = onClick).padding(6.dp),
-                      verticalAlignment = Alignment.CenterVertically
+                  LazyRow(
+                      contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+                      horizontalArrangement = Arrangement.spacedBy(10.dp)
                   ) {
-                      Logo(ch, 36.dp)
-                      Spacer(Modifier.width(6.dp))
-                      Text(ch.name, maxLines = 2, fontSize = 13.sp, overflow = TextOverflow.Ellipsis)
+                      items((0..10).toList()) { d -> GlassPill(dayLabel(d, vm.now), d == day) { day = d } }
                   }
-                  var cursor = start
-                  var any = false
-                  for (p in progs) {
-                      val s = maxOf(p.start, cursor)
-                      val e = minOf(p.stop, end)
-                      if (e <= s) continue
-                      if (s > cursor) Spacer(Modifier.width(((s - cursor) / 60000f * dpm).dp))
-                      val live = vm.now >= p.start && vm.now < p.stop
-                      Box(
-                          Modifier.width(((e - s) / 60000f * dpm).dp).fillMaxHeight().padding(1.dp)
-                              .clip(RoundedCornerShape(4.dp))
-                              .background(if (live) Accent.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant)
-                              .clickable(onClick = onClick).padding(6.dp)
-                      ) {
-                          Column {
-                              Text(p.title, maxLines = 1, fontSize = 13.sp, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-                              Text(
-                                  "${hm(p.start)} - ${hm(p.stop)}", fontSize = 11.sp, maxLines = 1,
-                                  color = MaterialTheme.colorScheme.onSurfaceVariant
-                              )
-                          }
+                  LazyRow(
+                      contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+                      horizontalArrangement = Arrangement.spacedBy(12.dp)
+                  ) {
+                      items(vm.channels, key = { it.id }) { c ->
+                          ChannelChip(c, c.id == ch?.id) { selId = c.id }
                       }
-                      cursor = e
-                      any = true
                   }
-                  if (!any) {
-                      Box(
-                          Modifier.width((360 * dpm).dp).fillMaxHeight().padding(1.dp)
-                              .background(MaterialTheme.colorScheme.surfaceVariant)
-                              .clickable(onClick = onClick).padding(6.dp),
-                          contentAlignment = Alignment.CenterStart
-                      ) {
-                          Text("No information", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                  if (progs.isEmpty()) {
+                      Text("No schedule available", color = Dim, modifier = Modifier.padding(24.dp))
+                  }
+                  LazyColumn(
+                      state = state, modifier = Modifier.weight(1f),
+                      contentPadding = PaddingValues(horizontal = 22.dp, vertical = 14.dp),
+                      verticalArrangement = Arrangement.spacedBy(12.dp)
+                  ) {
+                      items(progs) { p ->
+                          ProgramRow(vm, p) { if (ch != null) onOpen(ch, vm.channels) }
                       }
                   }
               }
           }
 
-          /* =============================================================== SETTINGS */
+          @Composable
+          fun ChannelChip(ch: Channel, selected: Boolean, onClick: () -> Unit) {
+              Column(
+                  Modifier.width(88.dp)
+                      .focusGlow(corner = 18.dp, focusScale = 1.1f, onClick = onClick)
+                      .glass(RoundedCornerShape(18.dp), if (selected) 0.30f else 0.10f, if (selected) Accent else Color.White)
+                      .padding(8.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally
+              ) {
+                  Logo(ch, 48.dp)
+                  Spacer(Modifier.height(4.dp))
+                  Text(ch.name, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (selected) Color.White else Dim)
+              }
+          }
 
           @Composable
-          fun SettingsTab(vm: MainVM, onAdd: (String) -> Unit) {
+          fun ProgramRow(vm: MainVM, p: Program, onClick: () -> Unit) {
+              val live = vm.now >= p.start && vm.now < p.stop
+              val past = vm.now >= p.stop
+              Row(
+                  Modifier.fillMaxWidth().alpha(if (past) 0.55f else 1f)
+                      .focusGlow(corner = 20.dp, focusScale = 1.03f, onClick = onClick)
+                      .glass(RoundedCornerShape(20.dp), if (live) 0.18f else 0.09f, if (live) Accent else Color.White)
+                      .padding(10.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Box(
+                      Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(12.dp))
+                          .background(Color.White.copy(alpha = 0.08f))
+                  ) { Banner(bannerUrl(p), Modifier.fillMaxSize()) }
+                  Spacer(Modifier.width(14.dp))
+                  Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                      Row {
+                          Text("${hm(p.start)} - ${hm(p.stop)}", color = Accent, fontSize = 12.sp)
+                          if (live) Text("   LIVE", color = Color(0xFFFF6B6B), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                      Text(p.title, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      val sub = listOf(p.genre, p.category).filter { it.isNotBlank() }.distinct().joinToString("  -  ")
+                      if (sub.isNotEmpty()) Text(sub, color = Dim, fontSize = 12.sp, maxLines = 1)
+                      if (p.desc.isNotBlank()) Text(p.desc, color = Dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                      if (live) {
+                          LinearProgressIndicator(
+                              progress = { progressOf(p, vm.now) },
+                              modifier = Modifier.fillMaxWidth().padding(top = 4.dp).height(3.dp),
+                              color = Accent, trackColor = Color.White.copy(alpha = 0.15f)
+                          )
+                      }
+                  }
+              }
+          }
+
+          /* ============================================================= SETTINGS */
+
+          @Composable
+          fun Section(title: String, content: @Composable () -> Unit) {
               Column(
-                  Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                  Modifier.fillMaxWidth().glass(RoundedCornerShape(26.dp), 0.09f).padding(20.dp),
                   verticalArrangement = Arrangement.spacedBy(12.dp)
               ) {
-                  Text("Playlists", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                  vm.playlists.forEach { pl ->
-                      Card {
-                          Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                              RadioButton(selected = pl.id == vm.activeId, onClick = { vm.select(pl.id) })
-                              Column(Modifier.weight(1f)) {
-                                  Text(pl.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                  Text(
-                                      if (pl.isFile) "Local file" else pl.source.take(60),
-                                      fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                      color = MaterialTheme.colorScheme.onSurfaceVariant
-                                  )
-                              }
-                              IconButton(onClick = { if (pl.id == vm.activeId) vm.refresh() else vm.select(pl.id) }) {
-                                  Icon(Icons.Filled.Refresh, "Refresh")
-                              }
-                              IconButton(onClick = { vm.delete(pl.id) }) { Icon(Icons.Filled.Delete, "Delete") }
-                          }
+                  Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                  content()
+              }
+          }
+
+          @Composable
+          fun SettingsTab(vm: MainVM) {
+              val mins = if (vm.expire > 0) ((vm.expire * 1000 - (vm.now + Http.jar.skew)) / 60_000L).coerceAtLeast(0) else -1L
+              val t = vm.token
+              val masked = "*".repeat((t.length - 4).coerceAtLeast(0)) + t.takeLast(4)
+              Column(
+                  Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp),
+                  verticalArrangement = Arrangement.spacedBy(18.dp)
+              ) {
+                  Section("Account") {
+                      Text("Access token: $masked", color = Dim)
+                      Text("${vm.channels.size} channels", color = Dim)
+                      GlassButton("Change access token", icon = Icons.Filled.Lock) { vm.logout() }
+                  }
+                  Section("Session") {
+                      Text(
+                          if (mins >= 0) "Keys and stream links expire in about $mins min" else "Expiry unknown",
+                          color = Dim
+                      )
+                      Text("Reloaded automatically 10 minutes before expiry.", color = Dim, fontSize = 12.sp)
+                      GlassButton("Refresh now", icon = Icons.Filled.Refresh) { vm.refresh() }
+                  }
+                  Section("Player") {
+                      OutlinedTextField(
+                          value = vm.userAgent, onValueChange = { vm.setUa(it) }, singleLine = true,
+                          label = { Text("Stream User-Agent") }, colors = glassFieldColors(),
+                          shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
+                      )
+                      OutlinedTextField(
+                          value = vm.extraHeaders, onValueChange = { vm.updateExtraHeaders(it) },
+                          label = { Text("Extra headers (Name: value, one per line)") },
+                          minLines = 3, colors = glassFieldColors(),
+                          shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
+                      )
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Text("Resume last channel on launch", Modifier.weight(1f))
+                          Switch(checked = vm.resumeLast, onCheckedChange = { vm.setResume(it) })
                       }
                   }
-                  Text("Add", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                  AddButtons(onAdd)
-
-                  HorizontalDivider()
-
-                  val pl = vm.active()
-                  if (pl != null) {
-                      Text("EPG (XMLTV) for \"${pl.name}\"", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                      var epgUrl by remember(pl.id, pl.epg) { mutableStateOf(pl.epg) }
-                      OutlinedTextField(
-                          value = epgUrl, onValueChange = { epgUrl = it }, singleLine = true,
-                          label = { Text("XMLTV URL (.xml or .xml.gz)") }, modifier = Modifier.fillMaxWidth()
-                      )
-                      OutlinedButton(onClick = { vm.setEpgUrl(epgUrl) }) { Text("Save and reload EPG") }
-                      HorizontalDivider()
-                  }
-
-                  Text("Player", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                  OutlinedTextField(
-                      value = vm.userAgent, onValueChange = { vm.setUa(it) }, singleLine = true,
-                      label = { Text("User-Agent") }, modifier = Modifier.fillMaxWidth()
-                  )
-                  OutlinedTextField(
-                      value = vm.extraHeaders, onValueChange = { vm.updateExtraHeaders(it) },
-                      label = { Text("Extra headers for all streams (Name: value, one per line)") },
-                      minLines = 3, modifier = Modifier.fillMaxWidth()
-                  )
-                  Row(verticalAlignment = Alignment.CenterVertically) {
-                      Text("Auto refresh playlist and EPG every 12h", Modifier.weight(1f))
-                      Switch(checked = vm.autoRefresh, onCheckedChange = { vm.updateAutoRefresh(it) })
-                  }
-                  Row(verticalAlignment = Alignment.CenterVertically) {
-                      Text("Resume last channel on launch", Modifier.weight(1f))
-                      Switch(checked = vm.resumeLast, onCheckedChange = { vm.setResume(it) })
-                  }
                   Text(
-                      "StreamBox does not provide any channels or content. Add only playlists you are allowed to use.",
-                      fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+                      "Long-press (or hold OK) on a channel to add it to Favorites.",
+                      fontSize = 12.sp, color = Dim
                   )
               }
           }
           __SB_EOF__
 
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/PlayerUi.kt <<'__SB_EOF__'
-          package com.streambox.player
+          cat > app/src/main/java/com/livetv/glass/PlayerUi.kt <<'__SB_EOF__'
+          package com.livetv.glass
 
           import android.content.pm.ActivityInfo
           import android.view.KeyEvent
@@ -2093,13 +2243,16 @@ jobs:
           import androidx.compose.animation.slideInHorizontally
           import androidx.compose.animation.slideOutHorizontally
           import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
           import androidx.compose.foundation.focusable
           import androidx.compose.foundation.gestures.detectTapGestures
           import androidx.compose.foundation.gestures.detectVerticalDragGestures
+          import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.Column
           import androidx.compose.foundation.layout.Row
           import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.aspectRatio
           import androidx.compose.foundation.layout.fillMaxHeight
           import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.foundation.layout.fillMaxWidth
@@ -2111,11 +2264,12 @@ jobs:
           import androidx.compose.foundation.lazy.itemsIndexed
           import androidx.compose.foundation.lazy.items
           import androidx.compose.foundation.lazy.rememberLazyListState
+          import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.automirrored.filled.ArrowBack
           import androidx.compose.material.icons.filled.AspectRatio
-          import androidx.compose.material.icons.filled.BugReport
           import androidx.compose.material.icons.filled.Audiotrack
+          import androidx.compose.material.icons.filled.BugReport
           import androidx.compose.material.icons.filled.ChevronLeft
           import androidx.compose.material.icons.filled.ChevronRight
           import androidx.compose.material.icons.filled.FormatListBulleted
@@ -2128,10 +2282,10 @@ jobs:
           import androidx.compose.material.icons.filled.Timer
           import androidx.compose.material3.AlertDialog
           import androidx.compose.material3.CircularProgressIndicator
-          import androidx.compose.material3.Icon
-          import androidx.compose.material3.IconButton
           import androidx.compose.material3.LinearProgressIndicator
-          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.RadioButton
+          import androidx.compose.material3.SnackbarHost
+          import androidx.compose.material3.SnackbarHostState
           import androidx.compose.material3.Text
           import androidx.compose.material3.TextButton
           import androidx.compose.runtime.Composable
@@ -2143,6 +2297,7 @@ jobs:
           import androidx.compose.runtime.setValue
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
           import androidx.compose.ui.focus.FocusRequester
           import androidx.compose.ui.focus.focusRequester
           import androidx.compose.ui.graphics.Brush
@@ -2152,7 +2307,6 @@ jobs:
           import androidx.compose.ui.input.key.type
           import androidx.compose.ui.input.pointer.pointerInput
           import androidx.compose.ui.platform.LocalClipboardManager
-          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.AnnotatedString
           import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
@@ -2173,9 +2327,16 @@ jobs:
 
           @Composable
           fun AppRoot(vm: MainVM, pc: PlayerController, act: MainActivity) {
-              // start / restart playback whenever a channel is (re)selected
+              val snack = remember { SnackbarHostState() }
+
+              // start / restart playback whenever a channel (or its refreshed keys / url) is selected
               LaunchedEffect(vm.playNonce) {
                   vm.current?.let { pc.play(it, vm.userAgent, vm.extraHeaders) }
+              }
+
+              // leaving the READY phase (logout) must silence the player
+              LaunchedEffect(vm.phase) {
+                  if (vm.phase != Phase.READY) pc.stop()
               }
 
               // sleep timer
@@ -2187,6 +2348,13 @@ jobs:
                       vm.fullscreen = false
                       vm.sleepAt = 0L
                       vm.toast = "Sleep timer: playback stopped"
+                  }
+              }
+
+              LaunchedEffect(vm.toast) {
+                  vm.toast?.let {
+                      snack.showSnackbar(it)
+                      vm.toast = null
                   }
               }
 
@@ -2205,7 +2373,15 @@ jobs:
                   }
               }
 
-              if (vm.fullscreen) PlayerScreen(vm, pc, act) else HomeScreen(vm)
+              Box(Modifier.fillMaxSize()) {
+                  Aurora()
+                  when (vm.phase) {
+                      Phase.TOKEN -> TokenScreen(vm)
+                      Phase.LOADING -> Loading("Loading channels...")
+                      Phase.READY -> if (vm.fullscreen) PlayerScreen(vm, pc, act) else HomeScreen(vm)
+                  }
+                  SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(16.dp))
+              }
           }
 
           /* ================================================================ PLAYER */
@@ -2221,13 +2397,13 @@ jobs:
 
               LaunchedEffect(showUi, showList, dialog, vm.playNonce) {
                   if (showUi && !showList && dialog.isEmpty()) {
-                      delay(5000)
+                      delay(6000)
                       showUi = false
                   }
               }
               LaunchedEffect(vm.playNonce) { showUi = true }
-              LaunchedEffect(showList, dialog) {
-                  if (!showList && dialog.isEmpty()) {
+              LaunchedEffect(showUi, showList, dialog) {
+                  if (!showUi && !showList && dialog.isEmpty()) {
                       try {
                           focus.requestFocus()
                       } catch (e: Exception) {
@@ -2258,19 +2434,16 @@ jobs:
                               false
                           } else {
                               when (e.nativeKeyEvent.keyCode) {
-                                  KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> {
+                                  KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> {
                                       vm.zap(1); true
                                   }
-                                  KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> {
+                                  KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> {
                                       vm.zap(-1); true
                                   }
-                                  KeyEvent.KEYCODE_DPAD_LEFT -> {
-                                      showList = true; true
-                                  }
-                                  KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                                      if (!showUi) showUi = true else showList = true
-                                      true
-                                  }
+                                  KeyEvent.KEYCODE_DPAD_UP -> if (!showUi) { vm.zap(1); true } else false
+                                  KeyEvent.KEYCODE_DPAD_DOWN -> if (!showUi) { vm.zap(-1); true } else false
+                                  KeyEvent.KEYCODE_DPAD_LEFT -> if (!showUi) { showList = true; true } else false
+                                  KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if (!showUi) { showUi = true; true } else false
                                   KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_INFO -> {
                                       showUi = !showUi; true
                                   }
@@ -2317,13 +2490,13 @@ jobs:
                   )
 
                   if (pc.buffering && !inPip) {
-                      CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+                      CircularProgressIndicator(Modifier.align(Alignment.Center), color = Accent)
                   }
                   pc.error?.let {
                       Text(
                           it,
                           Modifier.align(Alignment.Center).padding(horizontal = 32.dp)
-                              .background(Color(0xDD000000)).padding(14.dp),
+                              .glass(RoundedCornerShape(20.dp), 0.14f, Color.Black).padding(16.dp),
                           color = Color.White, textAlign = TextAlign.Center, fontSize = 13.sp
                       )
                   }
@@ -2334,78 +2507,84 @@ jobs:
                           Row(
                               Modifier.fillMaxWidth()
                                   .background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)))
-                                  .padding(8.dp),
-                              verticalAlignment = Alignment.CenterVertically
+                                  .padding(horizontal = 14.dp, vertical = 12.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.spacedBy(8.dp)
                           ) {
-                              IconButton(onClick = {
+                              GlassIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", size = 40.dp) {
                                   pc.stop()
                                   vm.fullscreen = false
-                              }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+                              }
                               Text(
-                                  ch?.name ?: "", Modifier.weight(1f), color = Color.White,
+                                  ch?.name ?: "", Modifier.weight(1f).padding(horizontal = 6.dp), color = Color.White,
                                   fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1,
                                   overflow = TextOverflow.Ellipsis
                               )
-                              if (ch != null && ch.num > 0) {
-                                  val fav = ch.url in vm.favorites
-                                  IconButton(onClick = { vm.toggleFav(ch) }) {
-                                      Icon(
-                                          if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
-                                          tint = if (fav) Color(0xFFFFC107) else Color.White
-                                      )
-                                  }
+                              if (ch != null) {
+                                  val fav = ch.id in vm.favorites
+                                  GlassIconButton(
+                                      if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
+                                      tint = if (fav) Color(0xFFFFC107) else Color.White, size = 40.dp
+                                  ) { vm.toggleFav(ch) }
                               }
-                              IconButton(onClick = { vm.recall() }) { Icon(Icons.Filled.SwapHoriz, "Last channel", tint = Color.White) }
-                              IconButton(onClick = { dialog = "audio" }) { Icon(Icons.Filled.Audiotrack, "Audio", tint = Color.White) }
-                              IconButton(onClick = { dialog = "sub" }) { Icon(Icons.Filled.Subtitles, "Subtitles", tint = Color.White) }
-                              IconButton(onClick = { dialog = "video" }) { Icon(Icons.Filled.HighQuality, "Quality", tint = Color.White) }
-                              IconButton(onClick = { dialog = "aspect" }) { Icon(Icons.Filled.AspectRatio, "Aspect", tint = Color.White) }
-                              IconButton(onClick = { dialog = "sleep" }) { Icon(Icons.Filled.Timer, "Sleep timer", tint = Color.White) }
-                              IconButton(onClick = { dialog = "log" }) { Icon(Icons.Filled.BugReport, "Network log", tint = Color.White) }
-                              IconButton(onClick = { act.enterPip() }) { Icon(Icons.Filled.PictureInPictureAlt, "PiP", tint = Color.White) }
-                              IconButton(onClick = { showList = true }) { Icon(Icons.Filled.FormatListBulleted, "Channels", tint = Color.White) }
+                              GlassIconButton(Icons.Filled.SwapHoriz, "Last channel", size = 40.dp) { vm.recall() }
+                              GlassIconButton(Icons.Filled.Audiotrack, "Audio", size = 40.dp) { dialog = "audio" }
+                              GlassIconButton(Icons.Filled.Subtitles, "Subtitles", size = 40.dp) { dialog = "sub" }
+                              GlassIconButton(Icons.Filled.HighQuality, "Quality", size = 40.dp) { dialog = "video" }
+                              GlassIconButton(Icons.Filled.AspectRatio, "Aspect", size = 40.dp) { dialog = "aspect" }
+                              GlassIconButton(Icons.Filled.Timer, "Sleep timer", size = 40.dp) { dialog = "sleep" }
+                              GlassIconButton(Icons.Filled.BugReport, "Network log", size = 40.dp) { dialog = "log" }
+                              GlassIconButton(Icons.Filled.PictureInPictureAlt, "PiP", size = 40.dp) { act.enterPip() }
+                              GlassIconButton(Icons.Filled.FormatListBulleted, "Channels", size = 40.dp) { showList = true }
                           }
 
                           Spacer(Modifier.weight(1f))
 
-                          // ---- bottom info bar
+                          // ---- bottom info card
                           if (ch != null) {
+                              val now = nn.first
+                              val next = nn.second
                               Row(
-                                  Modifier.fillMaxWidth()
-                                      .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xDD000000))))
-                                      .padding(16.dp),
+                                  Modifier.fillMaxWidth().padding(16.dp)
+                                      .glass(RoundedCornerShape(26.dp), 0.14f, Color.Black)
+                                      .padding(14.dp),
                                   verticalAlignment = Alignment.CenterVertically
                               ) {
-                                  Logo(ch, 56.dp)
-                                  Spacer(Modifier.width(14.dp))
-                                  Column(Modifier.weight(1f)) {
-                                      Text(
-                                          (if (ch.num > 0) "${ch.num}  " else "") + ch.name,
-                                          color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp
-                                      )
-                                      val now = nn.first
-                                      val next = nn.second
+                                  if (now != null && bannerUrl(now).isNotBlank()) {
+                                      Box(
+                                          Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
+                                              .background(Color.White.copy(alpha = 0.08f))
+                                      ) { Banner(bannerUrl(now), Modifier.fillMaxSize()) }
+                                  } else {
+                                      Logo(ch, 56.dp)
+                                  }
+                                  Spacer(Modifier.width(16.dp))
+                                  Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                      Text(ch.name, color = Dim, fontSize = 12.sp, maxLines = 1)
                                       if (now != null) {
                                           Text(
-                                              "${hm(now.start)} - ${hm(now.stop)}  ${now.title}",
-                                              color = Color.White, fontSize = 14.sp, maxLines = 1,
-                                              overflow = TextOverflow.Ellipsis
+                                              now.title, color = Color.White, fontWeight = FontWeight.Bold,
+                                              fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                                           )
+                                          Text("${hm(now.start)} - ${hm(now.stop)}", color = Accent, fontSize = 12.sp)
                                           LinearProgressIndicator(
                                               progress = { progressOf(now, vm.now) },
-                                              modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).height(3.dp)
+                                              modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).height(3.dp),
+                                              color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
                                           )
+                                      } else {
+                                          Text("Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
                                       }
                                       if (next != null) {
                                           Text(
                                               "Next ${hm(next.start)}  ${next.title}",
-                                              color = Color(0xFFB8C0CF), fontSize = 12.sp, maxLines = 1,
+                                              color = Dim, fontSize = 12.sp, maxLines = 1,
                                               overflow = TextOverflow.Ellipsis
                                           )
                                       }
                                   }
                                   if (pc.videoRes.isNotEmpty()) {
-                                      Text(pc.videoRes, color = Color(0xFFB8C0CF), fontSize = 12.sp)
+                                      Text(pc.videoRes, color = Dim, fontSize = 12.sp)
                                   }
                               }
                           }
@@ -2443,31 +2622,73 @@ jobs:
           }
 
           @Composable
+          fun PlayerChannelRow(vm: MainVM, ch: Channel, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+              val np = vm.nowNext(ch).first
+              Row(
+                  modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)
+                      .focusGlow(corner = 16.dp, focusScale = 1.03f, onClick = onClick)
+                      .glass(RoundedCornerShape(16.dp), if (selected) 0.20f else 0.07f, if (selected) Accent else Color.White)
+                      .padding(10.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Logo(ch, 42.dp)
+                  Spacer(Modifier.width(12.dp))
+                  Column(Modifier.weight(1f)) {
+                      Text(ch.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      Text(
+                          np?.title ?: ch.category, fontSize = 12.sp, color = Dim,
+                          maxLines = 1, overflow = TextOverflow.Ellipsis
+                      )
+                      if (np != null) {
+                          LinearProgressIndicator(
+                              progress = { progressOf(np, vm.now) },
+                              modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(3.dp),
+                              color = Accent, trackColor = Color.White.copy(alpha = 0.15f)
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
           fun ChannelPanel(vm: MainVM, onPick: () -> Unit) {
-              var g by remember { mutableStateOf(vm.group) }
-              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.groups
+              var g by remember { mutableStateOf(vm.category) }
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
               val list = remember(g, vm.channels, vm.favorites, vm.recents) { vm.filter(g) }
               val state = rememberLazyListState()
-              LaunchedEffect(Unit) {
-                  val i = list.indexOfFirst { it.url == vm.current?.url }
-                  if (i > 0) state.scrollToItem(i)
+              val fr = remember { FocusRequester() }
+              val curIdx = list.indexOfFirst { it.id == vm.current?.id }.coerceAtLeast(0)
+              LaunchedEffect(g) {
+                  state.scrollToItem(curIdx)
+                  delay(150)
+                  try {
+                      fr.requestFocus()
+                  } catch (e: Exception) {
+                  }
               }
-              Column(Modifier.width(400.dp).fillMaxHeight().background(Color(0xF00E1117))) {
-                  Row(Modifier.fillMaxWidth().padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                      IconButton(onClick = { g = all[(all.indexOf(g) - 1 + all.size).mod(all.size)] }) {
-                          Icon(Icons.Filled.ChevronLeft, "Previous group")
+              val shape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp)
+              Column(
+                  Modifier.width(390.dp).fillMaxHeight().clip(shape)
+                      .background(Color(0xD905070D)).glass(shape, 0.08f)
+              ) {
+                  Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                      GlassIconButton(Icons.Filled.ChevronLeft, "Previous group", size = 40.dp) {
+                          g = all[(all.indexOf(g) - 1 + all.size).mod(all.size)]
                       }
                       Text(g, Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold, maxLines = 1)
-                      IconButton(onClick = { g = all[(all.indexOf(g) + 1).mod(all.size)] }) {
-                          Icon(Icons.Filled.ChevronRight, "Next group")
+                      GlassIconButton(Icons.Filled.ChevronRight, "Next group", size = 40.dp) {
+                          g = all[(all.indexOf(g) + 1).mod(all.size)]
                       }
                   }
                   if (list.isEmpty()) {
-                      Text("Nothing here yet", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                      Text("Nothing here yet", Modifier.padding(16.dp), color = Dim)
                   }
                   LazyColumn(state = state) {
-                      items(list, key = { it.num }) { ch ->
-                          ChannelRow(vm, ch, ch.url == vm.current?.url) {
+                      itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
+                          PlayerChannelRow(
+                              vm, ch, ch.id == vm.current?.id,
+                              if (i == curIdx) Modifier.focusRequester(fr) else Modifier
+                          ) {
                               vm.play(ch, list)
                               onPick()
                           }
@@ -2477,12 +2698,28 @@ jobs:
           }
 
           @Composable
+          fun PickRow(label: String, selected: Boolean, onClick: () -> Unit) {
+              Row(
+                  Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  RadioButton(selected = selected, onClick = null)
+                  Spacer(Modifier.width(12.dp))
+                  Text(label)
+              }
+          }
+
+          private val DialogBg = Color(0xF21A2030)
+
+          @Composable
           fun SimpleDialog(
               title: String, options: List<String>, selected: Int,
               onPick: (Int) -> Unit, onDismiss: () -> Unit
           ) {
               AlertDialog(
                   onDismissRequest = onDismiss,
+                  containerColor = DialogBg,
+                  shape = RoundedCornerShape(28.dp),
                   title = { Text(title) },
                   text = {
                       LazyColumn {
@@ -2504,6 +2741,8 @@ jobs:
               val disabled = pc.isDisabled(type)
               AlertDialog(
                   onDismissRequest = onDismiss,
+                  containerColor = DialogBg,
+                  shape = RoundedCornerShape(28.dp),
                   title = { Text(title) },
                   text = {
                       LazyColumn {
@@ -2516,7 +2755,7 @@ jobs:
                               }
                           }
                           if (opts.isEmpty()) {
-                              item { Text("No tracks available", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                              item { Text("No tracks available", color = Dim) }
                           }
                           itemsIndexed(opts) { _, o ->
                               PickRow(o.label, o.selected && !disabled && type != C.TRACK_TYPE_VIDEO) {
@@ -2537,6 +2776,8 @@ jobs:
               val clip = LocalClipboardManager.current
               AlertDialog(
                   onDismissRequest = onDismiss,
+                  containerColor = DialogBg,
+                  shape = RoundedCornerShape(28.dp),
                   title = { Text("Network log (newest first)") },
                   text = {
                       LazyColumn(Modifier.heightIn(max = 320.dp)) {
@@ -2558,12 +2799,10 @@ jobs:
           }
           __SB_EOF__
 
-          mkdir -p app/src/main/java/com/streambox/player
-          cat > app/src/main/java/com/streambox/player/MainActivity.kt <<'__SB_EOF__'
-          package com.streambox.player
+          cat > app/src/main/java/com/livetv/glass/MainActivity.kt <<'__SB_EOF__'
+          package com.livetv.glass
 
           import android.app.PictureInPictureParams
-          import android.content.Intent
           import android.os.Build
           import android.os.Bundle
           import android.util.Rational
@@ -2607,18 +2846,6 @@ jobs:
                           }
                       }
                   }
-                  handleIntent(intent)
-              }
-
-              override fun onNewIntent(intent: Intent) {
-                  super.onNewIntent(intent)
-                  handleIntent(intent)
-              }
-
-              private fun handleIntent(i: Intent?) {
-                  if (i?.action == Intent.ACTION_VIEW) {
-                      i.data?.toString()?.let { vm.quickPlay(it) }
-                  }
               }
 
               fun enterPip() {
@@ -2640,7 +2867,8 @@ jobs:
 
               override fun onStart() {
                   super.onStart()
-                  // resume after having been stopped in the background
+                  // session may have expired while the app was in the background
+                  vm.checkExpiry()
                   if (vm.fullscreen && vm.current != null) vm.playNonce++
               }
 
@@ -2657,25 +2885,25 @@ jobs:
           __SB_EOF__
 
       - name: Build debug APK
-        working-directory: StreamBoxApp
+        working-directory: LiveTVApp
         run: gradle assembleDebug --no-daemon --console=plain --stacktrace
 
       - name: Build release APK
         continue-on-error: true
-        working-directory: StreamBoxApp
+        working-directory: LiveTVApp
         run: gradle assembleRelease --no-daemon --console=plain --stacktrace
 
       - name: Collect APKs
         run: |
           mkdir -p out
-          cp StreamBoxApp/app/build/outputs/apk/debug/app-debug.apk out/StreamBox-debug.apk
-          cp StreamBoxApp/app/build/outputs/apk/release/app-release.apk out/StreamBox-release.apk || true
+          cp LiveTVApp/app/build/outputs/apk/debug/app-debug.apk out/LiveTV-debug.apk
+          cp LiveTVApp/app/build/outputs/apk/release/app-release.apk out/LiveTV-release.apk || true
           ls -lh out
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: StreamBox-APK
+          name: LiveTV-APK
           path: out/*.apk
 
       - name: Publish GitHub Release
@@ -2683,5 +2911,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: StreamBox build ${{ github.run_number }}
+          name: Live TV build ${{ github.run_number }}
           files: out/*.apk
