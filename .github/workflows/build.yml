@@ -1,7 +1,7 @@
 name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
-# Liquid-glass UI, Apple-TV style focus glow, DRM (ClearKey / Widevine), auto session refresh, Jio EPG.
+# Liquid-glass UI, TiviMate-style home (live preview + EPG rows), DRM (ClearKey / Widevine), auto session refresh, Jio EPG.
 # Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "LiveTV-APK".
 
 on:
@@ -95,8 +95,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 2
-                  versionName = "2.0"
+                  versionCode = 3
+                  versionName = "3.0"
               }
 
               buildTypes {
@@ -148,6 +148,7 @@ jobs:
               implementation("androidx.media3:media3-ui:$media3")
 
               implementation("io.coil-kt:coil-compose:2.7.0")
+              implementation("androidx.palette:palette-ktx:1.0.0")
               implementation("com.squareup.okhttp3:okhttp:4.12.0")
               implementation("androidx.media3:media3-datasource-okhttp:$media3")
           }
@@ -698,6 +699,8 @@ jobs:
               var channels by mutableStateOf<List<Channel>>(emptyList())
               var categories by mutableStateOf<List<String>>(emptyList())
               var category by mutableStateOf(G_ALL)
+              /** Home navigation: 0 live rows, 1 guide, 2 search, 3 settings. Kept here so it survives the fullscreen player. */
+              var tab by mutableIntStateOf(0)
               var expire by mutableLongStateOf(0L)
               val epg = mutableStateMapOf<String, List<Program>>()
 
@@ -789,6 +792,8 @@ jobs:
                   token = ""
                   store.token = ""
                   tokenError = msg
+                  resumed = false
+                  tab = 0
                   phase = Phase.TOKEN
               }
 
@@ -840,7 +845,7 @@ jobs:
                       if (n != null) {
                           val changed = n.url != cur.url || n.license != cur.license
                           current = n
-                          if (changed && fullscreen) playNonce++
+                          if (changed) playNonce++
                       }
                   }
                   zapList = zapList.mapNotNull { z -> channels.firstOrNull { it.id == z.id } }
@@ -848,11 +853,12 @@ jobs:
 
                   if (!resumed) {
                       resumed = true
-                      if (resumeLast && store.lastChannel.isNotEmpty()) {
-                          channels.firstOrNull { it.id == store.lastChannel }?.let {
-                              play(it, channels)
-                              fullscreen = true
-                          }
+                      // start the live preview right away (last channel, else the first one)
+                      val last = store.lastChannel
+                      val start = channels.firstOrNull { it.id == last } ?: channels.firstOrNull()
+                      if (start != null) {
+                          play(start, channels, record = false)
+                          if (resumeLast && last.isNotEmpty()) fullscreen = true
                       }
                   }
               }
@@ -901,6 +907,13 @@ jobs:
                   return Pair(null, a.firstOrNull { it.start > now } ?: b.firstOrNull { it.start > now })
               }
 
+              /** Live programme + everything coming up (today + tomorrow), used for the home rows. */
+              fun upcoming(ch: Channel): List<Program> {
+                  val a = epg["${ch.id}:0"] ?: emptyList()
+                  val b = epg["${ch.id}:1"] ?: emptyList()
+                  return (a + b).filter { it.stop > now }.distinctBy { it.start }.sortedBy { it.start }.take(14)
+              }
+
               /* ------------------------------------------------------------- channels */
 
               fun filter(g: String): List<Channel> = when (g) {
@@ -927,14 +940,16 @@ jobs:
 
               /* -------------------------------------------------------------- playback */
 
-              fun play(ch: Channel, list: List<Channel>) {
+              fun play(ch: Channel, list: List<Channel>, record: Boolean = true) {
                   if (current?.id != ch.id) previous = current
                   current = ch
                   focused = ch
                   zapList = list
-                  store.lastChannel = ch.id
-                  recents = (listOf(ch.id) + recents.filter { it != ch.id }).take(30)
-                  store.saveRecents(recents)
+                  if (record) {
+                      store.lastChannel = ch.id
+                      recents = (listOf(ch.id) + recents.filter { it != ch.id }).take(30)
+                      store.saveRecents(recents)
+                  }
                   playNonce++
               }
 
@@ -1351,6 +1366,7 @@ jobs:
           cat > app/src/main/java/com/livetv/glass/Glass.kt <<'__SB_EOF__'
           package com.livetv.glass
 
+          import androidx.compose.animation.core.FastOutSlowInEasing
           import androidx.compose.animation.core.LinearEasing
           import androidx.compose.animation.core.RepeatMode
           import androidx.compose.animation.core.animateFloat
@@ -1499,15 +1515,17 @@ jobs:
               )
 
           /**
-           * Apple TV style focus: springy scale-up, soft halo, and a travelling light on the rim.
+           * Apple TV style focus: soft springy scale + slight lift, layered halo that fades in smoothly,
+           * a brighter surface and a travelling light on the rim.
            * Apply BEFORE .glass() so the scale/halo wrap the glass surface.
            */
           @OptIn(ExperimentalFoundationApi::class)
           @Composable
           fun Modifier.focusGlow(
               corner: Dp = 22.dp,
-              focusScale: Float = 1.07f,
+              focusScale: Float = 1.06f,
               onFocused: (() -> Unit)? = null,
+              onFocusChange: ((Boolean) -> Unit)? = null,
               onLongClick: (() -> Unit)? = null,
               onClick: () -> Unit
           ): Modifier {
@@ -1515,27 +1533,36 @@ jobs:
               val focused by src.collectIsFocusedAsState()
               val pressed by src.collectIsPressedAsState()
               val scale by animateFloatAsState(
-                  if (pressed) 0.96f else if (focused) focusScale else 1f,
-                  spring(dampingRatio = 0.6f, stiffness = 380f),
+                  if (pressed) 0.97f else if (focused) focusScale else 1f,
+                  spring(dampingRatio = 0.78f, stiffness = 240f),
                   label = "scale"
               )
-              val glow by animateFloatAsState(if (focused) 1f else 0f, tween(280), label = "glow")
+              val glow by animateFloatAsState(
+                  if (focused) 1f else 0f,
+                  tween(450, easing = FastOutSlowInEasing),
+                  label = "glow"
+              )
               val phase = LocalGlow.current
               val cb by rememberUpdatedState(onFocused)
-              LaunchedEffect(focused) { if (focused) cb?.invoke() }
+              val cb2 by rememberUpdatedState(onFocusChange)
+              LaunchedEffect(focused) {
+                  cb2?.invoke(focused)
+                  if (focused) cb?.invoke()
+              }
 
               return this
                   .graphicsLayer {
                       scaleX = scale
                       scaleY = scale
+                      translationY = -glow * 3.dp.toPx()
                   }
                   .drawBehind {
                       if (glow > 0.01f) {
                           val r = corner.toPx()
-                          for (i in 1..4) {
-                              val g = i * 5.dp.toPx()
+                          for (i in 1..6) {
+                              val g = i * 4.dp.toPx()
                               drawRoundRect(
-                                  color = Accent.copy(alpha = 0.16f * glow / i),
+                                  color = Accent.copy(alpha = 0.10f * glow * (1f - i / 7f)),
                                   topLeft = Offset(-g, -g),
                                   size = Size(size.width + 2 * g, size.height + 2 * g),
                                   cornerRadius = CornerRadius(r + g)
@@ -1546,6 +1573,8 @@ jobs:
                   .drawWithContent {
                       drawContent()
                       if (glow > 0.01f) {
+                          val r = CornerRadius(corner.toPx())
+                          drawRoundRect(color = Color.White.copy(alpha = 0.07f * glow), cornerRadius = r)
                           val rad = phase.value * (PI.toFloat() / 180f)
                           val n = 24
                           val cols = List(n + 1) { i ->
@@ -1555,7 +1584,7 @@ jobs:
                           }
                           drawRoundRect(
                               brush = Brush.sweepGradient(cols),
-                              cornerRadius = CornerRadius(corner.toPx()),
+                              cornerRadius = r,
                               style = Stroke(width = 2.5.dp.toPx()),
                               alpha = glow
                           )
@@ -1656,7 +1685,13 @@ jobs:
           cat > app/src/main/java/com/livetv/glass/Ui.kt <<'__SB_EOF__'
           package com.livetv.glass
 
+          import android.graphics.drawable.BitmapDrawable
           import androidx.compose.animation.Crossfade
+          import androidx.compose.animation.animateColorAsState
+          import androidx.compose.animation.core.animateDpAsState
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.spring
+          import androidx.compose.animation.core.tween
           import androidx.compose.foundation.background
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
@@ -1665,6 +1700,7 @@ jobs:
           import androidx.compose.foundation.layout.Row
           import androidx.compose.foundation.layout.Spacer
           import androidx.compose.foundation.layout.aspectRatio
+          import androidx.compose.foundation.layout.fillMaxHeight
           import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.foundation.layout.fillMaxWidth
           import androidx.compose.foundation.layout.height
@@ -1673,6 +1709,7 @@ jobs:
           import androidx.compose.foundation.layout.systemBarsPadding
           import androidx.compose.foundation.layout.width
           import androidx.compose.foundation.layout.widthIn
+          import androidx.compose.foundation.layout.wrapContentWidth
           import androidx.compose.foundation.lazy.LazyColumn
           import androidx.compose.foundation.lazy.LazyRow
           import androidx.compose.foundation.lazy.grid.GridCells
@@ -1680,6 +1717,7 @@ jobs:
           import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
           import androidx.compose.foundation.lazy.grid.items
           import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.lazy.itemsIndexed
           import androidx.compose.foundation.lazy.rememberLazyListState
           import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1687,8 +1725,10 @@ jobs:
           import androidx.compose.foundation.text.KeyboardOptions
           import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.Lock
+          import androidx.compose.material.icons.filled.Category
+          import androidx.compose.material.icons.filled.History
           import androidx.compose.material.icons.filled.LiveTv
+          import androidx.compose.material.icons.filled.Lock
           import androidx.compose.material.icons.filled.PlayArrow
           import androidx.compose.material.icons.filled.Refresh
           import androidx.compose.material.icons.filled.Schedule
@@ -1698,7 +1738,6 @@ jobs:
           import androidx.compose.material3.CircularProgressIndicator
           import androidx.compose.material3.Icon
           import androidx.compose.material3.LinearProgressIndicator
-          import androidx.compose.material3.MaterialTheme
           import androidx.compose.material3.OutlinedTextField
           import androidx.compose.material3.Switch
           import androidx.compose.material3.Text
@@ -1715,25 +1754,41 @@ jobs:
           import androidx.compose.ui.draw.alpha
           import androidx.compose.ui.draw.blur
           import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.focus.FocusRequester
+          import androidx.compose.ui.focus.focusRequester
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.graphics.lerp
+          import androidx.compose.ui.graphics.luminance
+          import androidx.compose.ui.graphics.vector.ImageVector
           import androidx.compose.ui.layout.ContentScale
           import androidx.compose.ui.platform.LocalConfiguration
+          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.input.ImeAction
-          import androidx.compose.ui.text.input.PasswordVisualTransformation
           import androidx.compose.ui.text.input.VisualTransformation
           import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.Dp
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.media3.ui.PlayerView
+          import androidx.palette.graphics.Palette
           import coil.compose.AsyncImage
+          import coil.imageLoader
+          import coil.request.ImageRequest
+          import coil.request.SuccessResult
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.withContext
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
 
           private val HM = SimpleDateFormat("HH:mm", Locale.getDefault())
+          private val DATE_FMT = SimpleDateFormat("EEE d MMM", Locale.getDefault())
           fun hm(ms: Long): String = HM.format(Date(ms))
 
           fun progressOf(p: Program, now: Long): Float =
@@ -1747,6 +1802,44 @@ jobs:
 
           @Composable
           fun isWide(): Boolean = LocalConfiguration.current.screenWidthDp >= 640
+
+          /* ============================================================ colour helpers */
+
+          /** Stable pleasant colour derived from some text (used when a programme has no banner). */
+          fun hashColor(s: String): Color =
+              Color.hsv(((s.hashCode() and 0x7fffffff) % 360).toFloat(), 0.55f, 0.95f)
+
+          /** Dominant colour of a banner (Palette), animated; falls back to [fallback] while loading / without image. */
+          @Composable
+          fun rememberBannerColor(url: String, fallback: Color): Color {
+              val ctx = LocalContext.current
+              var c by remember(url) { mutableStateOf(fallback) }
+              LaunchedEffect(url) {
+                  if (url.isBlank()) return@LaunchedEffect
+                  try {
+                      val res = ctx.imageLoader.execute(
+                          ImageRequest.Builder(ctx).data(url).allowHardware(false).size(160).build()
+                      )
+                      val bmp = ((res as? SuccessResult)?.drawable as? BitmapDrawable)?.bitmap
+                      if (bmp != null) {
+                          val p = withContext(Dispatchers.Default) {
+                              Palette.from(bmp).maximumColorCount(12).generate()
+                          }
+                          val sw = p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.dominantSwatch ?: p.mutedSwatch
+                          if (sw != null) {
+                              var k = Color(sw.rgb)
+                              if (k.luminance() < 0.12f) k = lerp(k, Color.White, 0.3f)
+                              c = k
+                          }
+                      }
+                  } catch (e: Exception) {
+                      // keep fallback
+                  }
+              }
+              val target = if (url.isBlank()) fallback else c
+              val animated by animateColorAsState(target, tween(900), label = "tint")
+              return animated
+          }
 
           /* ============================================================ common bits */
 
@@ -1829,26 +1922,37 @@ jobs:
 
           /* =============================================================== HOME */
 
-          private val TABS = listOf(
-              "Live" to Icons.Filled.LiveTv,
-              "Guide" to Icons.Filled.Schedule,
-              "Search" to Icons.Filled.Search,
-              "Settings" to Icons.Filled.Settings
+          private val NAV = listOf(
+              Triple(1, "Guide", Icons.Filled.Schedule),
+              Triple(2, "Search", Icons.Filled.Search),
+              Triple(3, "Settings", Icons.Filled.Settings)
           )
 
+          private fun catIcon(g: String): ImageVector = when (g) {
+              G_ALL -> Icons.Filled.LiveTv
+              G_FAV -> Icons.Filled.Star
+              G_RECENT -> Icons.Filled.History
+              else -> Icons.Filled.Category
+          }
+
           @Composable
-          fun HomeScreen(vm: MainVM) {
-              var tab by rememberSaveable { mutableIntStateOf(0) }
+          fun HomeScreen(vm: MainVM, pc: PlayerController) {
+              val wide = isWide()
+              val tab = vm.tab
               val onOpen: (Channel, List<Channel>) -> Unit = { ch, l ->
                   vm.play(ch, l)
                   vm.fullscreen = true
               }
-              val bgCh = vm.focused ?: vm.current ?: vm.channels.firstOrNull()
-              val bgUrl = bgCh?.let { c -> vm.nowNext(c).first?.let { bannerUrl(it) } } ?: ""
+              // first click plays in the preview, clicking the playing channel again goes fullscreen
+              val onPick: (Channel, List<Channel>) -> Unit = { ch, l ->
+                  if (vm.current?.id == ch.id) vm.fullscreen = true else vm.play(ch, l)
+              }
+              val cur = vm.current ?: vm.channels.firstOrNull()
+              val bgUrl = cur?.let { c -> vm.nowNext(c).first?.let { bannerUrl(it) } } ?: ""
 
               Box(Modifier.fillMaxSize()) {
-                  // blurred banner of the focused programme behind the glass
-                  Crossfade(bgUrl, label = "bg") { u ->
+                  // blurred banner of the playing programme behind the glass
+                  Crossfade(bgUrl, animationSpec = tween(900), label = "bg") { u ->
                       if (u.isNotBlank()) {
                           AsyncImage(
                               model = u, contentDescription = null, contentScale = ContentScale.Crop,
@@ -1862,13 +1966,128 @@ jobs:
                       )
                   )
                   Column(Modifier.fillMaxSize().systemBarsPadding()) {
-                      TopBar(tab) { tab = it }
-                      Box(Modifier.weight(1f).fillMaxWidth()) {
+                      Preview(vm, pc) { vm.fullscreen = true }
+                      val pane: @Composable () -> Unit = {
                           when (tab) {
-                              0 -> LiveTab(vm, onOpen)
+                              0 -> Column(Modifier.fillMaxSize()) {
+                                  GuideHeader(vm)
+                                  LiveEpg(vm, onPick)
+                              }
                               1 -> GuideTab(vm, onOpen)
                               2 -> SearchTab(vm, onOpen)
                               else -> SettingsTab(vm)
+                          }
+                      }
+                      if (wide) {
+                          Row(Modifier.weight(1f).fillMaxWidth()) {
+                              Sidebar(vm, tab) { vm.tab = it }
+                              Box(Modifier.weight(1f).fillMaxHeight()) { pane() }
+                          }
+                      } else {
+                          Column(Modifier.weight(1f).fillMaxWidth()) {
+                              NarrowBar(vm, tab) { vm.tab = it }
+                              Box(Modifier.weight(1f).fillMaxWidth()) { pane() }
+                          }
+                      }
+                  }
+              }
+          }
+
+          /** Live preview (shared player) with the playing programme's banner as background. */
+          @Composable
+          fun Preview(vm: MainVM, pc: PlayerController, onFull: () -> Unit) {
+              val wide = isWide()
+              val ch = vm.current
+              val np = if (ch != null) vm.nowNext(ch).first else null
+              val url = if (np != null) bannerUrl(np) else ""
+              Box(
+                  Modifier.fillMaxWidth()
+                      .padding(horizontal = if (wide) 22.dp else 12.dp, vertical = 8.dp)
+                      .height(if (wide) 214.dp else 150.dp)
+                      .glass(RoundedCornerShape(28.dp), 0.08f)
+              ) {
+                  Crossfade(url, animationSpec = tween(900), label = "pv") { u ->
+                      if (u.isNotBlank()) Banner(u, Modifier.fillMaxSize())
+                  }
+                  Box(
+                      Modifier.fillMaxSize().background(
+                          Brush.horizontalGradient(listOf(Color(0xF205070D), Color(0xCC05070D), Color(0x6605070D)))
+                      )
+                  )
+                  Row(
+                      Modifier.fillMaxSize().padding(12.dp),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      Box(
+                          Modifier.fillMaxHeight().aspectRatio(16f / 9f)
+                              .focusGlow(corner = 20.dp, focusScale = 1.02f, onClick = onFull)
+                              .glass(RoundedCornerShape(20.dp), 0.05f, Color.Black)
+                              .background(Color.Black)
+                      ) {
+                          AndroidView(
+                              factory = { c ->
+                                  PlayerView(c).apply {
+                                      useController = false
+                                      player = pc.player
+                                      setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                      isFocusable = false
+                                      isFocusableInTouchMode = false
+                                      keepScreenOn = true
+                                  }
+                              },
+                              onRelease = { it.player = null },
+                              modifier = Modifier.fillMaxSize()
+                          )
+                          if (pc.buffering) {
+                              CircularProgressIndicator(
+                                  Modifier.align(Alignment.Center).size(30.dp), color = Accent, strokeWidth = 3.dp
+                              )
+                          }
+                          pc.error?.let {
+                              Text(
+                                  it.lineSequence().firstOrNull() ?: "",
+                                  Modifier.align(Alignment.Center).padding(8.dp),
+                                  color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center, maxLines = 3
+                              )
+                          }
+                      }
+                      Spacer(Modifier.width(18.dp))
+                      Column(
+                          Modifier.weight(1f).fillMaxHeight(),
+                          verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
+                      ) {
+                          if (ch != null) {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Logo(ch, 28.dp)
+                                  Spacer(Modifier.width(8.dp))
+                                  Text(
+                                      ch.name, color = Dim, fontWeight = FontWeight.SemiBold,
+                                      maxLines = 1, overflow = TextOverflow.Ellipsis
+                                  )
+                              }
+                              Text(
+                                  np?.title ?: "Live now", fontSize = if (wide) 22.sp else 17.sp,
+                                  fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+                              )
+                              if (np != null) {
+                                  Text(
+                                      "${hm(np.start)} - ${hm(np.stop)}" + (if (np.genre.isNotBlank()) "  -  ${np.genre}" else ""),
+                                      color = Accent, fontSize = 13.sp, maxLines = 1
+                                  )
+                                  LinearProgressIndicator(
+                                      progress = { progressOf(np, vm.now) },
+                                      modifier = Modifier.fillMaxWidth(0.7f).height(3.dp),
+                                      color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
+                                  )
+                                  if (np.desc.isNotBlank()) {
+                                      Text(
+                                          np.desc, color = Dim, fontSize = 13.sp,
+                                          maxLines = if (wide) 3 else 2, overflow = TextOverflow.Ellipsis
+                                      )
+                                  }
+                              }
+                          } else {
+                              Text("Select a channel", color = Dim)
                           }
                       }
                   }
@@ -1876,49 +2095,262 @@ jobs:
           }
 
           @Composable
-          fun TopBar(tab: Int, onTab: (Int) -> Unit) {
-              val wide = isWide()
+          fun SideItem(label: String, icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
               Row(
-                  Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                  Modifier.fillMaxWidth()
+                      .focusGlow(corner = 100.dp, focusScale = 1.05f, onClick = onClick)
+                      .glass(RoundedCornerShape(50), if (selected) 0.30f else 0.08f, if (selected) Accent else Color.White)
+                      .padding(horizontal = 16.dp, vertical = 11.dp),
                   verticalAlignment = Alignment.CenterVertically
               ) {
-                  Icon(Icons.Filled.LiveTv, null, tint = Accent)
+                  Icon(icon, null, tint = if (selected) Color.White else Dim, modifier = Modifier.size(20.dp))
                   Spacer(Modifier.width(10.dp))
-                  Text("Live TV", fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-                  Spacer(Modifier.weight(1f))
-                  Row(
-                      Modifier.glass(RoundedCornerShape(50), 0.10f).padding(5.dp),
-                      horizontalArrangement = Arrangement.spacedBy(4.dp)
+                  Text(
+                      label, color = if (selected) Color.White else Dim, fontSize = 14.sp,
+                      fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                      maxLines = 1, overflow = TextOverflow.Ellipsis
+                  )
+              }
+          }
+
+          @Composable
+          fun Sidebar(vm: MainVM, tab: Int, onTab: (Int) -> Unit) {
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
+              Column(Modifier.width(250.dp).fillMaxHeight()) {
+                  LazyColumn(
+                      Modifier.weight(1f),
+                      contentPadding = PaddingValues(horizontal = 26.dp, vertical = 14.dp),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
                   ) {
-                      TABS.forEachIndexed { i, t ->
-                          GlassPill(if (wide) t.first else "", tab == i, icon = t.second) { onTab(i) }
+                      items(all) { g ->
+                          SideItem(g, catIcon(g), tab == 0 && vm.category == g) {
+                              vm.category = g
+                              onTab(0)
+                          }
+                      }
+                  }
+                  Column(
+                      Modifier.padding(horizontal = 26.dp, vertical = 12.dp),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      NAV.forEach { n -> SideItem(n.second, n.third, tab == n.first) { onTab(n.first) } }
+                  }
+              }
+          }
+
+          @Composable
+          fun NarrowBar(vm: MainVM, tab: Int, onTab: (Int) -> Unit) {
+              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
+              LazyRow(
+                  contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  items(NAV) { n -> GlassPill("", tab == n.first, icon = n.third) { onTab(n.first) } }
+                  items(all) { g ->
+                      GlassPill(g, tab == 0 && vm.category == g) {
+                          vm.category = g
+                          onTab(0)
                       }
                   }
               }
           }
 
           @Composable
-          fun CategoryRow(vm: MainVM) {
-              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
-              LazyRow(
-                  contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
-                  horizontalArrangement = Arrangement.spacedBy(10.dp)
+          fun GuideHeader(vm: MainVM) {
+              Row(
+                  Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 6.dp),
+                  verticalAlignment = Alignment.CenterVertically
               ) {
-                  items(all) { g -> GlassPill(g, g == vm.category) { vm.category = g } }
+                  Text(vm.category, fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  Text("   ${vm.filter(vm.category).size}", color = Dim, fontSize = 14.sp)
+                  Spacer(Modifier.weight(1f))
+                  Text(DATE_FMT.format(Date(vm.now)), color = Dim, fontSize = 14.sp)
+                  Spacer(Modifier.width(12.dp))
+                  Text(hm(vm.now), fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+              }
+          }
+
+          /* ======================================================== LIVE ROWS (EPG) */
+
+          @Composable
+          fun LiveEpg(vm: MainVM, onPick: (Channel, List<Channel>) -> Unit) {
+              val list = remember(vm.channels, vm.category, vm.favorites, vm.recents) { vm.filter(vm.category) }
+              val state = rememberLazyListState()
+              val fr = remember { FocusRequester() }
+              val curIdx = list.indexOfFirst { it.id == vm.current?.id }
+
+              // when the home screen appears (also after the fullscreen player) focus the playing channel
+              LaunchedEffect(Unit) {
+                  if (curIdx > 0) state.scrollToItem(curIdx)
+                  delay(250)
+                  try {
+                      fr.requestFocus()
+                  } catch (e: Exception) {
+                  }
+              }
+
+              if (list.isEmpty()) {
+                  Text("Nothing here yet", color = Dim, modifier = Modifier.padding(24.dp))
+              }
+              LazyColumn(
+                  state = state,
+                  modifier = Modifier.fillMaxSize(),
+                  contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+              ) {
+                  itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
+                      ChannelRow(
+                          vm, ch, ch.id == vm.current?.id,
+                          if (i == curIdx) Modifier.focusRequester(fr) else Modifier
+                      ) { onPick(ch, list) }
+                  }
               }
           }
 
           @Composable
-          fun LiveTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
-              val list = remember(vm.channels, vm.category, vm.favorites, vm.recents) { vm.filter(vm.category) }
-              val heroCh = vm.focused ?: vm.current ?: vm.channels.firstOrNull()
-              Column(Modifier.fillMaxSize()) {
-                  CategoryRow(vm)
-                  ChannelGrid(vm, list, Modifier.weight(1f), onOpen) {
-                      if (heroCh != null) Hero(vm, heroCh) { onOpen(heroCh, list) }
+          fun ChannelRow(vm: MainVM, ch: Channel, selected: Boolean, focusMod: Modifier, onPick: () -> Unit) {
+              val wide = isWide()
+              val cellH = if (wide) 156.dp else 126.dp
+              val progs = vm.upcoming(ch)
+              val fav = ch.id in vm.favorites
+              Row(
+                  Modifier.fillMaxWidth().height(cellH + 24.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Box(
+                      Modifier.padding(start = 6.dp).width(if (wide) 180.dp else 108.dp).height(cellH)
+                          .then(focusMod)
+                          .focusGlow(
+                              corner = 20.dp, focusScale = 1.05f,
+                              onLongClick = { vm.toggleFav(ch) }, onClick = onPick
+                          )
+                          .glass(RoundedCornerShape(20.dp), if (selected) 0.26f else 0.10f, if (selected) Accent else Color.White)
+                          .padding(10.dp),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      Column(
+                          horizontalAlignment = Alignment.CenterHorizontally,
+                          verticalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          Logo(ch, if (wide) 56.dp else 44.dp)
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              if (selected) {
+                                  Icon(Icons.Filled.PlayArrow, null, tint = Accent, modifier = Modifier.size(15.dp))
+                              }
+                              Text(
+                                  ch.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                  textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis
+                              )
+                              if (fav) {
+                                  Icon(Icons.Filled.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(14.dp))
+                              }
+                          }
+                      }
+                  }
+                  LazyRow(
+                      Modifier.weight(1f).fillMaxHeight(),
+                      contentPadding = PaddingValues(start = 14.dp, end = 80.dp, top = 12.dp, bottom = 12.dp),
+                      horizontalArrangement = Arrangement.spacedBy(12.dp)
+                  ) {
+                      if (progs.isEmpty()) {
+                          item {
+                              Column(
+                                  Modifier.width(220.dp).height(cellH)
+                                      .glass(RoundedCornerShape(18.dp), 0.06f)
+                                      .padding(14.dp),
+                                  verticalArrangement = Arrangement.Center
+                              ) {
+                                  Text("No schedule available", color = Dim, fontSize = 13.sp)
+                                  Text(ch.category, color = Dim.copy(alpha = 0.6f), fontSize = 11.sp)
+                              }
+                          }
+                      } else {
+                          items(progs, key = { it.start }) { p -> ProgCell(vm, p, cellH, onPick) }
+                      }
                   }
               }
           }
+
+          /**
+           * One programme: banner, title and time. When focused it grows smoothly and reveals the description
+           * (up to 4 lines, then "..."). The live programme gets a blue progress line on its banner.
+           */
+          @Composable
+          fun ProgCell(vm: MainVM, p: Program, cellH: Dp, onClick: () -> Unit) {
+              val wide = isWide()
+              val live = vm.now >= p.start && vm.now < p.stop
+              var foc by remember { mutableStateOf(false) }
+              val bw = if (wide) 176.dp else 132.dp
+              val dw = if (wide) 250.dp else 180.dp
+              val closedW = bw + 16.dp
+              val openW = bw + dw + 28.dp
+              val w by animateDpAsState(
+                  if (foc) openW else closedW,
+                  spring(dampingRatio = 0.85f, stiffness = 260f),
+                  label = "w"
+              )
+              val da by animateFloatAsState(if (foc) 1f else 0f, tween(380), label = "da")
+              Box(
+                  Modifier.width(w).height(cellH)
+                      .focusGlow(corner = 18.dp, focusScale = 1.03f, onFocusChange = { foc = it }, onClick = onClick)
+                      .glass(RoundedCornerShape(18.dp), if (live) 0.18f else 0.09f, if (live) Accent else Color.White)
+              ) {
+                  Row(Modifier.wrapContentWidth(Alignment.Start, unbounded = true).padding(8.dp)) {
+                      Column(Modifier.width(bw), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                          Box(
+                              Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(11.dp))
+                                  .background(
+                                      Brush.linearGradient(
+                                          listOf(hashColor(p.title).copy(alpha = 0.35f), Accent2.copy(alpha = 0.15f))
+                                      )
+                                  )
+                          ) {
+                              Banner(bannerUrl(p), Modifier.fillMaxSize())
+                              if (live) {
+                                  Text(
+                                      "LIVE", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                                      modifier = Modifier.align(Alignment.TopStart).padding(5.dp)
+                                          .clip(RoundedCornerShape(6.dp)).background(Color(0xFFE53935))
+                                          .padding(horizontal = 5.dp, vertical = 1.dp)
+                                  )
+                                  LinearProgressIndicator(
+                                      progress = { progressOf(p, vm.now) },
+                                      modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp),
+                                      color = Accent, trackColor = Color.Black.copy(alpha = 0.45f)
+                                  )
+                              }
+                          }
+                          Text(
+                              p.title, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                              maxLines = 1, overflow = TextOverflow.Ellipsis
+                          )
+                          Text(
+                              "${hm(p.start)} - ${hm(p.stop)}", color = if (live) Accent else Dim,
+                              fontSize = 11.sp, maxLines = 1
+                          )
+                      }
+                      Column(
+                          Modifier.width(dw).padding(start = 14.dp, end = 4.dp).graphicsLayer { alpha = da },
+                          verticalArrangement = Arrangement.spacedBy(4.dp)
+                      ) {
+                          Text(
+                              p.title, fontWeight = FontWeight.Bold, fontSize = 14.sp,
+                              maxLines = 2, overflow = TextOverflow.Ellipsis
+                          )
+                          val sub = listOf(p.genre, p.category).filter { it.isNotBlank() }.distinct().joinToString("  -  ")
+                          if (sub.isNotEmpty()) {
+                              Text(sub, color = Accent, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+                          Text(
+                              if (p.desc.isNotBlank()) p.desc else "No description available",
+                              color = Dim, fontSize = 12.sp, lineHeight = 16.sp,
+                              maxLines = 4, overflow = TextOverflow.Ellipsis
+                          )
+                      }
+                  }
+              }
+          }
+
+          /* ============================================================== SEARCH */
 
           @Composable
           fun ChannelGrid(
@@ -1946,58 +2378,6 @@ jobs:
                   }
                   items(list, key = { it.id }) { ch ->
                       ChannelCard(vm, ch) { onOpen(ch, list) }
-                  }
-              }
-          }
-
-          @Composable
-          fun Hero(vm: MainVM, ch: Channel, onWatch: () -> Unit) {
-              val wide = isWide()
-              val nn = vm.nowNext(ch)
-              val np = nn.first
-              val url = if (np != null) bannerUrl(np) else ""
-              Box(
-                  Modifier.fillMaxWidth().height(if (wide) 280.dp else 220.dp)
-                      .glass(RoundedCornerShape(30.dp), 0.08f)
-              ) {
-                  Crossfade(url, label = "hero") { u ->
-                      if (u.isNotBlank()) Banner(u, Modifier.fillMaxSize())
-                  }
-                  Box(
-                      Modifier.fillMaxSize().background(
-                          Brush.horizontalGradient(listOf(Color(0xEE05070D), Color(0x9905070D), Color.Transparent))
-                      )
-                  )
-                  Column(
-                      Modifier.align(Alignment.BottomStart).padding(22.dp)
-                          .fillMaxWidth(if (wide) 0.58f else 0.92f),
-                      verticalArrangement = Arrangement.spacedBy(6.dp)
-                  ) {
-                      Row(verticalAlignment = Alignment.CenterVertically) {
-                          Logo(ch, 34.dp)
-                          Spacer(Modifier.width(10.dp))
-                          Text(ch.name, color = Dim, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                      }
-                      Text(
-                          np?.title ?: "Live now", fontSize = if (wide) 26.sp else 21.sp,
-                          fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis
-                      )
-                      if (np != null) {
-                          Text(
-                              "${hm(np.start)} - ${hm(np.stop)}" + (if (np.genre.isNotBlank()) "  -  ${np.genre}" else ""),
-                              color = Accent, fontSize = 13.sp
-                          )
-                          LinearProgressIndicator(
-                              progress = { progressOf(np, vm.now) },
-                              modifier = Modifier.fillMaxWidth(0.6f).height(3.dp),
-                              color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
-                          )
-                          if (np.desc.isNotBlank()) {
-                              Text(np.desc, color = Dim, fontSize = 13.sp, maxLines = if (wide) 3 else 2, overflow = TextOverflow.Ellipsis)
-                          }
-                      }
-                      Spacer(Modifier.height(4.dp))
-                      GlassButton("Watch live", icon = Icons.Filled.PlayArrow, primary = true, onClick = onWatch)
                   }
               }
           }
@@ -2056,8 +2436,6 @@ jobs:
                   }
               }
           }
-
-          /* ============================================================== SEARCH */
 
           @Composable
           fun SearchTab(vm: MainVM, onOpen: (Channel, List<Channel>) -> Unit) {
@@ -2219,12 +2597,12 @@ jobs:
                           shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()
                       )
                       Row(verticalAlignment = Alignment.CenterVertically) {
-                          Text("Resume last channel on launch", Modifier.weight(1f))
+                          Text("Resume last channel fullscreen on launch", Modifier.weight(1f))
                           Switch(checked = vm.resumeLast, onCheckedChange = { vm.setResume(it) })
                       }
                   }
                   Text(
-                      "Long-press (or hold OK) on a channel to add it to Favorites.",
+                      "Long-press (or hold OK) on a channel to add it to Favorites. Press OK on the playing channel (or on the preview) for fullscreen.",
                       fontSize = 12.sp, color = Dim
                   )
               }
@@ -2298,8 +2676,10 @@ jobs:
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.drawBehind
           import androidx.compose.ui.focus.FocusRequester
           import androidx.compose.ui.focus.focusRequester
+          import androidx.compose.ui.geometry.Offset
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.input.key.KeyEventType
@@ -2378,7 +2758,7 @@ jobs:
                   when (vm.phase) {
                       Phase.TOKEN -> TokenScreen(vm)
                       Phase.LOADING -> Loading("Loading channels...")
-                      Phase.READY -> if (vm.fullscreen) PlayerScreen(vm, pc, act) else HomeScreen(vm)
+                      Phase.READY -> if (vm.fullscreen) PlayerScreen(vm, pc, act) else HomeScreen(vm, pc)
                   }
                   SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(16.dp))
               }
@@ -2411,13 +2791,11 @@ jobs:
                   }
               }
 
+              // back leaves fullscreen but keeps the channel playing in the home preview
               BackHandler {
                   if (dialog.isNotEmpty()) dialog = ""
                   else if (showList) showList = false
-                  else {
-                      pc.stop()
-                      vm.fullscreen = false
-                  }
+                  else vm.fullscreen = false
               }
 
               val resize = when (vm.aspect) {
@@ -2466,6 +2844,7 @@ jobs:
                           }
                       },
                       update = { it.resizeMode = resize },
+                      onRelease = { it.player = null },
                       modifier = Modifier.fillMaxSize()
                   )
 
@@ -2512,7 +2891,6 @@ jobs:
                               horizontalArrangement = Arrangement.spacedBy(8.dp)
                           ) {
                               GlassIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", size = 40.dp) {
-                                  pc.stop()
                                   vm.fullscreen = false
                               }
                               Text(
@@ -2540,51 +2918,97 @@ jobs:
 
                           Spacer(Modifier.weight(1f))
 
-                          // ---- bottom info card
+                          // ---- bottom info card: banner, title, time, description; colour glow on the free right side
                           if (ch != null) {
-                              val now = nn.first
+                              val cur = nn.first
                               val next = nn.second
+                              val bUrl = if (cur != null) bannerUrl(cur) else ""
+                              val hasBanner = bUrl.isNotBlank()
+                              val tint = rememberBannerColor(
+                                  bUrl, hashColor((cur?.title ?: ch.name) + (cur?.genre ?: ""))
+                              )
                               Row(
                                   Modifier.fillMaxWidth().padding(16.dp)
                                       .glass(RoundedCornerShape(26.dp), 0.14f, Color.Black)
+                                      .drawBehind {
+                                          drawRect(
+                                              Brush.horizontalGradient(
+                                                  listOf(
+                                                      Color.Transparent,
+                                                      tint.copy(alpha = 0.16f),
+                                                      tint.copy(alpha = 0.46f)
+                                                  ),
+                                                  startX = size.width * 0.30f,
+                                                  endX = size.width
+                                              )
+                                          )
+                                          drawRect(
+                                              Brush.radialGradient(
+                                                  listOf(tint.copy(alpha = 0.42f), Color.Transparent),
+                                                  center = Offset(size.width, size.height * 0.5f),
+                                                  radius = size.height * 1.6f
+                                              )
+                                          )
+                                      }
                                       .padding(14.dp),
                                   verticalAlignment = Alignment.CenterVertically
                               ) {
-                                  if (now != null && bannerUrl(now).isNotBlank()) {
+                                  if (hasBanner) {
                                       Box(
                                           Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
                                               .background(Color.White.copy(alpha = 0.08f))
-                                      ) { Banner(bannerUrl(now), Modifier.fillMaxSize()) }
+                                      ) { Banner(bUrl, Modifier.fillMaxSize()) }
                                   } else {
                                       Logo(ch, 56.dp)
                                   }
                                   Spacer(Modifier.width(16.dp))
-                                  Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                  Column(Modifier.weight(1.7f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                       Text(ch.name, color = Dim, fontSize = 12.sp, maxLines = 1)
-                                      if (now != null) {
+                                      if (cur != null) {
                                           Text(
-                                              now.title, color = Color.White, fontWeight = FontWeight.Bold,
-                                              fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                              cur.title, color = Color.White, fontWeight = FontWeight.Bold,
+                                              fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                                           )
-                                          Text("${hm(now.start)} - ${hm(now.stop)}", color = Accent, fontSize = 12.sp)
+                                          Text(
+                                              "${hm(cur.start)} - ${hm(cur.stop)}" +
+                                                  (if (cur.genre.isNotBlank()) "  -  ${cur.genre}" else ""),
+                                              color = Accent, fontSize = 12.sp, maxLines = 1
+                                          )
                                           LinearProgressIndicator(
-                                              progress = { progressOf(now, vm.now) },
+                                              progress = { progressOf(cur, vm.now) },
                                               modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).height(3.dp),
                                               color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
                                           )
+                                          if (cur.desc.isNotBlank()) {
+                                              Text(
+                                                  cur.desc, color = Color(0xFFDDE3EE), fontSize = 13.sp,
+                                                  lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis
+                                              )
+                                          }
                                       } else {
-                                          Text("Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                          Text("Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                                      }
+                                  }
+                                  Spacer(Modifier.width(12.dp))
+                                  Column(
+                                      Modifier.weight(1f),
+                                      horizontalAlignment = Alignment.End,
+                                      verticalArrangement = Arrangement.spacedBy(4.dp)
+                                  ) {
+                                      if (hasBanner) Logo(ch, 44.dp)
+                                      if (pc.videoRes.isNotEmpty()) {
+                                          Text(pc.videoRes, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
                                       }
                                       if (next != null) {
                                           Text(
-                                              "Next ${hm(next.start)}  ${next.title}",
-                                              color = Dim, fontSize = 12.sp, maxLines = 1,
-                                              overflow = TextOverflow.Ellipsis
+                                              "UP NEXT  ${hm(next.start)}", color = Color.White.copy(alpha = 0.85f),
+                                              fontSize = 11.sp, fontWeight = FontWeight.Bold
+                                          )
+                                          Text(
+                                              next.title, color = Color.White, fontSize = 13.sp,
+                                              textAlign = TextAlign.End, maxLines = 2, overflow = TextOverflow.Ellipsis
                                           )
                                       }
-                                  }
-                                  if (pc.videoRes.isNotEmpty()) {
-                                      Text(pc.videoRes, color = Dim, fontSize = 12.sp)
                                   }
                               }
                           }
@@ -2869,7 +3293,8 @@ jobs:
                   super.onStart()
                   // session may have expired while the app was in the background
                   vm.checkExpiry()
-                  if (vm.fullscreen && vm.current != null) vm.playNonce++
+                  // resume the live preview / fullscreen stream
+                  if (vm.current != null) vm.playNonce++
               }
 
               override fun onStop() {
