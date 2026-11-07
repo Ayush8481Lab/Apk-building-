@@ -855,7 +855,7 @@ jobs:
                   store.userAgent = v
               }
 
-              fun setAutoRefresh(v: Boolean) {
+              fun updateAutoRefresh(v: Boolean) {
                   autoRefresh = v
                   store.autoRefresh = v
               }
@@ -865,7 +865,7 @@ jobs:
                   store.resumeLast = v
               }
 
-              fun setAspect(v: Int) {
+              fun updateAspect(v: Int) {
                   aspect = v
                   store.aspect = v
               }
@@ -1614,7 +1614,7 @@ jobs:
                   )
                   Row(verticalAlignment = Alignment.CenterVertically) {
                       Text("Auto refresh playlist and EPG every 12h", Modifier.weight(1f))
-                      Switch(checked = vm.autoRefresh, onCheckedChange = { vm.setAutoRefresh(it) })
+                      Switch(checked = vm.autoRefresh, onCheckedChange = { vm.updateAutoRefresh(it) })
                   }
                   Row(verticalAlignment = Alignment.CenterVertically) {
                       Text("Resume last channel on launch", Modifier.weight(1f))
@@ -1967,7 +1967,7 @@ jobs:
                   "audio" -> TrackDialog("Audio", C.TRACK_TYPE_AUDIO, pc, null) { dialog = "" }
                   "sub" -> TrackDialog("Subtitles", C.TRACK_TYPE_TEXT, pc, "Off") { dialog = "" }
                   "video" -> TrackDialog("Video quality", C.TRACK_TYPE_VIDEO, pc, "Auto") { dialog = "" }
-                  "aspect" -> SimpleDialog("Aspect ratio", listOf("Fit", "Zoom", "Stretch"), vm.aspect, { vm.setAspect(it) }) { dialog = "" }
+                  "aspect" -> SimpleDialog("Aspect ratio", listOf("Fit", "Zoom", "Stretch"), vm.aspect, { vm.updateAspect(it) }) { dialog = "" }
                   "sleep" -> {
                       val mins = listOf(15, 30, 45, 60, 90, 120)
                       SimpleDialog(
