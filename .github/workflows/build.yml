@@ -147,6 +147,8 @@ jobs:
               implementation("androidx.media3:media3-ui:$media3")
 
               implementation("io.coil-kt:coil-compose:2.7.0")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("androidx.media3:media3-datasource-okhttp:$media3")
           }
           __SB_EOF__
 
@@ -265,6 +267,20 @@ jobs:
                   try { URLDecoder.decode(v.replace("+", "%2B"), "UTF-8") } catch (e: Exception) { v }
               } else v
 
+          /** "Name: value" or "Name=value", one per line. */
+          fun parseHeaderLines(s: String): Map<String, String> {
+              val m = LinkedHashMap<String, String>()
+              s.lines().forEach { raw ->
+                  val l = raw.trim()
+                  if (l.isEmpty() || l.startsWith("#")) return@forEach
+                  val c = l.indexOf(':')
+                  val e = l.indexOf('=')
+                  val i = if (c < 0) e else if (e < 0) c else minOf(c, e)
+                  if (i > 0) m[l.substring(0, i).trim()] = l.substring(i + 1).trim()
+              }
+              return m
+          }
+
           fun parseHeaderString(s: String): Map<String, String> {
               val m = LinkedHashMap<String, String>()
               s.split('&').forEach { p ->
@@ -329,6 +345,10 @@ jobs:
               var userAgent: String
                   get() = sp.getString("ua", DEFAULT_UA) ?: DEFAULT_UA
                   set(v) { sp.edit().putString("ua", v).apply() }
+
+              var extraHeaders: String
+                  get() = sp.getString("xh", "") ?: ""
+                  set(v) { sp.edit().putString("xh", v).apply() }
 
               var autoRefresh: Boolean
                   get() = sp.getBoolean("autoRefresh", true)
@@ -503,6 +523,7 @@ jobs:
                           val v = kv.substringAfter('=', "")
                           if (k == "http-user-agent") ua = v
                           if (k == "http-referrer" || k == "http-referer") ref = v
+                          if (k == "http-cookie") hdr["Cookie"] = v
                       } else if (line.startsWith("#")) {
                           // other directives ignored
                       } else if (pending) {
@@ -654,6 +675,7 @@ jobs:
               var group by mutableStateOf(G_ALL)
 
               var userAgent by mutableStateOf(store.userAgent)
+              var extraHeaders by mutableStateOf(store.extraHeaders)
               var autoRefresh by mutableStateOf(store.autoRefresh)
               var resumeLast by mutableStateOf(store.resumeLast)
               var aspect by mutableIntStateOf(store.aspect)
@@ -924,6 +946,11 @@ jobs:
                   store.userAgent = v
               }
 
+              fun updateExtraHeaders(v: String) {
+                  extraHeaders = v
+                  store.extraHeaders = v
+              }
+
               fun updateAutoRefresh(v: Boolean) {
                   autoRefresh = v
                   store.autoRefresh = v
@@ -937,6 +964,146 @@ jobs:
               fun updateAspect(v: Int) {
                   aspect = v
                   store.aspect = v
+              }
+          }
+          __SB_EOF__
+
+          mkdir -p app/src/main/java/com/streambox/player
+          cat > app/src/main/java/com/streambox/player/Http.kt <<'__SB_EOF__'
+          package com.streambox.player
+
+          import okhttp3.Cookie
+          import okhttp3.CookieJar
+          import okhttp3.HttpUrl
+          import okhttp3.Interceptor
+          import okhttp3.OkHttpClient
+          import java.io.IOException
+          import java.util.concurrent.TimeUnit
+
+          /** Small ring buffer of recent HTTP activity, shown in the player's "Network log" dialog. */
+          object NetLog {
+              private val lines = ArrayDeque<String>()
+
+              @Synchronized
+              fun add(s: String) {
+                  lines.addLast(s)
+                  while (lines.size > 150) lines.removeFirst()
+              }
+
+              @Synchronized
+              fun snapshot(): List<String> = lines.toList()
+
+              @Synchronized
+              fun last(n: Int): List<String> = lines.takeLast(n)
+
+              @Synchronized
+              fun clear() {
+                  lines.clear()
+              }
+          }
+
+          /**
+           * RFC 6265 cookie jar (OkHttp's own matching rules: domain, path, secure, expiry).
+           * Cookies set by the manifest / CDN are replayed on segment, key and license requests.
+           * [fixed] holds a manual "Cookie: a=b; c=d" value from the playlist, sent to every host.
+           */
+          class MemoryCookieJar : CookieJar {
+              private val store = ArrayList<Cookie>()
+
+              @Volatile
+              var fixed: String = ""
+
+              @Synchronized
+              override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                  val now = System.currentTimeMillis()
+                  for (c in cookies) {
+                      store.removeAll { it.name == c.name && it.domain == c.domain && it.path == c.path }
+                      if (c.expiresAt > now) store.add(c) // an already-expired cookie is a delete request
+                  }
+              }
+
+              @Synchronized
+              override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                  val now = System.currentTimeMillis()
+                  store.removeAll { it.expiresAt <= now }
+                  val out = ArrayList<Cookie>()
+                  for (c in store) if (c.matches(url)) out.add(c)
+                  val f = fixed
+                  if (f.isNotBlank()) {
+                      for (part in f.split(';')) {
+                          val i = part.indexOf('=')
+                          if (i <= 0) continue
+                          val n = part.substring(0, i).trim()
+                          val v = part.substring(i + 1).trim()
+                          if (n.isEmpty() || out.any { it.name == n }) continue
+                          try {
+                              out.add(Cookie.Builder().name(n).value(v).domain(url.host).build())
+                          } catch (e: Exception) {
+                              // ignore malformed manual cookie
+                          }
+                      }
+                  }
+                  return out
+              }
+
+              @Synchronized
+              fun clear() {
+                  store.clear()
+              }
+          }
+
+          object Http {
+              val jar = MemoryCookieJar()
+
+              private fun where(url: HttpUrl): String = url.host + url.encodedPath.takeLast(60)
+
+              private val logger = Interceptor { chain ->
+                  val req = chain.request()
+                  val t0 = System.currentTimeMillis()
+                  val sent = req.header("Cookie")?.split(';')?.map { it.substringBefore('=').trim() } ?: emptyList()
+                  try {
+                      val resp = chain.proceed(req)
+                      val set = resp.headers("Set-Cookie").map { it.substringBefore('=').trim() }
+                      val loc = resp.header("Location")?.let { req.url.resolve(it)?.host }
+                      val sb = StringBuilder()
+                      sb.append(resp.code).append(' ').append(req.method).append(' ').append(where(req.url))
+                      sb.append("  ").append(System.currentTimeMillis() - t0).append("ms")
+                      sb.append("  cookies sent=").append(if (sent.isEmpty()) "none" else sent.joinToString(","))
+                      if (set.isNotEmpty()) sb.append("  set=").append(set.joinToString(","))
+                      if (loc != null) sb.append("  -> ").append(loc)
+                      NetLog.add(sb.toString())
+                      resp
+                  } catch (e: IOException) {
+                      NetLog.add("ERR " + req.method + " " + where(req.url) + "  " + e.javaClass.simpleName + ": " + e.message)
+                      throw e
+                  }
+              }
+
+              val client: OkHttpClient = OkHttpClient.Builder()
+                  .cookieJar(jar)
+                  .connectTimeout(15, TimeUnit.SECONDS)
+                  .readTimeout(25, TimeUnit.SECONDS)
+                  .followRedirects(true)
+                  .followSslRedirects(true)
+                  .retryOnConnectionFailure(true)
+                  .addNetworkInterceptor(logger)
+                  .build()
+
+              private val tokenRe = Regex("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+              /** Drop headers OkHttp would reject (it throws on control / non-ASCII chars). */
+              fun cleanHeaders(m: Map<String, String>): LinkedHashMap<String, String> {
+                  val out = LinkedHashMap<String, String>()
+                  for ((k, v0) in m) {
+                      val v = v0.trim()
+                      val bad = v.any { (it <= '\u001f' && it != '\t') || it >= '\u007f' }
+                      if (!tokenRe.matches(k) || bad) {
+                          NetLog.add("skipped invalid header: $k")
+                      } else {
+                          out[k] = v
+                      }
+                  }
+                  return out
               }
           }
           __SB_EOF__
@@ -966,7 +1133,7 @@ jobs:
           import androidx.media3.common.Tracks
           import androidx.media3.common.VideoSize
           import androidx.media3.datasource.DefaultDataSource
-          import androidx.media3.datasource.DefaultHttpDataSource
+          import androidx.media3.datasource.okhttp.OkHttpDataSource
           import androidx.media3.datasource.HttpDataSource
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
@@ -975,9 +1142,6 @@ jobs:
           import androidx.media3.exoplayer.drm.FrameworkMediaDrm
           import androidx.media3.exoplayer.drm.LocalMediaDrmCallback
           import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-          import java.net.CookieHandler
-          import java.net.CookieManager
-          import java.net.CookiePolicy
           import java.util.Locale
           import java.util.UUID
           import kotlin.math.roundToInt
@@ -1083,10 +1247,8 @@ jobs:
           }
 
           class PlayerController(private val ctx: Context) {
-              private val http = DefaultHttpDataSource.Factory()
-                  .setAllowCrossProtocolRedirects(true)
-                  .setConnectTimeoutMs(15000)
-                  .setReadTimeoutMs(20000)
+              // OkHttp + RFC 6265 cookie jar: Set-Cookie from the manifest/CDN is replayed on every later request
+              private val http = OkHttpDataSource.Factory(Http.client)
 
               private val defaultDrm = DefaultDrmSessionManagerProvider().apply { setDrmHttpDataSourceFactory(http) }
               private var localDrm: DrmSessionManager? = null
@@ -1110,11 +1272,6 @@ jobs:
               private val handler = Handler(Looper.getMainLooper())
 
               init {
-                  // Keep cookies (Set-Cookie from manifest/CDN) and send them back on segment requests,
-                  // like TiviMate does. Android's HttpURLConnection only does this with a CookieHandler.
-                  if (CookieHandler.getDefault() == null) {
-                      CookieHandler.setDefault(CookieManager(null, CookiePolicy.ACCEPT_ALL))
-                  }
                   player.setAudioAttributes(
                       AudioAttributes.Builder()
                           .setUsage(C.USAGE_MEDIA)
@@ -1153,10 +1310,10 @@ jobs:
                           val isDrm = e.errorCode in 6000..6999
                           if (!isDrm && retries < 3) {
                               retries++
-                              error = "Reconnecting ($retries/3)\n$detail"
+                              error = "Reconnecting ($retries/3)\n$detail" + netTail()
                               handler.postDelayed({ player.prepare() }, 2500)
                           } else {
-                              error = "Playback failed\n$detail" + hint(e.errorCode)
+                              error = "Playback failed\n$detail" + hint(e.errorCode) + netTail()
                           }
                       }
                   })
@@ -1194,23 +1351,40 @@ jobs:
                   else -> ""
               }
 
+              private fun netTail(): String {
+                  val l = NetLog.last(4)
+                  return if (l.isEmpty()) "" else "\n\nLast requests:\n" + l.joinToString("\n")
+              }
+
               private fun supported(u: UUID): Boolean = try {
                   MediaDrm.isCryptoSchemeSupported(u)
               } catch (e: Exception) {
                   false
               }
 
-              fun play(ch: Channel, defaultUa: String) {
+              fun play(ch: Channel, defaultUa: String, extra: String = "") {
                   handler.removeCallbacksAndMessages(null)
                   retries = 0
                   error = null
                   localDrm = null
-                  val hdr = LinkedHashMap<String, String>(ch.headers)
+                  Http.jar.clear()
+                  val hdr = LinkedHashMap<String, String>(parseHeaderLines(extra))
+                  hdr.putAll(ch.headers)
                   if (ch.referer.isNotBlank() && hdr.keys.none { it.equals("Referer", true) }) hdr["Referer"] = ch.referer
+                  val cookieKey = hdr.keys.firstOrNull { it.equals("Cookie", true) }
+                  Http.jar.fixed = if (cookieKey != null) (hdr.remove(cookieKey) ?: "") else ""
                   val uaOverride = hdr.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value
                   hdr.keys.removeAll { it.equals("User-Agent", true) }
-                  http.setUserAgent(uaOverride ?: ch.ua.ifBlank { defaultUa })
-                  http.setDefaultRequestProperties(hdr)
+                  val ua = uaOverride ?: ch.ua.ifBlank { defaultUa }
+                  val clean = Http.cleanHeaders(hdr)
+                  http.setUserAgent(ua)
+                  http.setDefaultRequestProperties(clean)
+                  NetLog.add(
+                      "PLAY " + ch.url.substringAfter("://").substringBefore('?').take(70) +
+                          "  UA=" + ua.take(40) + "  headers=" + clean.keys.joinToString(",").ifEmpty { "none" } +
+                          "  manual cookie=" + (if (Http.jar.fixed.isBlank()) "no" else "yes") +
+                          "  drm=" + (if (ch.drmType.isBlank() && ch.drmKey.isBlank()) "no" else ch.drmType.ifBlank { "auto" })
+                  )
 
                   val url = ch.url
                   val low = url.lowercase()
@@ -1885,6 +2059,11 @@ jobs:
                       value = vm.userAgent, onValueChange = { vm.setUa(it) }, singleLine = true,
                       label = { Text("User-Agent") }, modifier = Modifier.fillMaxWidth()
                   )
+                  OutlinedTextField(
+                      value = vm.extraHeaders, onValueChange = { vm.updateExtraHeaders(it) },
+                      label = { Text("Extra headers for all streams (Name: value, one per line)") },
+                      minLines = 3, modifier = Modifier.fillMaxWidth()
+                  )
                   Row(verticalAlignment = Alignment.CenterVertically) {
                       Text("Auto refresh playlist and EPG every 12h", Modifier.weight(1f))
                       Switch(checked = vm.autoRefresh, onCheckedChange = { vm.updateAutoRefresh(it) })
@@ -1925,6 +2104,7 @@ jobs:
           import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.foundation.layout.fillMaxWidth
           import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.heightIn
           import androidx.compose.foundation.layout.padding
           import androidx.compose.foundation.layout.width
           import androidx.compose.foundation.lazy.LazyColumn
@@ -1934,6 +2114,7 @@ jobs:
           import androidx.compose.material.icons.Icons
           import androidx.compose.material.icons.automirrored.filled.ArrowBack
           import androidx.compose.material.icons.filled.AspectRatio
+          import androidx.compose.material.icons.filled.BugReport
           import androidx.compose.material.icons.filled.Audiotrack
           import androidx.compose.material.icons.filled.ChevronLeft
           import androidx.compose.material.icons.filled.ChevronRight
@@ -1970,7 +2151,10 @@ jobs:
           import androidx.compose.ui.input.key.onKeyEvent
           import androidx.compose.ui.input.key.type
           import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.platform.LocalClipboardManager
           import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.AnnotatedString
+          import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.text.style.TextOverflow
@@ -1991,7 +2175,7 @@ jobs:
           fun AppRoot(vm: MainVM, pc: PlayerController, act: MainActivity) {
               // start / restart playback whenever a channel is (re)selected
               LaunchedEffect(vm.playNonce) {
-                  vm.current?.let { pc.play(it, vm.userAgent) }
+                  vm.current?.let { pc.play(it, vm.userAgent, vm.extraHeaders) }
               }
 
               // sleep timer
@@ -2177,6 +2361,7 @@ jobs:
                               IconButton(onClick = { dialog = "video" }) { Icon(Icons.Filled.HighQuality, "Quality", tint = Color.White) }
                               IconButton(onClick = { dialog = "aspect" }) { Icon(Icons.Filled.AspectRatio, "Aspect", tint = Color.White) }
                               IconButton(onClick = { dialog = "sleep" }) { Icon(Icons.Filled.Timer, "Sleep timer", tint = Color.White) }
+                              IconButton(onClick = { dialog = "log" }) { Icon(Icons.Filled.BugReport, "Network log", tint = Color.White) }
                               IconButton(onClick = { act.enterPip() }) { Icon(Icons.Filled.PictureInPictureAlt, "PiP", tint = Color.White) }
                               IconButton(onClick = { showList = true }) { Icon(Icons.Filled.FormatListBulleted, "Channels", tint = Color.White) }
                           }
@@ -2242,6 +2427,7 @@ jobs:
                   "audio" -> TrackDialog("Audio", C.TRACK_TYPE_AUDIO, pc, null) { dialog = "" }
                   "sub" -> TrackDialog("Subtitles", C.TRACK_TYPE_TEXT, pc, "Off") { dialog = "" }
                   "video" -> TrackDialog("Video quality", C.TRACK_TYPE_VIDEO, pc, "Auto") { dialog = "" }
+                  "log" -> LogDialog { dialog = "" }
                   "aspect" -> SimpleDialog("Aspect ratio", listOf("Fit", "Zoom", "Stretch"), vm.aspect, { vm.updateAspect(it) }) { dialog = "" }
                   "sleep" -> {
                       val mins = listOf(15, 30, 45, 60, 90, 120)
@@ -2341,6 +2527,33 @@ jobs:
                       }
                   },
                   confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+              )
+          }
+
+          @Composable
+          fun LogDialog(onDismiss: () -> Unit) {
+              var tick by remember { mutableStateOf(0) }
+              val lines = remember(tick) { NetLog.snapshot().reversed() }
+              val clip = LocalClipboardManager.current
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  title = { Text("Network log (newest first)") },
+                  text = {
+                      LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                          if (lines.isEmpty()) item { Text("No requests yet") }
+                          items(lines) { l ->
+                              Text(l, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 3.dp))
+                          }
+                      }
+                  },
+                  confirmButton = {
+                      Row {
+                          TextButton(onClick = { clip.setText(AnnotatedString(lines.joinToString("\n"))) }) { Text("Copy") }
+                          TextButton(onClick = { NetLog.clear(); tick++ }) { Text("Clear") }
+                          TextButton(onClick = { tick++ }) { Text("Refresh") }
+                          TextButton(onClick = onDismiss) { Text("Close") }
+                      }
+                  }
               )
           }
           __SB_EOF__
