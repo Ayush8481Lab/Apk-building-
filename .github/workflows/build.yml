@@ -2139,14 +2139,7 @@ jobs:
                                   else -> SettingsTab(vm)
                               }
                           }
-                          AnimatedVisibility(
-                              visible = vm.menuLevel > 0,
-                              modifier = Modifier.align(Alignment.CenterStart),
-                              enter = slideInHorizontally(tween(380, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(300)),
-                              exit = slideOutHorizontally(tween(320, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(260))
-                          ) {
-                              Sidebar(vm)
-                          }
+                          Box(Modifier.align(Alignment.CenterStart)) { SidebarHost(vm) }
                       }
                   }
               }
@@ -2281,6 +2274,18 @@ jobs:
                           }
                       }
                   }
+              }
+          }
+
+          /** Top-level wrapper so AnimatedVisibility is not resolved against an outer ColumnScope. */
+          @Composable
+          fun SidebarHost(vm: MainVM) {
+              AnimatedVisibility(
+                  visible = vm.menuLevel > 0,
+                  enter = slideInHorizontally(tween(380, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(300)),
+                  exit = slideOutHorizontally(tween(320, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(260))
+              ) {
+                  Sidebar(vm)
               }
           }
 
