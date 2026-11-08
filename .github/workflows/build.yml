@@ -2,6 +2,7 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + hidden slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
+# v5: TV-remote fullscreen player, rectangular logo tiles, 16:9 programme cards, 6 rows auto-fit, EPG loads up to 10 days while scrolling sideways.
 # Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "LiveTV-APK".
 
 on:
@@ -95,8 +96,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 4
-                  versionName = "4.0"
+                  versionCode = 5
+                  versionName = "5.0"
               }
 
               buildTypes {
@@ -231,7 +232,9 @@ jobs:
           import java.net.URLDecoder
           import java.util.concurrent.TimeUnit
 
-          const val DEFAULT_UA = "VLC/3.0.20 LibVLC/3.0.20"
+          /** Default User-Agent for the stream requests (editable in Settings). */
+          const val DEFAULT_UA = "okhttp/4.12.13"
+          private const val OLD_DEFAULT_UA = "VLC/3.0.20 LibVLC/3.0.20"
           const val API_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
           const val API_BASE = "https://ayush8481tvpl8481.pages.dev/live/"
           const val EPG_API = "https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get"
@@ -239,6 +242,9 @@ jobs:
 
           /** EPG responses are cached (disk + memory) for this long. */
           const val EPG_TTL_MS = 30 * 60_000L
+
+          /** Furthest EPG day offset (0 = today) the home rows can scroll into. */
+          const val MAX_DAY_OFFSET = 10
 
           data class Channel(
               val id: String,
@@ -324,7 +330,11 @@ jobs:
                   set(v) { sp.edit().putString("token", v).apply() }
 
               var userAgent: String
-                  get() = sp.getString("ua", DEFAULT_UA) ?: DEFAULT_UA
+                  get() {
+                      val v = sp.getString("ua", DEFAULT_UA) ?: DEFAULT_UA
+                      // upgrade installs that still carry the old built-in default
+                      return if (v.isBlank() || v == OLD_DEFAULT_UA) DEFAULT_UA else v
+                  }
                   set(v) { sp.edit().putString("ua", v).apply() }
 
               var extraHeaders: String
@@ -509,6 +519,7 @@ jobs:
           }
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/Http.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -713,6 +724,7 @@ jobs:
           }
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/Vm.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -762,6 +774,8 @@ jobs:
               var menuLevel by mutableIntStateOf(0)
               var expire by mutableLongStateOf(0L)
               val epg = mutableStateMapOf<String, List<Program>>()
+              /** Day offsets (0 until n) each channel's home row has asked for. Grows while the row is scrolled sideways, up to MAX_DAY_OFFSET + 1. */
+              val epgDays = mutableStateMapOf<String, Int>()
               /** Bumped every ~10 minutes so visible channels re-check their (30 min) EPG cache. */
               var epgTick by mutableIntStateOf(0)
 
@@ -854,6 +868,7 @@ jobs:
                   categories = emptyList()
                   epg.clear()
                   epgAt.clear()
+                  epgDays.clear()
                   expire = 0L
                   token = ""
                   store.token = ""
@@ -1007,11 +1022,35 @@ jobs:
                   return Pair(null, a.firstOrNull { it.start > now } ?: b.firstOrNull { it.start > now })
               }
 
-              /** Live programme + everything coming up (today + tomorrow), used for the home rows. */
+              /** How many day offsets (0 until n) this channel's home row currently shows. Starts at 2 (today + tomorrow). */
+              fun daysLoaded(id: String): Int = epgDays[id] ?: 2
+
+              /**
+               * Called when a home row is scrolled close to its last programme: fetches the next day
+               * (offset 2, 3 ... up to MAX_DAY_OFFSET = 10). Stops when the previous day was empty / missing.
+               */
+              fun loadMoreDays(id: String) {
+                  val d = daysLoaded(id)
+                  if (d > MAX_DAY_OFFSET) return
+                  val prev = epg["$id:${d - 1}"]
+                  if (prev == null) {
+                      // previous day failed or is still loading: retry it (it is rate limited inside ensureEpg)
+                      if (d >= 3) viewModelScope.launch { ensureEpg(id, d - 1) }
+                      return
+                  }
+                  if (prev.isEmpty()) return
+                  epgDays[id] = d + 1
+                  viewModelScope.launch { ensureEpg(id, d) }
+              }
+
+              /** Live programme + everything coming up for the days loaded so far, used for the home rows. */
               fun upcoming(ch: Channel): List<Program> {
-                  val a = epg["${ch.id}:0"] ?: emptyList()
-                  val b = epg["${ch.id}:1"] ?: emptyList()
-                  return (a + b).filter { it.stop > now }.distinctBy { it.start }.sortedBy { it.start }.take(14)
+                  val days = daysLoaded(ch.id)
+                  val out = ArrayList<Program>()
+                  for (o in 0 until days) {
+                      epg["${ch.id}:$o"]?.let { out.addAll(it) }
+                  }
+                  return out.filter { it.stop > now }.distinctBy { it.start }.sortedBy { it.start }
               }
 
               /* ------------------------------------------------------------- channels */
@@ -1093,6 +1132,7 @@ jobs:
           }
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/PlayerController.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -1468,6 +1508,7 @@ jobs:
           }
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/Glass.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -1818,6 +1859,7 @@ jobs:
           )
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/Ui.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -1843,6 +1885,7 @@ jobs:
           import androidx.compose.foundation.interaction.MutableInteractionSource
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.BoxWithConstraints
           import androidx.compose.foundation.layout.Column
           import androidx.compose.foundation.layout.PaddingValues
           import androidx.compose.foundation.layout.Row
@@ -1938,7 +1981,6 @@ jobs:
           import java.util.Locale
 
           private val HM = SimpleDateFormat("HH:mm", Locale.getDefault())
-          private val DATE_FMT = SimpleDateFormat("EEE d MMM", Locale.getDefault())
           fun hm(ms: Long): String = HM.format(Date(ms))
 
           fun progressOf(p: Program, now: Long): Float =
@@ -2130,10 +2172,7 @@ jobs:
                       Box(Modifier.weight(1f).fillMaxWidth()) {
                           Box(Modifier.fillMaxSize()) {
                               when (tab) {
-                                  0 -> Column(Modifier.fillMaxSize()) {
-                                      GuideHeader(vm)
-                                      LiveEpg(vm, onPick)
-                                  }
+                                  0 -> LiveEpg(vm, onPick)
                                   1 -> GuideTab(vm, onOpen)
                                   2 -> SearchTab(vm, onOpen)
                                   else -> SettingsTab(vm)
@@ -2148,6 +2187,7 @@ jobs:
           /**
            * Live preview. Left: the shared player (nothing is drawn over the video).
            * Right: the programme banner at 16:9 with its edges blended into the card, like TV / OTT apps.
+           * The small menu button (top right) opens categories / Guide / Search / Settings for touch users.
            */
           @Composable
           fun Preview(vm: MainVM, pc: PlayerController, onFull: () -> Unit) {
@@ -2236,7 +2276,7 @@ jobs:
                       }
                       Spacer(Modifier.width(18.dp))
                       Column(
-                          Modifier.weight(1f).fillMaxHeight().padding(end = if (wide) 140.dp else 0.dp),
+                          Modifier.weight(1f).fillMaxHeight().padding(end = if (wide) 140.dp else 40.dp),
                           verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
                       ) {
                           if (ch != null) {
@@ -2274,6 +2314,12 @@ jobs:
                           }
                       }
                   }
+                  // menu button replaces the old header (touch users; TV remotes use Back)
+                  GlassIconButton(
+                      Icons.Filled.Menu, "Menu",
+                      Modifier.align(Alignment.TopEnd).padding(10.dp),
+                      size = 34.dp
+                  ) { vm.menuLevel = 2 }
               }
           }
 
@@ -2380,26 +2426,12 @@ jobs:
               }
           }
 
-          @Composable
-          fun GuideHeader(vm: MainVM) {
-              Row(
-                  Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 6.dp),
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  // touch users: open the menu (TV remotes use Back)
-                  GlassIconButton(Icons.Filled.Menu, "Menu", size = 36.dp) { vm.menuLevel = 2 }
-                  Spacer(Modifier.width(12.dp))
-                  Text(vm.category, fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                  Text("   ${vm.filter(vm.category).size}", color = Dim, fontSize = 14.sp)
-                  Spacer(Modifier.weight(1f))
-                  Text(DATE_FMT.format(Date(vm.now)), color = Dim, fontSize = 14.sp)
-                  Spacer(Modifier.width(12.dp))
-                  Text(hm(vm.now), fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
-              }
-          }
-
           /* ======================================================== LIVE ROWS (EPG) */
 
+          /**
+           * Home rows. The free height under the preview is split so that (at least) 6 channel rows are always visible;
+           * more rows appear while scrolling. No header: all the space goes to the rows.
+           */
           @Composable
           fun LiveEpg(vm: MainVM, onPick: (Channel, List<Channel>) -> Unit) {
               val list = remember(vm.channels, vm.category, vm.favorites, vm.recents) { vm.filter(vm.category) }
@@ -2435,71 +2467,109 @@ jobs:
               if (list.isEmpty()) {
                   Text("Nothing here yet", color = Dim, modifier = Modifier.padding(24.dp))
               }
-              LazyColumn(
-                  state = state,
-                  modifier = Modifier.fillMaxSize(),
-                  contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
-              ) {
-                  itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
-                      ChannelRow(
-                          vm, ch, ch.id == vm.current?.id,
-                          if (i == focusIdx) Modifier.focusRequester(fr) else Modifier
-                      ) { onPick(ch, list) }
+              BoxWithConstraints(Modifier.fillMaxSize()) {
+                  // 6 rows share the available height (4dp content padding on top and bottom)
+                  val rowH = maxOf((maxHeight - 8.dp) / 6, 56.dp)
+                  LazyColumn(
+                      state = state,
+                      modifier = Modifier.fillMaxSize(),
+                      contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+                  ) {
+                      itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
+                          ChannelRow(
+                              vm, ch, ch.id == vm.current?.id, rowH,
+                              if (i == focusIdx) Modifier.focusRequester(fr) else Modifier
+                          ) { onPick(ch, list) }
+                      }
                   }
               }
           }
 
+          /**
+           * One channel row: a rectangular channel tile (name shown only until the logo has loaded, then just the logo
+           * fitted in the card) followed by a sideways list of 16:9 programme cards. Scrolling that list towards its end
+           * loads the next day from the EPG (offset 2, 3 ... up to 10).
+           */
           @Composable
-          fun ChannelRow(vm: MainVM, ch: Channel, selected: Boolean, focusMod: Modifier, onPick: () -> Unit) {
+          fun ChannelRow(
+              vm: MainVM,
+              ch: Channel,
+              selected: Boolean,
+              rowH: Dp,
+              focusMod: Modifier,
+              onPick: () -> Unit
+          ) {
               val wide = isWide()
-              val cellH = if (wide) 136.dp else 124.dp
+              val cellH = rowH - 8.dp
+              val tileW = if (wide) 150.dp else 104.dp
               val progs = vm.upcoming(ch)
+              val days = vm.daysLoaded(ch.id)
               val fav = ch.id in vm.favorites
+              val rowState = rememberLazyListState()
+
+              // side scroll: close to the last programme -> ask for one more day (restarts after every change)
+              LaunchedEffect(ch.id, progs.size, days, vm.epgTick) {
+                  snapshotFlow { rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+                      .collect { last ->
+                          if (progs.isNotEmpty() && last >= progs.size - 4) vm.loadMoreDays(ch.id)
+                      }
+              }
+
               Row(
-                  Modifier.fillMaxWidth().height(cellH + 20.dp),
+                  Modifier.fillMaxWidth().height(rowH),
                   verticalAlignment = Alignment.CenterVertically
               ) {
                   Box(
-                      Modifier.padding(start = 6.dp).width(if (wide) 150.dp else 96.dp).height(cellH)
+                      Modifier.padding(start = 4.dp).width(tileW).height(cellH)
                           .then(focusMod)
                           .focusGlow(
-                              corner = 18.dp, focusScale = 1.05f,
+                              corner = 14.dp, focusScale = 1.05f,
                               onLongClick = { vm.toggleFav(ch) }, onClick = onPick
                           )
-                          .glass(RoundedCornerShape(18.dp), if (selected) 0.26f else 0.10f, if (selected) Accent else Color.White)
-                          .padding(8.dp),
+                          .glass(RoundedCornerShape(14.dp), if (selected) 0.26f else 0.10f, if (selected) Accent else Color.White),
                       contentAlignment = Alignment.Center
                   ) {
-                      Column(
-                          horizontalAlignment = Alignment.CenterHorizontally,
-                          verticalArrangement = Arrangement.spacedBy(6.dp)
-                      ) {
-                          Logo(ch, if (wide) 50.dp else 40.dp)
-                          Row(verticalAlignment = Alignment.CenterVertically) {
-                              if (selected) {
-                                  Icon(Icons.Filled.PlayArrow, null, tint = Accent, modifier = Modifier.size(15.dp))
-                              }
-                              Text(
-                                  ch.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                                  textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis
-                              )
-                              if (fav) {
-                                  Icon(Icons.Filled.Star, null, tint = Color(0xFFFFC107), modifier = Modifier.size(14.dp))
-                              }
-                          }
+                      var loaded by remember(ch.logo) { mutableStateOf(false) }
+                      if (ch.logo.isNotBlank()) {
+                          AsyncImage(
+                              model = ch.logo, contentDescription = ch.name, contentScale = ContentScale.Fit,
+                              onSuccess = { loaded = true },
+                              modifier = Modifier.fillMaxSize().padding(8.dp)
+                          )
+                      }
+                      if (!loaded) {
+                          Text(
+                              ch.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                              textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                              modifier = Modifier.padding(8.dp)
+                          )
+                      }
+                      if (selected) {
+                          Icon(
+                              Icons.Filled.PlayArrow, null, tint = Accent,
+                              modifier = Modifier.align(Alignment.TopStart).padding(4.dp).size(16.dp)
+                          )
+                      }
+                      if (fav) {
+                          Icon(
+                              Icons.Filled.Star, null, tint = Color(0xFFFFC107),
+                              modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(14.dp)
+                          )
                       }
                   }
                   LazyRow(
-                      Modifier.weight(1f).fillMaxHeight(),
-                      contentPadding = PaddingValues(start = 12.dp, end = 80.dp, top = 10.dp, bottom = 10.dp),
-                      horizontalArrangement = Arrangement.spacedBy(10.dp)
+                      state = rowState,
+                      modifier = Modifier.weight(1f).fillMaxHeight(),
+                      contentPadding = PaddingValues(start = 10.dp, end = 60.dp, top = 4.dp, bottom = 4.dp),
+                      horizontalArrangement = Arrangement.spacedBy(8.dp),
+                      verticalAlignment = Alignment.CenterVertically
                   ) {
                       if (progs.isEmpty()) {
                           item {
                               Column(
-                                  Modifier.width(200.dp).height(cellH)
-                                      .glass(RoundedCornerShape(16.dp), 0.06f)
-                                      .padding(14.dp),
+                                  Modifier.width(190.dp).height(cellH)
+                                      .glass(RoundedCornerShape(14.dp), 0.06f)
+                                      .padding(12.dp),
                                   verticalArrangement = Arrangement.Center
                               ) {
                                   Text("No schedule available", color = Dim, fontSize = 13.sp)
@@ -2514,41 +2584,58 @@ jobs:
           }
 
           /**
-           * One programme (compact): small start-time tag, 16:9 banner, title.
-           * When focused it grows smoothly and reveals end time, genre and the description
-           * (up to 4 lines, then "..."). The live programme gets a blue progress line on its banner.
+           * One programme: a 16:9 card whose banner fills the whole card, with the start time and the LIVE tag
+           * overlaid on the banner and the title along its bottom edge. When focused it grows sideways and shows
+           * the programme name ABOVE the description (plus time and genre).
            */
           @Composable
           fun ProgCell(vm: MainVM, p: Program, cellH: Dp, onClick: () -> Unit) {
-              val wide = isWide()
               val live = vm.now >= p.start && vm.now < p.stop
               var foc by remember { mutableStateOf(false) }
-              val bw = if (wide) 140.dp else 108.dp
-              val dw = if (wide) 230.dp else 160.dp
-              val closedW = bw + 16.dp
-              val openW = bw + dw + 28.dp
+              val bw = cellH * (16f / 9f)
+              val dw = if (isWide()) 250.dp else 180.dp
               val w by animateDpAsState(
-                  if (foc) openW else closedW,
+                  if (foc) bw + dw else bw,
                   spring(dampingRatio = 0.85f, stiffness = 260f),
                   label = "w"
               )
               val da by animateFloatAsState(if (foc) 1f else 0f, tween(380), label = "da")
-              val cardShape = RoundedCornerShape(16.dp)
+              val titleLines = if (cellH >= 92.dp) 2 else 1
+              val descLines = (((cellH.value - 50f) / 15f).toInt()).coerceIn(1, 4)
+              val shape = RoundedCornerShape(14.dp)
               Box(
                   Modifier.width(w).height(cellH)
-                      .focusGlow(corner = 16.dp, focusScale = 1.03f, onFocusChange = { foc = it }, onClick = onClick)
-                      .glass(cardShape, if (live) 0.18f else 0.09f, if (live) Accent else Color.White)
+                      .focusGlow(corner = 14.dp, focusScale = 1.03f, onFocusChange = { foc = it }, onClick = onClick)
+                      .glass(shape, if (live) 0.18f else 0.09f, if (live) Accent else Color.White)
               ) {
-                  Row(Modifier.wrapContentWidth(Alignment.Start, unbounded = true).padding(8.dp)) {
-                      Column(Modifier.width(bw), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                          // start-time tag above the banner
-                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  Row(Modifier.wrapContentWidth(Alignment.Start, unbounded = true).fillMaxHeight()) {
+                      // 16:9 banner, full card size
+                      Box(
+                          Modifier.width(bw).fillMaxHeight().background(
+                              Brush.linearGradient(
+                                  listOf(hashColor(p.title).copy(alpha = 0.35f), Accent2.copy(alpha = 0.15f))
+                              )
+                          )
+                      ) {
+                          Banner(bannerUrl(p), Modifier.fillMaxSize())
+                          // bottom scrim for the title
+                          Box(
+                              Modifier.fillMaxSize().background(
+                                  Brush.verticalGradient(0.4f to Color.Transparent, 1f to Color(0xCC05070D))
+                              )
+                          )
+                          // overlay: start time + LIVE tag
+                          Row(
+                              Modifier.align(Alignment.TopStart).padding(5.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.spacedBy(4.dp)
+                          ) {
                               Text(
-                                  hm(p.start), color = if (live) Accent else Dim, fontSize = 10.sp,
+                                  hm(p.start), color = Color.White, fontSize = 10.sp,
                                   fontWeight = FontWeight.SemiBold, maxLines = 1,
                                   modifier = Modifier.clip(RoundedCornerShape(6.dp))
-                                      .background(Color.White.copy(alpha = 0.10f))
-                                      .padding(horizontal = 6.dp, vertical = 1.dp)
+                                      .background(Color.Black.copy(alpha = 0.55f))
+                                      .padding(horizontal = 5.dp, vertical = 1.dp)
                               )
                               if (live) {
                                   Text(
@@ -2558,36 +2645,30 @@ jobs:
                                   )
                               }
                           }
-                          // banner, always 16:9
-                          Box(
-                              Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(10.dp))
-                                  .background(
-                                      Brush.linearGradient(
-                                          listOf(hashColor(p.title).copy(alpha = 0.35f), Accent2.copy(alpha = 0.15f))
-                                      )
-                                  )
-                          ) {
-                              Banner(bannerUrl(p), Modifier.fillMaxSize())
-                              if (live) {
-                                  LinearProgressIndicator(
-                                      progress = { progressOf(p, vm.now) },
-                                      modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp),
-                                      color = Accent, trackColor = Color.Black.copy(alpha = 0.45f)
-                                  )
-                              }
-                          }
                           Text(
-                              p.title, fontWeight = FontWeight.SemiBold, fontSize = 12.sp,
-                              maxLines = 1, overflow = TextOverflow.Ellipsis
+                              p.title, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                              maxLines = 1, overflow = TextOverflow.Ellipsis,
+                              modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                                  .padding(start = 6.dp, end = 6.dp, bottom = if (live) 6.dp else 4.dp)
                           )
+                          if (live) {
+                              LinearProgressIndicator(
+                                  progress = { progressOf(p, vm.now) },
+                                  modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp),
+                                  color = Accent, trackColor = Color.Black.copy(alpha = 0.45f)
+                              )
+                          }
                       }
+                      // details (visible on focus): programme name above the description
                       Column(
-                          Modifier.width(dw).padding(start = 12.dp, end = 4.dp).graphicsLayer { alpha = da },
-                          verticalArrangement = Arrangement.spacedBy(3.dp)
+                          Modifier.width(dw).fillMaxHeight()
+                              .padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
+                              .graphicsLayer { alpha = da },
+                          verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)
                       ) {
                           Text(
                               p.title, fontWeight = FontWeight.Bold, fontSize = 14.sp,
-                              maxLines = 1, overflow = TextOverflow.Ellipsis
+                              maxLines = titleLines, overflow = TextOverflow.Ellipsis
                           )
                           val sub = listOf(p.genre, p.category).filter { it.isNotBlank() }.distinct().joinToString("  -  ")
                           Text(
@@ -2596,8 +2677,8 @@ jobs:
                           )
                           Text(
                               if (p.desc.isNotBlank()) p.desc else "No description available",
-                              color = Dim, fontSize = 12.sp, lineHeight = 16.sp,
-                              maxLines = 4, overflow = TextOverflow.Ellipsis
+                              color = Dim, fontSize = 12.sp, lineHeight = 15.sp,
+                              maxLines = descLines, overflow = TextOverflow.Ellipsis
                           )
                       }
                   }
@@ -2726,7 +2807,7 @@ jobs:
                       contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
                       horizontalArrangement = Arrangement.spacedBy(10.dp)
                   ) {
-                      items((0..10).toList()) { d -> GlassPill(dayLabel(d, vm.now), d == day) { day = d } }
+                      items((0..MAX_DAY_OFFSET).toList()) { d -> GlassPill(dayLabel(d, vm.now), d == day) { day = d } }
                   }
                   LazyRow(
                       contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
@@ -2857,13 +2938,18 @@ jobs:
                   Text(
                       "Back on the home screen opens the categories, Back again opens Guide / Search / Settings. " +
                           "Long-press Back (or press OK on the playing channel / preview) for fullscreen. " +
-                          "Long-press (or hold OK) on a channel to add it to Favorites. EPG is cached for 30 minutes.",
+                          "Long-press (or hold OK) on a channel to add it to Favorites. " +
+                          "Scroll a row sideways to load up to 10 days of programmes. EPG is cached for 30 minutes.\n\n" +
+                          "Fullscreen remote: UP / DOWN change channel, LEFT or OK opens the channel list, " +
+                          "RIGHT or MENU opens options (audio, subtitles, quality, aspect, sleep timer), INFO shows the info card, " +
+                          "BACK leaves fullscreen.",
                       fontSize = 12.sp, color = Dim
                   )
               }
           }
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/PlayerUi.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -2876,13 +2962,13 @@ jobs:
           import androidx.compose.animation.slideInHorizontally
           import androidx.compose.animation.slideOutHorizontally
           import androidx.compose.foundation.background
-          import androidx.compose.foundation.clickable
           import androidx.compose.foundation.focusable
           import androidx.compose.foundation.gestures.detectTapGestures
           import androidx.compose.foundation.gestures.detectVerticalDragGestures
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
           import androidx.compose.foundation.layout.Row
           import androidx.compose.foundation.layout.Spacer
           import androidx.compose.foundation.layout.aspectRatio
@@ -2913,6 +2999,7 @@ jobs:
           import androidx.compose.material.icons.filled.Subtitles
           import androidx.compose.material.icons.filled.SwapHoriz
           import androidx.compose.material.icons.filled.Timer
+          import androidx.compose.material.icons.filled.Tune
           import androidx.compose.material3.AlertDialog
           import androidx.compose.material3.CircularProgressIndicator
           import androidx.compose.material3.LinearProgressIndicator
@@ -2939,6 +3026,7 @@ jobs:
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.input.key.KeyEventType
           import androidx.compose.ui.input.key.onKeyEvent
+          import androidx.compose.ui.input.key.onPreviewKeyEvent
           import androidx.compose.ui.input.key.type
           import androidx.compose.ui.input.pointer.pointerInput
           import androidx.compose.ui.platform.LocalClipboardManager
@@ -3021,24 +3109,49 @@ jobs:
 
           /* ================================================================ PLAYER */
 
+          private fun isZapUp(k: Int): Boolean =
+              k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_CHANNEL_UP ||
+                  k == KeyEvent.KEYCODE_PAGE_UP || k == KeyEvent.KEYCODE_MEDIA_NEXT
+
+          private fun isZapDown(k: Int): Boolean =
+              k == KeyEvent.KEYCODE_DPAD_DOWN || k == KeyEvent.KEYCODE_CHANNEL_DOWN ||
+                  k == KeyEvent.KEYCODE_PAGE_DOWN || k == KeyEvent.KEYCODE_MEDIA_PREVIOUS
+
+          /**
+           * Fullscreen player, built for a TV remote (touch works as well):
+           *   UP / CH+       next channel            DOWN / CH-   previous channel
+           *   LEFT / OK      channel list            RIGHT / MENU options panel (audio, subtitles, quality, aspect, sleep ...)
+           *   INFO           show / hide info card   LAST         last channel
+           *   PLAY/PAUSE     pause / resume          BACK         closes a panel, otherwise leaves fullscreen
+           * Touch: tap shows the info card + top buttons, swipe up / down zaps, double tap = last channel.
+           * While no panel or dialog is open the root keeps focus, so every remote key reaches the handler below.
+           */
           @Composable
           fun PlayerScreen(vm: MainVM, pc: PlayerController, act: MainActivity) {
-              var showUi by remember { mutableStateOf(true) }
+              var showInfo by remember { mutableStateOf(true) }
+              var showBar by remember { mutableStateOf(false) }
               var showList by remember { mutableStateOf(false) }
+              var showOpts by remember { mutableStateOf(false) }
               var dialog by remember { mutableStateOf("") }
               val focus = remember { FocusRequester() }
               val ch = vm.current
               val inPip = act.inPip
+              val panelOpen = showList || showOpts || dialog.isNotEmpty()
 
-              LaunchedEffect(showUi, showList, dialog, vm.playNonce) {
-                  if (showUi && !showList && dialog.isEmpty()) {
-                      delay(6000)
-                      showUi = false
+              // info card / touch buttons hide themselves
+              LaunchedEffect(showInfo, showBar, panelOpen, vm.playNonce) {
+                  if ((showInfo || showBar) && !panelOpen) {
+                      delay(5000)
+                      showInfo = false
+                      showBar = false
                   }
               }
-              LaunchedEffect(vm.playNonce) { showUi = true }
-              LaunchedEffect(showUi, showList, dialog) {
-                  if (!showUi && !showList && dialog.isEmpty()) {
+              // every channel change shows the info card
+              LaunchedEffect(vm.playNonce) { showInfo = true }
+              // give focus back to the root whenever the last panel / dialog closes
+              LaunchedEffect(panelOpen) {
+                  if (!panelOpen) {
+                      delay(80)
                       try {
                           focus.requestFocus()
                       } catch (e: Exception) {
@@ -3046,9 +3159,10 @@ jobs:
                   }
               }
 
-              // back leaves fullscreen but keeps the channel playing in the home preview
+              // back closes a panel first, then leaves fullscreen (the channel keeps playing in the home preview)
               BackHandler {
                   if (dialog.isNotEmpty()) dialog = ""
+                  else if (showOpts) showOpts = false
                   else if (showList) showList = false
                   else vm.fullscreen = false
               }
@@ -3058,27 +3172,48 @@ jobs:
                   2 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
                   else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
               }
-              val nn = if (ch != null) vm.nowNext(ch) else Pair<Program?, Program?>(null, null)
+              val aspectName = listOf("Fit", "Zoom", "Stretch")[vm.aspect.coerceIn(0, 2)]
 
               Box(
                   Modifier.fillMaxSize().background(Color.Black)
-                      .onKeyEvent { e ->
-                          if (e.type != KeyEventType.KeyDown || showList || dialog.isNotEmpty()) {
+                      .onPreviewKeyEvent { e ->
+                          val k = e.nativeKeyEvent.keyCode
+                          if (e.type != KeyEventType.KeyDown || e.nativeKeyEvent.repeatCount > 0 ||
+                              panelOpen || k == KeyEvent.KEYCODE_BACK
+                          ) {
                               false
+                          } else if (isZapUp(k)) {
+                              vm.zap(1)
+                              true
+                          } else if (isZapDown(k)) {
+                              vm.zap(-1)
+                              true
                           } else {
-                              when (e.nativeKeyEvent.keyCode) {
-                                  KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> {
-                                      vm.zap(1); true
+                              when (k) {
+                                  KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                                  KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_GUIDE -> {
+                                      showList = true
+                                      true
                                   }
-                                  KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> {
-                                      vm.zap(-1); true
+                                  KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SETTINGS -> {
+                                      showOpts = true
+                                      true
                                   }
-                                  KeyEvent.KEYCODE_DPAD_UP -> if (!showUi) { vm.zap(1); true } else false
-                                  KeyEvent.KEYCODE_DPAD_DOWN -> if (!showUi) { vm.zap(-1); true } else false
-                                  KeyEvent.KEYCODE_DPAD_LEFT -> if (!showUi) { showList = true; true } else false
-                                  KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if (!showUi) { showUi = true; true } else false
-                                  KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_INFO -> {
-                                      showUi = !showUi; true
+                                  KeyEvent.KEYCODE_INFO -> {
+                                      showInfo = !showInfo
+                                      true
+                                  }
+                                  KeyEvent.KEYCODE_LAST_CHANNEL -> {
+                                      vm.recall()
+                                      true
+                                  }
+                                  KeyEvent.KEYCODE_CAPTIONS -> {
+                                      dialog = "sub"
+                                      true
+                                  }
+                                  KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                                      pc.player.playWhenReady = !pc.player.playWhenReady
+                                      true
                                   }
                                   else -> false
                               }
@@ -3108,7 +3243,15 @@ jobs:
                       Modifier.fillMaxSize()
                           .pointerInput(Unit) {
                               detectTapGestures(
-                                  onTap = { if (showList) showList = false else showUi = !showUi },
+                                  onTap = {
+                                      if (showList) showList = false
+                                      else if (showOpts) showOpts = false
+                                      else {
+                                          val s = !(showInfo || showBar)
+                                          showInfo = s
+                                          showBar = s
+                                      }
+                                  },
                                   onDoubleTap = { vm.recall() }
                               )
                           }
@@ -3135,148 +3278,77 @@ jobs:
                       )
                   }
 
-                  AnimatedVisibility(visible = showUi && !inPip, enter = fadeIn(), exit = fadeOut()) {
-                      Column(Modifier.fillMaxSize()) {
-                          // ---- top bar
-                          Row(
-                              Modifier.fillMaxWidth()
-                                  .background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)))
-                                  .padding(horizontal = 14.dp, vertical = 12.dp),
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(8.dp)
-                          ) {
-                              GlassIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", size = 40.dp) {
-                                  vm.fullscreen = false
-                              }
-                              Text(
-                                  ch?.name ?: "", Modifier.weight(1f).padding(horizontal = 6.dp), color = Color.White,
-                                  fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1,
-                                  overflow = TextOverflow.Ellipsis
-                              )
-                              if (ch != null) {
-                                  val fav = ch.id in vm.favorites
-                                  GlassIconButton(
-                                      if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
-                                      tint = if (fav) Color(0xFFFFC107) else Color.White, size = 40.dp
-                                  ) { vm.toggleFav(ch) }
-                              }
-                              GlassIconButton(Icons.Filled.SwapHoriz, "Last channel", size = 40.dp) { vm.recall() }
-                              GlassIconButton(Icons.Filled.Audiotrack, "Audio", size = 40.dp) { dialog = "audio" }
-                              GlassIconButton(Icons.Filled.Subtitles, "Subtitles", size = 40.dp) { dialog = "sub" }
-                              GlassIconButton(Icons.Filled.HighQuality, "Quality", size = 40.dp) { dialog = "video" }
-                              GlassIconButton(Icons.Filled.AspectRatio, "Aspect", size = 40.dp) { dialog = "aspect" }
-                              GlassIconButton(Icons.Filled.Timer, "Sleep timer", size = 40.dp) { dialog = "sleep" }
-                              GlassIconButton(Icons.Filled.BugReport, "Network log", size = 40.dp) { dialog = "log" }
-                              GlassIconButton(Icons.Filled.PictureInPictureAlt, "PiP", size = 40.dp) { act.enterPip() }
-                              GlassIconButton(Icons.Filled.FormatListBulleted, "Channels", size = 40.dp) { showList = true }
+                  // ---- touch buttons (top bar); TV remotes use the keys listed above
+                  AnimatedVisibility(
+                      visible = showBar && !panelOpen && !inPip,
+                      modifier = Modifier.align(Alignment.TopCenter),
+                      enter = fadeIn(),
+                      exit = fadeOut()
+                  ) {
+                      Row(
+                          Modifier.fillMaxWidth()
+                              .background(Brush.verticalGradient(listOf(Color(0xCC000000), Color.Transparent)))
+                              .padding(horizontal = 14.dp, vertical = 12.dp),
+                          verticalAlignment = Alignment.CenterVertically,
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          GlassIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", size = 40.dp) {
+                              vm.fullscreen = false
                           }
-
-                          Spacer(Modifier.weight(1f))
-
-                          // ---- bottom info card: banner, title, time, description; colour glow on the free right side
-                          if (ch != null) {
-                              val cur = nn.first
-                              val next = nn.second
-                              val bUrl = if (cur != null) bannerUrl(cur) else ""
-                              val hasBanner = bUrl.isNotBlank()
-                              val tint = rememberBannerColor(
-                                  bUrl, hashColor((cur?.title ?: ch.name) + (cur?.genre ?: ""))
-                              )
-                              Row(
-                                  Modifier.fillMaxWidth().padding(16.dp)
-                                      .glass(RoundedCornerShape(26.dp), 0.14f, Color.Black)
-                                      .drawBehind {
-                                          drawRect(
-                                              Brush.horizontalGradient(
-                                                  listOf(
-                                                      Color.Transparent,
-                                                      tint.copy(alpha = 0.16f),
-                                                      tint.copy(alpha = 0.46f)
-                                                  ),
-                                                  startX = size.width * 0.30f,
-                                                  endX = size.width
-                                              )
-                                          )
-                                          drawRect(
-                                              Brush.radialGradient(
-                                                  listOf(tint.copy(alpha = 0.42f), Color.Transparent),
-                                                  center = Offset(size.width, size.height * 0.5f),
-                                                  radius = size.height * 1.6f
-                                              )
-                                          )
-                                      }
-                                      .padding(14.dp),
-                                  verticalAlignment = Alignment.CenterVertically
-                              ) {
-                                  if (hasBanner) {
-                                      Box(
-                                          Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
-                                              .background(Color.White.copy(alpha = 0.08f))
-                                      ) { Banner(bUrl, Modifier.fillMaxSize()) }
-                                  } else {
-                                      Logo(ch, 56.dp)
-                                  }
-                                  Spacer(Modifier.width(16.dp))
-                                  Column(Modifier.weight(1.7f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                      Text(ch.name, color = Dim, fontSize = 12.sp, maxLines = 1)
-                                      if (cur != null) {
-                                          Text(
-                                              cur.title, color = Color.White, fontWeight = FontWeight.Bold,
-                                              fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                                          )
-                                          Text(
-                                              "${hm(cur.start)} - ${hm(cur.stop)}" +
-                                                  (if (cur.genre.isNotBlank()) "  -  ${cur.genre}" else ""),
-                                              color = Accent, fontSize = 12.sp, maxLines = 1
-                                          )
-                                          LinearProgressIndicator(
-                                              progress = { progressOf(cur, vm.now) },
-                                              modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).height(3.dp),
-                                              color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
-                                          )
-                                          if (cur.desc.isNotBlank()) {
-                                              Text(
-                                                  cur.desc, color = Color(0xFFDDE3EE), fontSize = 13.sp,
-                                                  lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis
-                                              )
-                                          }
-                                      } else {
-                                          Text("Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 19.sp)
-                                      }
-                                  }
-                                  Spacer(Modifier.width(12.dp))
-                                  Column(
-                                      Modifier.weight(1f),
-                                      horizontalAlignment = Alignment.End,
-                                      verticalArrangement = Arrangement.spacedBy(4.dp)
-                                  ) {
-                                      if (hasBanner) Logo(ch, 44.dp)
-                                      if (pc.videoRes.isNotEmpty()) {
-                                          Text(pc.videoRes, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                                      }
-                                      if (next != null) {
-                                          Text(
-                                              "UP NEXT  ${hm(next.start)}", color = Color.White.copy(alpha = 0.85f),
-                                              fontSize = 11.sp, fontWeight = FontWeight.Bold
-                                          )
-                                          Text(
-                                              next.title, color = Color.White, fontSize = 13.sp,
-                                              textAlign = TextAlign.End, maxLines = 2, overflow = TextOverflow.Ellipsis
-                                          )
-                                      }
-                                  }
-                              }
-                          }
+                          Text(
+                              ch?.name ?: "", Modifier.weight(1f).padding(horizontal = 6.dp), color = Color.White,
+                              fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+                              overflow = TextOverflow.Ellipsis
+                          )
+                          GlassIconButton(Icons.Filled.SwapHoriz, "Last channel", size = 40.dp) { vm.recall() }
+                          GlassIconButton(Icons.Filled.FormatListBulleted, "Channels", size = 40.dp) { showList = true }
+                          GlassIconButton(Icons.Filled.Tune, "Options", size = 40.dp) { showOpts = true }
                       }
                   }
 
-                  // ---- channel panel
+                  // ---- info card (bottom)
+                  AnimatedVisibility(
+                      visible = showInfo && !panelOpen && !inPip && ch != null,
+                      modifier = Modifier.align(Alignment.BottomCenter),
+                      enter = fadeIn(),
+                      exit = fadeOut()
+                  ) {
+                      if (ch != null) InfoCard(vm, pc, ch)
+                  }
+
+                  // ---- channel list (left, LEFT / OK)
                   AnimatedVisibility(
                       visible = showList && !inPip,
+                      modifier = Modifier.align(Alignment.CenterStart),
                       enter = slideInHorizontally { -it },
                       exit = slideOutHorizontally { -it }
                   ) {
                       ChannelPanel(vm) { showList = false }
+                  }
+
+                  // ---- options panel (right, RIGHT / MENU)
+                  AnimatedVisibility(
+                      visible = showOpts && !inPip,
+                      modifier = Modifier.align(Alignment.CenterEnd),
+                      enter = slideInHorizontally { it },
+                      exit = slideOutHorizontally { it }
+                  ) {
+                      OptionsPanel(
+                          vm, ch, aspectName,
+                          onDialog = { d ->
+                              showOpts = false
+                              dialog = d
+                          },
+                          onList = {
+                              showOpts = false
+                              showList = true
+                          },
+                          onPip = {
+                              showOpts = false
+                              act.enterPip()
+                          },
+                          onClose = { showOpts = false }
+                      )
                   }
               }
 
@@ -3296,6 +3368,181 @@ jobs:
                               vm.sleepAt = if (i < mins.size) System.currentTimeMillis() + mins[i] * 60_000L else 0L
                           }
                       ) { dialog = "" }
+                  }
+              }
+          }
+
+          /** Bottom card: banner, title, time, description, up-next. Also shows the remote hints. */
+          @Composable
+          fun InfoCard(vm: MainVM, pc: PlayerController, ch: Channel) {
+              val nn = vm.nowNext(ch)
+              val cur = nn.first
+              val next = nn.second
+              val bUrl = if (cur != null) bannerUrl(cur) else ""
+              val hasBanner = bUrl.isNotBlank()
+              val tint = rememberBannerColor(
+                  bUrl, hashColor((cur?.title ?: ch.name) + (cur?.genre ?: ""))
+              )
+              Column(Modifier.fillMaxWidth()) {
+                  Row(
+                      Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
+                          .glass(RoundedCornerShape(26.dp), 0.14f, Color.Black)
+                          .drawBehind {
+                              drawRect(
+                                  Brush.horizontalGradient(
+                                      listOf(
+                                          Color.Transparent,
+                                          tint.copy(alpha = 0.16f),
+                                          tint.copy(alpha = 0.46f)
+                                      ),
+                                      startX = size.width * 0.30f,
+                                      endX = size.width
+                                  )
+                              )
+                              drawRect(
+                                  Brush.radialGradient(
+                                      listOf(tint.copy(alpha = 0.42f), Color.Transparent),
+                                      center = Offset(size.width, size.height * 0.5f),
+                                      radius = size.height * 1.6f
+                                  )
+                              )
+                          }
+                          .padding(14.dp),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      if (hasBanner) {
+                          Box(
+                              Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
+                                  .background(Color.White.copy(alpha = 0.08f))
+                          ) { Banner(bUrl, Modifier.fillMaxSize()) }
+                      } else {
+                          Logo(ch, 56.dp)
+                      }
+                      Spacer(Modifier.width(16.dp))
+                      Column(Modifier.weight(1.7f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                          Text(ch.name, color = Dim, fontSize = 12.sp, maxLines = 1)
+                          if (cur != null) {
+                              Text(
+                                  cur.title, color = Color.White, fontWeight = FontWeight.Bold,
+                                  fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                              )
+                              Text(
+                                  "${hm(cur.start)} - ${hm(cur.stop)}" +
+                                      (if (cur.genre.isNotBlank()) "  -  ${cur.genre}" else ""),
+                                  color = Accent, fontSize = 12.sp, maxLines = 1
+                              )
+                              LinearProgressIndicator(
+                                  progress = { progressOf(cur, vm.now) },
+                                  modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).height(3.dp),
+                                  color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
+                              )
+                              if (cur.desc.isNotBlank()) {
+                                  Text(
+                                      cur.desc, color = Color(0xFFDDE3EE), fontSize = 13.sp,
+                                      lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis
+                                  )
+                              }
+                          } else {
+                              Text("Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                          }
+                      }
+                      Spacer(Modifier.width(12.dp))
+                      Column(
+                          Modifier.weight(1f),
+                          horizontalAlignment = Alignment.End,
+                          verticalArrangement = Arrangement.spacedBy(4.dp)
+                      ) {
+                          if (hasBanner) Logo(ch, 44.dp)
+                          if (pc.videoRes.isNotEmpty()) {
+                              Text(pc.videoRes, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
+                          }
+                          if (next != null) {
+                              Text(
+                                  "UP NEXT  ${hm(next.start)}", color = Color.White.copy(alpha = 0.85f),
+                                  fontSize = 11.sp, fontWeight = FontWeight.Bold
+                              )
+                              Text(
+                                  next.title, color = Color.White, fontSize = 13.sp,
+                                  textAlign = TextAlign.End, maxLines = 2, overflow = TextOverflow.Ellipsis
+                              )
+                          }
+                      }
+                  }
+                  Text(
+                      "UP / DOWN  channel     LEFT or OK  channel list     RIGHT  options     BACK  home",
+                      Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                      color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, textAlign = TextAlign.Center
+                  )
+              }
+          }
+
+          /** Right-hand options panel; every entry is a focusable row, LEFT or BACK closes it. */
+          @Composable
+          fun OptionsPanel(
+              vm: MainVM,
+              ch: Channel?,
+              aspectName: String,
+              onDialog: (String) -> Unit,
+              onList: () -> Unit,
+              onPip: () -> Unit,
+              onClose: () -> Unit
+          ) {
+              val fr = remember { FocusRequester() }
+              LaunchedEffect(Unit) {
+                  delay(200)
+                  try {
+                      fr.requestFocus()
+                  } catch (e: Exception) {
+                  }
+              }
+              val fav = ch != null && ch.id in vm.favorites
+              val shape = RoundedCornerShape(topStart = 30.dp, bottomStart = 30.dp)
+              Column(
+                  Modifier.width(300.dp).fillMaxHeight().clip(shape)
+                      .background(Color(0xD905070D)).glass(shape, 0.08f)
+                      .onKeyEvent { e ->
+                          if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                              onClose()
+                              true
+                          } else {
+                              false
+                          }
+                      }
+              ) {
+                  Text(
+                      "Options", Modifier.padding(start = 24.dp, top = 18.dp, bottom = 2.dp),
+                      fontWeight = FontWeight.Bold, fontSize = 18.sp
+                  )
+                  LazyColumn(
+                      contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                      verticalArrangement = Arrangement.spacedBy(8.dp)
+                  ) {
+                      item {
+                          SideItem(
+                              if (fav) "Remove favorite" else "Add to favorites",
+                              if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, fav,
+                              Modifier.focusRequester(fr)
+                          ) { if (ch != null) vm.toggleFav(ch) }
+                      }
+                      item { SideItem("Channel list", Icons.Filled.FormatListBulleted, false) { onList() } }
+                      item {
+                          SideItem("Last channel", Icons.Filled.SwapHoriz, false) {
+                              vm.recall()
+                              onClose()
+                          }
+                      }
+                      item { SideItem("Audio", Icons.Filled.Audiotrack, false) { onDialog("audio") } }
+                      item { SideItem("Subtitles", Icons.Filled.Subtitles, false) { onDialog("sub") } }
+                      item { SideItem("Video quality", Icons.Filled.HighQuality, false) { onDialog("video") } }
+                      item { SideItem("Aspect: $aspectName", Icons.Filled.AspectRatio, false) { onDialog("aspect") } }
+                      item {
+                          SideItem(
+                              if (vm.sleepAt > 0) "Sleep timer (on)" else "Sleep timer",
+                              Icons.Filled.Timer, vm.sleepAt > 0
+                          ) { onDialog("sleep") }
+                      }
+                      item { SideItem("Picture in picture", Icons.Filled.PictureInPictureAlt, false) { onPip() } }
+                      item { SideItem("Network log", Icons.Filled.BugReport, false) { onDialog("log") } }
                   }
               }
           }
@@ -3383,10 +3630,13 @@ jobs:
               }
           }
 
+          /** Dialog row: focusable with the same glow as the rest of the app, so it works with a D-pad. */
           @Composable
           fun PickRow(label: String, selected: Boolean, onClick: () -> Unit) {
               Row(
-                  Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp),
+                  Modifier.fillMaxWidth().padding(vertical = 3.dp)
+                      .focusGlow(corner = 14.dp, focusScale = 1.0f, onClick = onClick)
+                      .padding(horizontal = 8.dp, vertical = 8.dp),
                   verticalAlignment = Alignment.CenterVertically
               ) {
                   RadioButton(selected = selected, onClick = null)
@@ -3485,6 +3735,7 @@ jobs:
           }
           __SB_EOF__
 
+          mkdir -p app/src/main/java/com/livetv/glass
           cat > app/src/main/java/com/livetv/glass/MainActivity.kt <<'__SB_EOF__'
           package com.livetv.glass
 
@@ -3590,6 +3841,7 @@ jobs:
               }
           }
           __SB_EOF__
+
 
       - name: Build debug APK
         working-directory: LiveTVApp
