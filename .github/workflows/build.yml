@@ -2,6 +2,7 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + push-aside slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
+# v5.8: guide data fix - overlapping schedule entries no longer cut into the current programme (earlier entry wins).
 # v5.7: Roboto Condensed everywhere (like TiviMate), smaller header (Settings: Header size), sticky titles + ellipsis, overlap-free guide data, fullscreen category column.
 # v5.6: 8 guide rows, TiviMate menu (nav + text-only categories), full-bleed faded banner, condensed guide font, ellipsis on long titles, no history tag.
 # v5.5: TiviMate-exact home (header with 6-line description + banner, time axis, channel column, time-scaled programme blocks, now line).
@@ -106,8 +107,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 12
-                  versionName = "5.7"
+                  versionCode = 13
+                  versionName = "5.8"
               }
 
               buildTypes {
@@ -1091,20 +1092,19 @@ jobs:
                       epg["${ch.id}:$o"]?.let { raw.addAll(it) }
                   }
                   val sorted = raw.filter { it.stop > from && it.stop > it.start }.distinctBy { it.start }.sortedBy { it.start }
-                  // day files can overlap (a programme cut at midnight appears twice): merge equal titles, trim the earlier one otherwise
+                  // Overlapping entries (a day file that disagrees with the next one): the EARLIER / current programme always
+                  // wins, a later entry is pushed to start where the earlier one ends (or dropped when it is fully covered).
                   val res = ArrayList<Program>()
-                  for (p in sorted) {
+                  for (q in sorted) {
+                      var p = q
                       val last = res.lastOrNull()
                       if (last != null && p.start < last.stop) {
                           if (p.title == last.title) {
                               res[res.size - 1] = last.copy(stop = maxOf(last.stop, p.stop))
                               continue
                           }
-                          if (p.start > last.start) {
-                              res[res.size - 1] = last.copy(stop = p.start)
-                          } else {
-                              res.removeAt(res.size - 1)
-                          }
+                          if (p.stop <= last.stop) continue
+                          p = p.copy(start = last.stop)
                       }
                       res.add(p)
                   }
@@ -2944,7 +2944,7 @@ jobs:
                       color = if (focused) Color(0xFFFFFFF8) else if (rowHot) Color.White else CellText,
                       fontSize = (21 * u).sp, fontFamily = CondFont, maxLines = 1,
                       overflow = TextOverflow.Ellipsis,
-                      modifier = Modifier.padding(start = (18 * u).dp, end = (10 * u).dp)
+                      modifier = Modifier.padding(start = (18 * u).dp, end = (6 * u).dp)
                   )
               }
           }
