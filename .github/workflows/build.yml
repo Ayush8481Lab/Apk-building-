@@ -2,6 +2,7 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + push-aside slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
+# v5.7: Roboto Condensed everywhere (like TiviMate), smaller header (Settings: Header size), sticky titles + ellipsis, overlap-free guide data, fullscreen category column.
 # v5.6: 8 guide rows, TiviMate menu (nav + text-only categories), full-bleed faded banner, condensed guide font, ellipsis on long titles, no history tag.
 # v5.5: TiviMate-exact home (header with 6-line description + banner, time axis, channel column, time-scaled programme blocks, now line).
 # v5.4: pure black UI, Up/Down land on the live card of the next row, 3-line cards (LIVE NOW / day+time, banner, title), categories apply on focus, previously-played cards in fullscreen info, lighter animations.
@@ -105,8 +106,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 11
-                  versionName = "5.6"
+                  versionCode = 12
+                  versionName = "5.7"
               }
 
               buildTypes {
@@ -371,6 +372,11 @@ jobs:
               var rows: Int
                   get() = sp.getInt("rows", DEFAULT_ROWS).coerceIn(MIN_ROWS, MAX_ROWS)
                   set(v) { sp.edit().putInt("rows", v.coerceIn(MIN_ROWS, MAX_ROWS)).apply() }
+
+              /** Header (video + details) size in percent of the TiviMate reference. */
+              var headerPct: Int
+                  get() = sp.getInt("hdr", 90).coerceIn(70, 110)
+                  set(v) { sp.edit().putInt("hdr", v.coerceIn(70, 110)).apply() }
 
               fun favorites(): Set<String> = sp.getStringSet("fav", emptySet())?.toSet() ?: emptySet()
               fun saveFavorites(s: Set<String>) {
@@ -807,6 +813,7 @@ jobs:
               var resumeLast by mutableStateOf(store.resumeLast)
               var aspect by mutableIntStateOf(store.aspect)
               var rows by mutableIntStateOf(store.rows)
+              var headerPct by mutableIntStateOf(store.headerPct)
 
               var now by mutableLongStateOf(System.currentTimeMillis())
               var current by mutableStateOf<Channel?>(null)
@@ -1079,11 +1086,29 @@ jobs:
               /** Every programme of the loaded days that ends after [from] (guide rows, includes the live one). */
               fun timeline(ch: Channel, from: Long): List<Program> {
                   val days = daysLoaded(ch.id)
-                  val out = ArrayList<Program>()
+                  val raw = ArrayList<Program>()
                   for (o in 0 until days) {
-                      epg["${ch.id}:$o"]?.let { out.addAll(it) }
+                      epg["${ch.id}:$o"]?.let { raw.addAll(it) }
                   }
-                  return out.filter { it.stop > from }.distinctBy { it.start }.sortedBy { it.start }
+                  val sorted = raw.filter { it.stop > from && it.stop > it.start }.distinctBy { it.start }.sortedBy { it.start }
+                  // day files can overlap (a programme cut at midnight appears twice): merge equal titles, trim the earlier one otherwise
+                  val res = ArrayList<Program>()
+                  for (p in sorted) {
+                      val last = res.lastOrNull()
+                      if (last != null && p.start < last.stop) {
+                          if (p.title == last.title) {
+                              res[res.size - 1] = last.copy(stop = maxOf(last.stop, p.stop))
+                              continue
+                          }
+                          if (p.start > last.start) {
+                              res[res.size - 1] = last.copy(stop = p.start)
+                          } else {
+                              res.removeAt(res.size - 1)
+                          }
+                      }
+                      res.add(p)
+                  }
+                  return res
               }
 
               /* ------------------------------------------------------------- channels */
@@ -1161,6 +1186,11 @@ jobs:
               fun updateRows(v: Int) {
                   rows = v.coerceIn(MIN_ROWS, MAX_ROWS)
                   store.rows = rows
+              }
+
+              fun updateHeader(v: Int) {
+                  headerPct = v.coerceIn(70, 110)
+                  store.headerPct = headerPct
               }
 
               fun updateAspect(v: Int) {
@@ -1636,6 +1666,7 @@ jobs:
 
           /** Roboto Condensed (programme titles in the guide, like TiviMate). */
           val CondFont = FontFamily(android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.NORMAL))
+          val CondLight = FontFamily(android.graphics.Typeface.create("sans-serif-condensed-light", android.graphics.Typeface.NORMAL))
 
           @Composable
           fun AppTheme(content: @Composable () -> Unit) {
@@ -1860,6 +1891,9 @@ jobs:
 
           import android.graphics.drawable.BitmapDrawable
           import android.view.KeyEvent
+          import androidx.compose.material3.ProvideTextStyle
+          import androidx.compose.runtime.CompositionLocalProvider
+          import androidx.compose.ui.unit.Density
           import androidx.compose.ui.graphics.Shadow
           import androidx.compose.ui.text.TextStyle
           import androidx.compose.animation.core.Animatable
@@ -2213,6 +2247,9 @@ jobs:
                   }
               }
 
+              val d0 = LocalDensity.current
+              CompositionLocalProvider(LocalDensity provides Density(d0.density, 1f)) {
+              ProvideTextStyle(TextStyle(fontFamily = CondFont)) {
               BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
                   val u = minOf(maxHeight.value / 800f, maxWidth.value / 1340f).coerceAtLeast(0.3f)
                   val navW = (326 * u).dp
@@ -2238,7 +2275,7 @@ jobs:
                       Modifier.fillMaxSize().systemBarsPadding()
                           .offset { IntOffset(shift.value.roundToInt(), 0) }
                   ) {
-                      Preview(vm, pc, u) { vm.openFullscreen() }
+                      Preview(vm, pc, u * (vm.headerPct / 100f)) { vm.openFullscreen() }
                       Box(Modifier.weight(1f).fillMaxWidth()) {
                           when (tab) {
                               0 -> EpgGrid(vm, u, onPick)
@@ -2247,6 +2284,8 @@ jobs:
                           }
                       }
                   }
+              }
+              }
               }
           }
 
@@ -2337,7 +2376,7 @@ jobs:
                               Row(verticalAlignment = Alignment.CenterVertically) {
                                   Text(
                                       rangeText(hp), color = TextDim, fontSize = (20 * u).sp,
-                                      fontWeight = FontWeight.Light, maxLines = 1
+                                      fontFamily = CondLight, maxLines = 1
                                   )
                                   Spacer(Modifier.width((20 * u).dp))
                                   if (live) {
@@ -2353,12 +2392,12 @@ jobs:
                                       Spacer(Modifier.width((20 * u).dp))
                                       Text(
                                           "$left min", color = TextDim, fontSize = (20 * u).sp,
-                                          fontWeight = FontWeight.Light, maxLines = 1
+                                          fontFamily = CondLight, maxLines = 1
                                       )
                                   } else {
                                       Text(
                                           untilText(hp.start - vm.now), color = TextDim, fontSize = (20 * u).sp,
-                                          fontWeight = FontWeight.Light, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                          fontFamily = CondLight, maxLines = 1, overflow = TextOverflow.Ellipsis
                                       )
                                   }
                               }
@@ -2366,7 +2405,7 @@ jobs:
                                   Spacer(Modifier.height((12 * u).dp))
                                   Text(
                                       hp.desc, color = TextDim, fontSize = (20 * u).sp, lineHeight = (24 * u).sp,
-                                      fontWeight = FontWeight.Light, maxLines = 6, overflow = TextOverflow.Ellipsis
+                                      fontFamily = CondLight, maxLines = 6, overflow = TextOverflow.Ellipsis
                                   )
                               }
                           } else if (ch != null) {
@@ -2489,7 +2528,7 @@ jobs:
                   ) {
                       Icon(Icons.Filled.LiveTv, null, tint = GoldDate, modifier = Modifier.size((72 * u).dp))
                       Spacer(Modifier.height((8 * u).dp))
-                      Text("Live TV", color = GoldDate, fontSize = (26 * u).sp, fontWeight = FontWeight.Medium)
+                      Text("Live TV", color = GoldDate, fontSize = (26 * u).sp)
                   }
                   Spacer(Modifier.height((24 * u).dp))
                   MenuItem("Search", Icons.Filled.Search, vm.tab == 2, u, req(2)) { go(2) }
@@ -2618,6 +2657,7 @@ jobs:
                   val chanW = (400 * u).dp
                   val axisH = (60 * u).dp
                   val rowH = (maxHeight - axisH) / 8   // exactly 8 guide rows, like TiviMate
+                  val g = rowH.value / 58f
                   val dpm = 7.9f * u
                   val visMin = (maxWidth.value - chanW.value) / dpm
 
@@ -2627,12 +2667,16 @@ jobs:
                       val s = (p.start - base) / 60000f
                       val e = (p.stop - base) / 60000f
                       var t = winTarget
-                      if (s < t) {
-                          t = s.coerceAtLeast(0f)
-                      } else if (e > t + visMin) {
-                          t = minOf(s, e - visMin).coerceAtLeast(0f)
+                      if (e <= t + 3f) {
+                          // block is (almost) fully left of the window: bring its start back in
+                          t = s - visMin * 0.1f
+                      } else if (s >= t + visMin - 12f) {
+                          // block starts at / beyond the right edge: slide so its start sits in the middle
+                          t = s - visMin * 0.55f
                       }
-                      if (t != winTarget) winTarget = t
+                      // a block that only starts before the left edge keeps its title pinned there: no scrolling needed
+                      t = t.coerceAtLeast(0f)
+                      if (Math.abs(t - winTarget) > 0.01f) winTarget = t
                   }
 
                   Column(Modifier.fillMaxSize()) {
@@ -2643,7 +2687,7 @@ jobs:
                       LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f)) {
                           itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
                               EpgRow(
-                                  vm, ch, i + 1, u, rowH, chanW, base, win, winTarget, visMin, dpm, pending,
+                                  vm, ch, i + 1, g, rowH, chanW, base, win, winTarget, visMin, dpm, pending,
                                   { pending = null }, onCell
                               ) { onPick(ch, list) }
                           }
@@ -2698,13 +2742,13 @@ jobs:
                                       .width((100 * u).dp),
                                   contentAlignment = Alignment.TopCenter
                               ) {
-                                  Text(tickText(base + k * 1_800_000L), color = TextDim, fontSize = (21 * u).sp, fontWeight = FontWeight.Light, maxLines = 1)
+                                  Text(tickText(base + k * 1_800_000L), color = TextDim, fontSize = (21 * u).sp, fontFamily = CondLight, maxLines = 1)
                               }
                           }
                       }
                   }
                   Text(
-                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, fontWeight = FontWeight.Medium, maxLines = 1,
+                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, maxLines = 1,
                       modifier = Modifier.padding(start = (24 * u).dp, top = (26 * u).dp)
                   )
                   Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(1.dp).background(AxisLine))
@@ -2736,7 +2780,7 @@ jobs:
               val myFr = remember { FocusRequester() }
 
               // only blocks near the visible window are composed
-              val lo = winTarget - 60f
+              val lo = winTarget - 150f
               val hi = winTarget + visMin + 240f
               val shown = remember(all, lo, hi, base) {
                   val src = if (all.isEmpty()) {
@@ -2798,7 +2842,7 @@ jobs:
                       }
                       Spacer(Modifier.width((16 * u).dp))
                       Text(
-                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * u).sp, fontWeight = FontWeight.Medium,
+                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * u).sp,
                           maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                       )
                       if (playing) {
@@ -2898,7 +2942,7 @@ jobs:
                   Text(
                       p.title.ifBlank { "-" },
                       color = if (focused) Color(0xFFFFFFF8) else if (rowHot) Color.White else CellText,
-                      fontSize = (21 * u).sp, fontFamily = CondFont, maxLines = 1, softWrap = false,
+                      fontSize = (21 * u).sp, fontFamily = CondFont, maxLines = 1,
                       overflow = TextOverflow.Ellipsis,
                       modifier = Modifier.padding(start = (18 * u).dp, end = (10 * u).dp)
                   )
@@ -3042,6 +3086,14 @@ jobs:
                       )
                       Text("Reloaded automatically 10 minutes before expiry.", color = Dim, fontSize = 12.sp)
                       GlassButton("Refresh now", icon = Icons.Filled.Refresh) { vm.refresh() }
+                  }
+                  Section("Header size") {
+                      Text("Size of the video / details header. The guide below always shows 8 rows.", color = Dim)
+                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          listOf(80, 85, 90, 95, 100).forEach { n ->
+                              GlassPill("$n%", vm.headerPct == n) { vm.updateHeader(n) }
+                          }
+                      }
                   }
                   Section("Player") {
                       OutlinedTextField(
@@ -3756,22 +3808,34 @@ jobs:
               }
           }
 
-          /** Left channel list: opens with OK / LEFT, closes with RIGHT (or BACK). */
+          /**
+           * Left channel list (fullscreen): opens with OK / LEFT, closes with RIGHT (or BACK).
+           * LEFT inside the list slides the category column in (TiviMate style); moving over a category updates the
+           * channels at once, RIGHT / OK on a category goes back to the channels.
+           */
           @Composable
           fun ChannelPanel(vm: MainVM, onPick: () -> Unit) {
               var g by remember { mutableStateOf(vm.category) }
-              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
+              var showCats by remember { mutableStateOf(false) }
+              val all = listOf(G_FAV, G_ALL, G_RECENT) + vm.categories
               val list = remember(g, vm.channels, vm.favorites, vm.recents) { vm.filter(g) }
               val state = rememberLazyListState()
               val fr = remember { FocusRequester() }
+              val catFr = remember { FocusRequester() }
               val curIdx = list.indexOfFirst { it.id == vm.current?.id }.coerceAtLeast(0)
-              LaunchedEffect(g) {
-                  state.scrollToItem(curIdx)
-                  delay(150)
+
+              BackHandler(enabled = showCats) { showCats = false }
+
+              // focus follows the visible column
+              LaunchedEffect(showCats) {
+                  delay(180)
                   try {
-                      fr.requestFocus()
+                      if (showCats) catFr.requestFocus() else fr.requestFocus()
                   } catch (e: Exception) {
                   }
+              }
+              LaunchedEffect(g) {
+                  state.scrollToItem(curIdx)
               }
               // load EPG for the channels showing in this panel (chunks of 7, follows scrolling)
               LaunchedEffect(list, vm.epgTick) {
@@ -3780,39 +3844,67 @@ jobs:
                       Pair(v.firstOrNull()?.index ?: 0, v.lastOrNull()?.index ?: 0)
                   }.collect { r -> vm.loadEpgFor(list, r.first, r.second) }
               }
-              val shape = RoundedCornerShape(topEnd = 30.dp, bottomEnd = 30.dp)
-              Column(
-                  Modifier.width(430.dp).fillMaxHeight().clip(shape)
-                      .background(Color(0xF2000000)).glass(shape, 0.05f)
-                      .onPreviewKeyEvent { e ->
-                          if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                              onPick()
-                              true
-                          } else {
-                              false
+              val shape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp)
+              Row(Modifier.fillMaxHeight().clip(shape).background(Color(0xF2161616))) {
+                  if (showCats) {
+                      Column(
+                          Modifier.width(250.dp).fillMaxHeight().background(Color(0xF2262626))
+                              .onPreviewKeyEvent { e ->
+                                  if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                                      showCats = false
+                                      true
+                                  } else {
+                                      false
+                                  }
+                              }
+                      ) {
+                          LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 18.dp)) {
+                              items(all) { c ->
+                                  MenuItem(
+                                      c, null, c == g, 0.62f,
+                                      if (c == g) Modifier.focusRequester(catFr) else Modifier,
+                                      onFocus = { f -> if (f && g != c) g = c }
+                                  ) {
+                                      g = c
+                                      showCats = false
+                                  }
+                              }
                           }
                       }
-              ) {
-                  Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                      GlassIconButton(Icons.Filled.ChevronLeft, "Previous group", size = 40.dp) {
-                          g = all[(all.indexOf(g) - 1 + all.size).mod(all.size)]
-                      }
-                      Text(g, Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold, maxLines = 1)
-                      GlassIconButton(Icons.Filled.ChevronRight, "Next group", size = 40.dp) {
-                          g = all[(all.indexOf(g) + 1).mod(all.size)]
-                      }
                   }
-                  if (list.isEmpty()) {
-                      Text("Nothing here yet", Modifier.padding(16.dp), color = Dim)
-                  }
-                  LazyColumn(state = state) {
-                      itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
-                          PlayerChannelRow(
-                              vm, ch, ch.id == vm.current?.id,
-                              if (i == curIdx) Modifier.focusRequester(fr) else Modifier
-                          ) {
-                              vm.play(ch, list)
-                              onPick()
+                  Column(
+                      Modifier.width(430.dp).fillMaxHeight()
+                          .onPreviewKeyEvent { e ->
+                              val k = e.nativeKeyEvent.keyCode
+                              if (e.type != KeyEventType.KeyDown) {
+                                  false
+                              } else if (k == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                                  onPick()
+                                  true
+                              } else if (k == KeyEvent.KEYCODE_DPAD_LEFT) {
+                                  showCats = true
+                                  true
+                              } else {
+                                  false
+                              }
+                          }
+                  ) {
+                      Text(
+                          g, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                          fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                      )
+                      if (list.isEmpty()) {
+                          Text("Nothing here yet", Modifier.padding(16.dp), color = Dim)
+                      }
+                      LazyColumn(state = state) {
+                          itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
+                              PlayerChannelRow(
+                                  vm, ch, ch.id == vm.current?.id,
+                                  if (i == curIdx) Modifier.focusRequester(fr) else Modifier
+                              ) {
+                                  vm.play(ch, list)
+                                  onPick()
+                              }
                           }
                       }
                   }
