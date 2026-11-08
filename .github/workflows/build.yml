@@ -2,6 +2,7 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + push-aside slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
+# v5.5: TiviMate-exact home (header with 6-line description + banner, time axis, channel column, time-scaled programme blocks, now line).
 # v5.4: pure black UI, Up/Down land on the live card of the next row, 3-line cards (LIVE NOW / day+time, banner, title), categories apply on focus, previously-played cards in fullscreen info, lighter animations.
 # v5.4: pure black UI, Up/Down jump to the LIVE card of the next/previous row, 3-line cards (LIVE NOW or day+time / banner / title),
 #       categories apply while moving over them, fullscreen: OK/LEFT opens channel list, RIGHT hides it, previously played cards, much lighter animations.
@@ -103,8 +104,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 9
-                  versionName = "5.4"
+                  versionCode = 10
+                  versionName = "5.5"
               }
 
               buildTypes {
@@ -1074,6 +1075,16 @@ jobs:
                   return out.filter { it.stop > now }.distinctBy { it.start }.sortedBy { it.start }
               }
 
+              /** Every programme of the loaded days that ends after [from] (guide rows, includes the live one). */
+              fun timeline(ch: Channel, from: Long): List<Program> {
+                  val days = daysLoaded(ch.id)
+                  val out = ArrayList<Program>()
+                  for (o in 0 until days) {
+                      epg["${ch.id}:$o"]?.let { out.addAll(it) }
+                  }
+                  return out.filter { it.stop > from }.distinctBy { it.start }.sortedBy { it.start }
+              }
+
               /* ------------------------------------------------------------- channels */
 
               fun filter(g: String): List<Channel> = when (g) {
@@ -1596,11 +1607,27 @@ jobs:
           import androidx.compose.ui.unit.sp
           import androidx.compose.ui.zIndex
 
-          val Accent = Color(0xFF7AB8FF)
-          val Accent2 = Color(0xFFB69CFF)
+          val Accent = Color(0xFFDABF72)
+          val Accent2 = Color(0xFFB59A4A)
           /** The app background is pure black everywhere (best contrast on TVs). */
           val Ink = Color.Black
-          val Dim = Color(0xFFB5BDCC)
+          val Dim = Color(0xFFA9A9A9)
+
+          /* TiviMate palette (sampled from the reference screenshot) */
+          val Bg = Color(0xFF161616)
+          val CellBg = Color(0xFF1E1E1E)
+          val CellHot = Color(0xFF454545)
+          val GoldCell = Color(0xFF6E5711)
+          val CellText = Color(0xFFAFAFAF)
+          val TextDim = Color(0xFFA9A9A9)
+          val BarTrack = Color(0xFF474747)
+          val BarFill = Color(0xFFBABABA)
+          val NowLine = Color(0x99D7BD72)
+          val NowDot = Color(0xFFD7BD72)
+          val GoldDate = Color(0xFFE6C463)
+          val GoldName = Color(0xFFDABF72)
+          val GoldArrow = Color(0xFFD8BE71)
+          val AxisLine = Color(0xFF3A3A3A)
 
           @Composable
           fun AppTheme(content: @Composable () -> Unit) {
@@ -1825,6 +1852,17 @@ jobs:
 
           import android.graphics.drawable.BitmapDrawable
           import android.view.KeyEvent
+          import androidx.compose.animation.core.Animatable
+          import androidx.compose.animation.core.AnimationVector1D
+          import androidx.compose.foundation.interaction.collectIsFocusedAsState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.material.icons.filled.StarBorder
+          import androidx.compose.runtime.key
+          import androidx.compose.runtime.mutableFloatStateOf
+          import androidx.compose.runtime.rememberUpdatedState
+          import androidx.compose.ui.draw.clipToBounds
+          import androidx.compose.ui.layout.layout
+          import androidx.compose.ui.unit.Constraints
           import androidx.compose.animation.core.animateFloatAsState
           import androidx.compose.foundation.combinedClickable
           import androidx.compose.foundation.layout.offset
@@ -2095,9 +2133,6 @@ jobs:
               Triple(3, "Settings", Icons.Filled.Settings)
           )
 
-          private val PanelBg = Color(0xFF0F1117)
-          private val LiveRed = Color(0xFFFF4D4D)
-
           private fun catIcon(g: String): ImageVector = when (g) {
               G_ALL -> Icons.Filled.LiveTv
               G_FAV -> Icons.Filled.Star
@@ -2105,35 +2140,40 @@ jobs:
               else -> Icons.Filled.Category
           }
 
+          private val DATE_FMT = SimpleDateFormat("EEE, d MMM, h:mm a", Locale.ENGLISH)
+          private val TICK_FMT = SimpleDateFormat("hh:mm a", Locale.ENGLISH)
+          private val RANGE_FMT = SimpleDateFormat("hh:mm a", Locale.ENGLISH)
+
+          private fun dateText(ms: Long): String =
+              DATE_FMT.format(Date(ms)).replace("AM", "am").replace("PM", "pm")
+
+          private fun tickText(ms: Long): String = TICK_FMT.format(Date(ms)).lowercase()
+
+          /** "12:01 \u2014 02:14 am" (am / pm written once when both ends share it). */
+          private fun rangeText(p: Program): String {
+              val s = RANGE_FMT.format(Date(p.start)).lowercase()
+              val e = RANGE_FMT.format(Date(p.stop)).lowercase()
+              return if (s.takeLast(2) == e.takeLast(2)) s.dropLast(3) + " \u2014 " + e else s + " \u2014 " + e
+          }
+
           /**
-           * TiviMate-like home on a pure black background. The side panels PUSH the player / rows to the right
-           * (placement only, nothing is re-measured, so it stays smooth):
-           *   level 0:  | player + rows |
-           *   level 1:  | categories | player + rows |          (Back, or LEFT on the first card of a row)
-           *   level 2:  | TV / Search / Settings | categories | player + rows |   (Back again)
-           * Moving over a category shows its channels right away; OK (or RIGHT) hides the menu.
+           * TiviMate layout, every size is a fraction of the reference screenshot (1340 x 800) scaled by [u]:
+           *   header 285 | time axis 60 | guide rows 58 each; channel column 400 wide; 7.9 px per minute.
+           * The side panels push the whole screen to the right (placement only, nothing is re-measured):
+           *   level 0:  | header + guide |
+           *   level 1:  | categories | header + guide |          (Back, or LEFT on the first programme of a row)
+           *   level 2:  | TV / Search / Settings | categories | header + guide |   (Back again)
            */
           @Composable
           fun HomeScreen(vm: MainVM, pc: PlayerController) {
               val tab = vm.tab
-              val wide = isWide()
               val navFr = remember { FocusRequester() }
               val catFr = remember { FocusRequester() }
-              val navW = if (wide) 210.dp else 140.dp
-              val catW = if (wide) 270.dp else 190.dp
-              val density = LocalDensity.current
-              val totalPx = with(density) { (navW + catW).toPx() }
-              val targetPx = with(density) {
-                  (if (vm.menuLevel >= 2) navW + catW else if (vm.menuLevel == 1) catW else 0.dp).toPx()
-              }
-              val shift = animateFloatAsState(targetPx, tween(230, easing = FastOutSlowInEasing), label = "shift")
-              val showPanels by remember { derivedStateOf { vm.menuLevel > 0 || shift.value > 0.5f } }
-
               val onOpen: (Channel, List<Channel>) -> Unit = { ch, l ->
                   vm.play(ch, l)
                   vm.openFullscreen()
               }
-              // first click plays in the preview, clicking the playing channel again goes fullscreen
+              // first click plays in the header, clicking the playing channel again goes fullscreen
               val onPick: (Channel, List<Channel>) -> Unit = { ch, l ->
                   if (vm.current?.id == ch.id) vm.openFullscreen() else vm.play(ch, l)
               }
@@ -2163,24 +2203,35 @@ jobs:
                   }
               }
 
-              Box(Modifier.fillMaxSize().background(Color.Black)) {
+              BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
+                  val u = minOf(maxHeight.value / 800f, maxWidth.value / 1340f).coerceAtLeast(0.3f)
+                  val navW = (260 * u).dp
+                  val catW = (340 * u).dp
+                  val density = LocalDensity.current
+                  val totalPx = with(density) { (navW + catW).toPx() }
+                  val targetPx = with(density) {
+                      (if (vm.menuLevel >= 2) navW + catW else if (vm.menuLevel == 1) catW else 0.dp).toPx()
+                  }
+                  val shift = animateFloatAsState(targetPx, tween(230, easing = FastOutSlowInEasing), label = "shift")
+                  val showPanels by remember { derivedStateOf { vm.menuLevel > 0 || shift.value > 0.5f } }
+
                   if (showPanels) {
                       Row(
                           Modifier.fillMaxHeight().systemBarsPadding()
                               .offset { IntOffset((shift.value - totalPx).roundToInt(), 0) }
                       ) {
-                          NavPanel(vm, navFr, catFr, navW)
-                          CatPanel(vm, navFr, catFr, catW)
+                          NavPanel(vm, navFr, catFr, navW, u)
+                          CatPanel(vm, navFr, catFr, catW, u)
                       }
                   }
                   Column(
                       Modifier.fillMaxSize().systemBarsPadding()
                           .offset { IntOffset(shift.value.roundToInt(), 0) }
                   ) {
-                      Preview(vm, pc) { vm.openFullscreen() }
+                      Preview(vm, pc, u) { vm.openFullscreen() }
                       Box(Modifier.weight(1f).fillMaxWidth()) {
                           when (tab) {
-                              0 -> LiveEpg(vm, onPick)
+                              0 -> EpgGrid(vm, u, onPick)
                               2 -> SearchTab(vm, onOpen)
                               else -> SettingsTab(vm)
                           }
@@ -2190,16 +2241,12 @@ jobs:
           }
 
           /**
-           * Live preview (header), 1.15x taller than v5.2. Left: the shared player. Right, auto fitted:
-           *   1  programme name
-           *   2  time 02:30--03:00 + progress bar + minutes left      (upcoming programme: "in 2 hours 15 minutes" instead of the bar)
-           *   3  description, up to 3 lines
-           *   4  "Next: name - in 3 minutes"                           (live programme only)
-           * While the remote / finger is on a programme card of the rows below, the header shows THAT programme.
+           * Header exactly like the reference: video (left), then the programme name, "12:01 - 02:14 am" + progress bar +
+           * minutes left, description (up to 6 lines), and the programme banner on the right (star = favourite, genre under it).
+           * It shows the programme the remote is on; when nothing is highlighted it shows what is playing.
            */
           @Composable
-          fun Preview(vm: MainVM, pc: PlayerController, onFull: () -> Unit) {
-              val wide = isWide()
+          fun Preview(vm: MainVM, pc: PlayerController, u: Float, onFull: () -> Unit) {
               val ch = vm.current
               LaunchedEffect(ch?.id, vm.epgTick) {
                   if (ch != null) {
@@ -2212,134 +2259,119 @@ jobs:
               val hp: Program? = if (hv != null) hv.second else np
               val hc: Channel? = if (hv != null) hv.first else ch
               val live = hp != null && vm.now >= hp.start && vm.now < hp.stop
-              val next: Program? = if (live && hc != null) vm.nowNext(hc).second else null
               val url = if (hp != null) bannerUrl(hp) else ""
-              val shape = RoundedCornerShape(24.dp)
-              val tf = if (wide) 12.sp else 10.sp
+              val fav = hc != null && hc.id in vm.favorites
 
-              BoxWithConstraints(
-                  Modifier.fillMaxWidth()
-                      .padding(horizontal = if (wide) 22.dp else 12.dp, vertical = 6.dp)
-                      .height(if (wide) 158.dp else 110.dp)
-                      .clip(shape)
-                      .background(Color.Black)
-                      .border(1.dp, Color.White.copy(alpha = 0.16f), shape)
+              Row(
+                  Modifier.fillMaxWidth().height((285 * u).dp).background(Bg)
+                      .padding(start = (24 * u).dp, top = (18 * u).dp, end = (24 * u).dp)
               ) {
-                  val showBanner = maxWidth >= (if (wide) 700.dp else 300.dp)
-                  // programme banner: 16:9, pinned to the right, left + bottom edges dissolve into the black card
-                  if (showBanner) {
-                      Box(
-                          Modifier.align(Alignment.CenterEnd).fillMaxHeight().aspectRatio(16f / 9f)
-                              .alpha(if (wide) 1f else 0.6f)
-                              .fadeEdges(left = 0.55f, bottom = 0.22f)
-                      ) {
-                          Crossfade(url, animationSpec = tween(400), label = "pv") { u ->
-                              if (u.isNotBlank()) Banner(u, Modifier.fillMaxSize())
-                          }
-                      }
-                  }
-                  Row(
-                      Modifier.fillMaxSize().padding(10.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      // video: plain box, nothing drawn over it
-                      Box(
-                          Modifier.fillMaxHeight().aspectRatio(16f / 9f)
-                              .clip(RoundedCornerShape(16.dp))
-                              .background(Color.Black)
-                              .clickable(
-                                  interactionSource = remember { MutableInteractionSource() },
-                                  indication = null,
-                                  onClick = onFull
-                              )
-                      ) {
-                          AndroidView(
-                              factory = { c ->
-                                  PlayerView(c).apply {
-                                      useController = false
-                                      player = pc.player
-                                      setShutterBackgroundColor(android.graphics.Color.BLACK)
-                                      isFocusable = false
-                                      isFocusableInTouchMode = false
-                                      keepScreenOn = true
-                                  }
-                              },
-                              onRelease = { it.player = null },
-                              modifier = Modifier.fillMaxSize()
+                  // video
+                  Box(
+                      Modifier.width((474 * u).dp).height((267 * u).dp)
+                          .clip(RoundedCornerShape((12 * u).dp))
+                          .background(Color.Black)
+                          .clickable(
+                              interactionSource = remember { MutableInteractionSource() },
+                              indication = null,
+                              onClick = onFull
                           )
-                          if (pc.buffering) {
-                              CircularProgressIndicator(
-                                  Modifier.align(Alignment.Center).size(26.dp), color = Accent, strokeWidth = 3.dp
-                              )
-                          }
-                          pc.error?.let {
-                              Text(
-                                  it.lineSequence().firstOrNull() ?: "",
-                                  Modifier.align(Alignment.Center).padding(6.dp),
-                                  color = Color.White, fontSize = 10.sp, textAlign = TextAlign.Center, maxLines = 3
-                              )
-                          }
+                  ) {
+                      AndroidView(
+                          factory = { c ->
+                              PlayerView(c).apply {
+                                  useController = false
+                                  player = pc.player
+                                  setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                  isFocusable = false
+                                  isFocusableInTouchMode = false
+                                  keepScreenOn = true
+                              }
+                          },
+                          onRelease = { it.player = null },
+                          modifier = Modifier.fillMaxSize()
+                      )
+                      if (pc.buffering) {
+                          CircularProgressIndicator(
+                              Modifier.align(Alignment.Center).size((34 * u).dp), color = Accent, strokeWidth = 3.dp
+                          )
                       }
-                      Spacer(Modifier.width(14.dp))
-                      Column(
-                          Modifier.weight(1f).fillMaxHeight()
-                              .padding(end = if (showBanner) (if (wide) 140.dp else 40.dp) else 34.dp),
-                          verticalArrangement = Arrangement.spacedBy(if (wide) 3.dp else 1.dp, Alignment.CenterVertically)
-                      ) {
-                          if (hp != null) {
-                              Text(
-                                  hp.title.ifBlank { "Live now" }, color = Color.White, fontSize = if (wide) 18.sp else 13.sp,
-                                  fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis
-                              )
-                              Row(verticalAlignment = Alignment.CenterVertically) {
-                                  Text("${hm(hp.start)}--${hm(hp.stop)}", color = Accent, fontSize = tf, maxLines = 1)
-                                  Spacer(Modifier.width(8.dp))
-                                  if (live) {
-                                      val left = ((hp.stop - vm.now + 59_999L) / 60_000L).coerceAtLeast(1L)
-                                      LinearProgressIndicator(
-                                          progress = { progressOf(hp, vm.now) },
-                                          modifier = Modifier.weight(1f).height(3.dp),
-                                          color = Accent, trackColor = Color.White.copy(alpha = 0.2f)
-                                      )
-                                      Spacer(Modifier.width(8.dp))
-                                      Text("$left min left", color = Dim, fontSize = tf, maxLines = 1)
-                                  } else {
-                                      Text(untilText(hp.start - vm.now), color = Dim, fontSize = tf, maxLines = 1)
-                                  }
-                              }
-                              if (hp.desc.isNotBlank()) {
-                                  Text(
-                                      hp.desc, color = Dim, fontSize = if (wide) 13.sp else 10.sp,
-                                      lineHeight = if (wide) 16.sp else 12.sp,
-                                      maxLines = 3, overflow = TextOverflow.Ellipsis
-                                  )
-                              }
-                              if (next != null) {
-                                  Row(verticalAlignment = Alignment.CenterVertically) {
-                                      Text(
-                                          "Next: ${next.title}", color = Color.White, fontSize = tf,
-                                          fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                          modifier = Modifier.weight(1f, fill = false)
-                                      )
-                                      Text(
-                                          "  -  " + untilText(next.start - vm.now), color = Accent,
-                                          fontSize = tf, maxLines = 1
-                                      )
-                                  }
-                              }
-                          } else if (ch != null) {
-                              Text("Live now", color = Color.White, fontSize = if (wide) 18.sp else 13.sp, fontWeight = FontWeight.ExtraBold)
-                          } else {
-                              Text("Select a channel", color = Dim)
-                          }
+                      pc.error?.let {
+                          Text(
+                              it.lineSequence().firstOrNull() ?: "",
+                              Modifier.align(Alignment.Center).padding(6.dp),
+                              color = Color.White, fontSize = (16 * u).sp, textAlign = TextAlign.Center, maxLines = 3
+                          )
                       }
                   }
-                  // menu button (touch users; TV remotes use Back / LEFT)
-                  GlassIconButton(
-                      Icons.Filled.Menu, "Menu",
-                      Modifier.align(Alignment.TopEnd).padding(8.dp),
-                      size = 30.dp
-                  ) { vm.menuLevel = if (vm.menuLevel > 0) 0 else 2 }
+                  Spacer(Modifier.width((33 * u).dp))
+                  // title / time / description
+                  Column(Modifier.weight(1f).padding(top = (10 * u).dp)) {
+                      if (hp != null) {
+                          Text(
+                              hp.title.ifBlank { "Live now" }, color = Color.White, fontSize = (30 * u).sp,
+                              lineHeight = (36 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                          )
+                          Spacer(Modifier.height((12 * u).dp))
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Text(rangeText(hp), color = TextDim, fontSize = (20 * u).sp, maxLines = 1)
+                              Spacer(Modifier.width((20 * u).dp))
+                              if (live) {
+                                  val left = ((hp.stop - vm.now + 59_999L) / 60_000L).coerceAtLeast(1L)
+                                  Box(
+                                      Modifier.width((58 * u).dp).height((4 * u).dp)
+                                          .clip(RoundedCornerShape(2.dp)).background(BarTrack)
+                                  ) {
+                                      Box(
+                                          Modifier.fillMaxHeight().fillMaxWidth(progressOf(hp, vm.now)).background(BarFill)
+                                      )
+                                  }
+                                  Spacer(Modifier.width((20 * u).dp))
+                                  Text("$left min", color = TextDim, fontSize = (20 * u).sp, maxLines = 1)
+                              } else {
+                                  Text(untilText(hp.start - vm.now), color = TextDim, fontSize = (20 * u).sp, maxLines = 1)
+                              }
+                          }
+                          if (hp.desc.isNotBlank()) {
+                              Spacer(Modifier.height((12 * u).dp))
+                              Text(
+                                  hp.desc, color = TextDim, fontSize = (20 * u).sp, lineHeight = (24 * u).sp,
+                                  maxLines = 6, overflow = TextOverflow.Ellipsis
+                              )
+                          }
+                      } else if (ch != null) {
+                          Text("Live now", color = Color.White, fontSize = (30 * u).sp)
+                      } else {
+                          Text("Select a channel", color = TextDim, fontSize = (24 * u).sp)
+                      }
+                  }
+                  Spacer(Modifier.width((20 * u).dp))
+                  // banner (right side) + favourite star + genre
+                  Column(Modifier.width((300 * u).dp), horizontalAlignment = Alignment.End) {
+                      Box(
+                          Modifier.width((300 * u).dp).height((169 * u).dp)
+                              .clip(RoundedCornerShape((10 * u).dp))
+                              .background(CellBg),
+                          contentAlignment = Alignment.Center
+                      ) {
+                          if (url.isNotBlank()) {
+                              Crossfade(url, animationSpec = tween(300), label = "pv") { x ->
+                                  Banner(x, Modifier.fillMaxSize())
+                              }
+                          } else if (hc != null) {
+                              Logo(hc, (80 * u).dp)
+                          }
+                          Icon(
+                              if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
+                              tint = if (fav) Accent else Color.White,
+                              modifier = Modifier.align(Alignment.TopEnd).padding((8 * u).dp).size((30 * u).dp)
+                          )
+                      }
+                      if (hp != null && hp.genre.isNotBlank()) {
+                          Spacer(Modifier.height((10 * u).dp))
+                          Text(hp.genre, color = Color.White, fontSize = (20 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      }
+                  }
               }
           }
 
@@ -2371,10 +2403,10 @@ jobs:
 
           /** Far-left panel (level 2): TV, Search, Settings. RIGHT moves into the categories panel. */
           @Composable
-          fun NavPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp) {
+          fun NavPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp, u: Float) {
               Column(
                   Modifier.width(w).fillMaxHeight()
-                      .background(PanelBg)
+                      .background(CellBg)
                       .onPreviewKeyEvent { e ->
                           if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
                               try {
@@ -2386,7 +2418,7 @@ jobs:
                               false
                           }
                       }
-                      .padding(horizontal = 14.dp, vertical = 14.dp),
+                      .padding(horizontal = (18 * u).dp, vertical = (18 * u).dp),
                   verticalArrangement = Arrangement.spacedBy(10.dp)
               ) {
                   NAV.forEach { n ->
@@ -2407,14 +2439,12 @@ jobs:
            * (no OK needed); OK or RIGHT hides the menu, LEFT opens the TV / Search / Settings panel.
            */
           @Composable
-          fun CatPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp) {
+          fun CatPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp, u: Float) {
               val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
               val focusCat = if (vm.tab == 0) vm.category else G_ALL
-              val shape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp)
               Column(
                   Modifier.width(w).fillMaxHeight()
-                      .clip(shape)
-                      .background(PanelBg)
+                      .background(Color(0xFF1A1A1A))
                       .onPreviewKeyEvent { e ->
                           val k = e.nativeKeyEvent.keyCode
                           if (e.type != KeyEventType.KeyDown) {
@@ -2439,7 +2469,7 @@ jobs:
               ) {
                   LazyColumn(
                       Modifier.weight(1f),
-                      contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                      contentPadding = PaddingValues(horizontal = (18 * u).dp, vertical = (18 * u).dp),
                       verticalArrangement = Arrangement.spacedBy(10.dp)
                   ) {
                       items(all) { g ->
@@ -2462,44 +2492,32 @@ jobs:
               }
           }
 
-          /* ======================================================== LIVE ROWS (EPG) */
-
-          /** Up / Down: always land on the LIVE programme card of the next / previous row. Left on the first card: menu. */
-          private fun rowKeys(
-              vm: MainVM,
-              first: Boolean,
-              onNav: (Boolean) -> Boolean
-          ): (androidx.compose.ui.input.key.KeyEvent) -> Boolean = { e ->
-              if (e.type != KeyEventType.KeyDown) {
-                  false
-              } else {
-                  val k = e.nativeKeyEvent.keyCode
-                  if (k == KeyEvent.KEYCODE_DPAD_DOWN) {
-                      onNav(true)
-                  } else if (k == KeyEvent.KEYCODE_DPAD_UP) {
-                      onNav(false)
-                  } else if (k == KeyEvent.KEYCODE_DPAD_LEFT && first) {
-                      if (vm.menuLevel == 0) vm.menuLevel = 1
-                      true
-                  } else {
-                      false
-                  }
-              }
-          }
+          /* ============================================================== GUIDE (EPG) */
 
           /**
-           * Home rows. The free height under the preview is split into the number of rows chosen in Settings
-           * (2..6, default 3). Focus only ever sits on programme cards: Up / Down jump to the live card of the
-           * neighbouring channel, the channel logo tile is never focused.
+           * The programme guide: time axis on top, one row per channel (number, logo, name | programme blocks laid out
+           * on a real time scale), a vertical line for "now". The remote moves over the programme blocks in 2D like TiviMate;
+           * the time window slides sideways by itself to keep the highlighted block visible.
            */
           @Composable
-          fun LiveEpg(vm: MainVM, onPick: (Channel, List<Channel>) -> Unit) {
+          fun EpgGrid(vm: MainVM, u: Float, onPick: (Channel, List<Channel>) -> Unit) {
               val list = remember(vm.channels, vm.category, vm.favorites, vm.recents) { vm.filter(vm.category) }
               val state = rememberLazyListState()
-              val scope = rememberCoroutineScope()
               var pending by remember { mutableStateOf<String?>(null) }
+              // grid time zero = last half hour; re-based every two hours
+              val base = remember(vm.now / 7_200_000L) { (vm.now / 1_800_000L) * 1_800_000L }
+              val win = remember { Animatable(0f) }          // minutes after [base] shown at the left edge of the guide
+              var winTarget by remember { mutableFloatStateOf(0f) }
               val curIdx = list.indexOfFirst { it.id == vm.current?.id }
               val focusIdx = if (curIdx >= 0) curIdx else 0
+
+              LaunchedEffect(winTarget) {
+                  win.animateTo(winTarget, tween(220, easing = FastOutSlowInEasing))
+              }
+              LaunchedEffect(base) {
+                  winTarget = 0f
+                  win.snapTo(0f)
+              }
 
               // chunked EPG: whatever is on screen first (7 channels per chunk), then neighbours; reacts to scrolling
               LaunchedEffect(list, vm.epgTick) {
@@ -2509,13 +2527,13 @@ jobs:
                   }.collect { r -> vm.loadEpgFor(list, r.first, r.second) }
               }
 
-              // new category / screen appears: jump to the playing channel, header goes back to the playing channel
+              // new category / screen appears: show the playing channel, header goes back to the playing channel
               LaunchedEffect(vm.category) {
                   vm.hover = null
-                  state.scrollToItem(focusIdx)
+                  state.scrollToItem((focusIdx - 2).coerceAtLeast(0))
               }
 
-              // focus the live card of the playing channel on entering home, after fullscreen and after the menu closes
+              // focus the live programme of the playing channel on entering home, after fullscreen and after the menu closes
               LaunchedEffect(vm.category, vm.menuLevel) {
                   if (vm.menuLevel == 0) {
                       delay(250)
@@ -2523,7 +2541,7 @@ jobs:
                   }
               }
 
-              // safety: never stay "busy" if a row could not take the focus
+              // safety: never keep a stale focus request
               LaunchedEffect(pending) {
                   if (pending != null) {
                       delay(900)
@@ -2531,73 +2549,145 @@ jobs:
                   }
               }
 
-              val navRow: (String, Boolean) -> Boolean = { id, down ->
-                  val i = list.indexOfFirst { it.id == id }
-                  val t = if (down) i + 1 else i - 1
-                  if (pending == null && i >= 0 && t >= 0 && t < list.size) {
-                      pending = list[t].id
-                      val visible = state.layoutInfo.visibleItemsInfo.any { it.index == t }
-                      if (!visible) {
-                          scope.launch {
-                              state.animateScrollToItem(if (down) (t - (vm.rows - 1)).coerceAtLeast(0) else t)
+              BoxWithConstraints(Modifier.fillMaxSize()) {
+                  val chanW = (400 * u).dp
+                  val axisH = (60 * u).dp
+                  val rowH = (58 * u).dp
+                  val dpm = 7.9f * u
+                  val visMin = (maxWidth.value - chanW.value) / dpm
+
+                  // every focused block: header follows it, the window slides so the block stays visible
+                  val onCell: (Channel, Program) -> Unit = { ch, p ->
+                      vm.hover = Pair(ch, p)
+                      val s = (p.start - base) / 60000f
+                      val e = (p.stop - base) / 60000f
+                      var t = winTarget
+                      if (s < t) {
+                          t = s.coerceAtLeast(0f)
+                      } else if (e > t + visMin) {
+                          t = minOf(s, e - visMin).coerceAtLeast(0f)
+                      }
+                      if (t != winTarget) winTarget = t
+                  }
+
+                  Column(Modifier.fillMaxSize()) {
+                      TimeAxis(vm, u, chanW, axisH, dpm, visMin, base, win)
+                      if (list.isEmpty()) {
+                          Text("Nothing here yet", color = Dim, modifier = Modifier.padding(24.dp))
+                      }
+                      LazyColumn(state = state, modifier = Modifier.fillMaxWidth().weight(1f)) {
+                          itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
+                              EpgRow(
+                                  vm, ch, i + 1, u, rowH, chanW, base, win, winTarget, visMin, dpm, pending,
+                                  { pending = null }, onCell
+                              ) { onPick(ch, list) }
                           }
                       }
                   }
-                  true
-              }
 
-              if (list.isEmpty()) {
-                  Text("Nothing here yet", color = Dim, modifier = Modifier.padding(24.dp))
-              }
-              BoxWithConstraints(Modifier.fillMaxSize()) {
-                  // the chosen number of rows (Settings, 2..6, default 3) shares the available height
-                  val rowH = maxOf((maxHeight - 8.dp) / vm.rows, 72.dp)
-                  LazyColumn(
-                      state = state,
-                      modifier = Modifier.fillMaxSize(),
-                      contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
-                  ) {
-                      itemsIndexed(list, key = { _, c -> c.id }) { _, ch ->
-                          ChannelRow(
-                              vm, ch, ch.id == vm.current?.id, rowH, pending,
-                              { pending = null },
-                              { down -> navRow(ch.id, down) }
-                          ) { onPick(ch, list) }
+                  // "now" line with its dot, drawn over the blocks (layout phase only, no recomposition)
+                  Box(Modifier.padding(start = chanW).fillMaxSize().clipToBounds()) {
+                      val dotD = (9 * u).dp
+                      Box(
+                          Modifier
+                              .offset {
+                                  val x = ((((vm.now - base) / 60000f) - win.value) * dpm).dp.roundToPx()
+                                  IntOffset(x - dotD.roundToPx() / 2, 0)
+                              }
+                              .padding(top = axisH - dotD)
+                              .width(dotD)
+                              .fillMaxHeight()
+                      ) {
+                          Box(
+                              Modifier.align(Alignment.TopCenter).padding(top = dotD / 2)
+                                  .width((1.6f * u).dp.coerceAtLeast(1.dp)).fillMaxHeight().background(NowLine)
+                          )
+                          Box(Modifier.align(Alignment.TopCenter).size(dotD).clip(CircleShape).background(NowDot))
                       }
                   }
               }
           }
 
-          /**
-           * One channel row: a (non focusable) channel logo tile followed by a sideways list of programme cards.
-           * The first card is the LIVE programme and is where Up / Down land. Scrolling the cards towards their end
-           * loads the next day from the EPG (offset 2, 3 ... up to 10).
-           */
+          /** Date + current time on the left, half-hour labels on the real time scale, thin line underneath. */
           @Composable
-          fun ChannelRow(
+          fun TimeAxis(
+              vm: MainVM,
+              u: Float,
+              chanW: Dp,
+              axisH: Dp,
+              dpm: Float,
+              visMin: Float,
+              base: Long,
+              win: Animatable<Float, AnimationVector1D>
+          ) {
+              val first by remember { derivedStateOf { Math.floor(((win.value - 20f) / 30f).toDouble()).toInt() } }
+              val count = ((visMin + 40f) / 30f).toInt() + 2
+              Box(Modifier.fillMaxWidth().height(axisH)) {
+                  Box(Modifier.fillMaxSize().padding(start = chanW - (50 * u).dp).clipToBounds()) {
+                      for (k in maxOf(first, 0) until maxOf(first, 0) + count) {
+                          key(k) {
+                              Box(
+                                  Modifier
+                                      .offset { IntOffset(((k * 30f - win.value) * dpm).dp.roundToPx(), 0) }
+                                      .padding(top = (26 * u).dp)
+                                      .width((100 * u).dp),
+                                  contentAlignment = Alignment.TopCenter
+                              ) {
+                                  Text(tickText(base + k * 1_800_000L), color = TextDim, fontSize = (21 * u).sp, maxLines = 1)
+                              }
+                          }
+                      }
+                  }
+                  Text(
+                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, maxLines = 1,
+                      modifier = Modifier.padding(start = (24 * u).dp, top = (26 * u).dp)
+                  )
+                  Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(1.dp).background(AxisLine))
+              }
+          }
+
+          /** One guide row: channel column (number, logo, name, playing / recent marker) + programme blocks. */
+          @Composable
+          fun EpgRow(
               vm: MainVM,
               ch: Channel,
-              selected: Boolean,
+              num: Int,
+              u: Float,
               rowH: Dp,
+              chanW: Dp,
+              base: Long,
+              win: Animatable<Float, AnimationVector1D>,
+              winTarget: Float,
+              visMin: Float,
+              dpm: Float,
               pending: String?,
               onFocusDone: () -> Unit,
-              onNav: (Boolean) -> Boolean,
+              onCell: (Channel, Program) -> Unit,
               onPick: () -> Unit
           ) {
-              val wide = isWide()
-              // a little extra headroom so a focused (zoomed) card is not clipped by its row
-              val cellH = rowH - 16.dp
-              val tileW = if (wide) 150.dp else 104.dp
-              val progs by remember(ch.id) { derivedStateOf { vm.upcoming(ch) } }
-              val days = vm.daysLoaded(ch.id)
-              val fav = ch.id in vm.favorites
-              val rowState = rememberLazyListState()
+              val all by remember(ch.id, base) { derivedStateOf { vm.timeline(ch, base) } }
+              val rowHot by remember(ch.id) { derivedStateOf { vm.hover?.first?.id == ch.id } }
+              val playing = ch.id == vm.current?.id
+              val recent = !playing && ch.id in vm.recents
               val myFr = remember { FocusRequester() }
 
-              // Up / Down arrived here: show the live card and take the focus
+              // only blocks near the visible window are composed
+              val lo = winTarget - 60f
+              val hi = winTarget + visMin + 240f
+              val shown = remember(all, lo, hi, base) {
+                  val src = if (all.isEmpty()) {
+                      listOf(Program(base, base + 86_400_000L, "No schedule available", "", "", "", ""))
+                  } else {
+                      all
+                  }
+                  src.filter { (it.stop - base) / 60000f > lo && (it.start - base) / 60000f < hi }
+              }
+              val liveStart = shown.firstOrNull { vm.now >= it.start && vm.now < it.stop }?.start ?: shown.firstOrNull()?.start
+              val firstStart = all.firstOrNull()?.start ?: base
+
+              // initial focus (playing channel) arrives here
               LaunchedEffect(pending) {
                   if (pending == ch.id) {
-                      rowState.scrollToItem(0)
                       var ok = false
                       var n = 0
                       while (!ok && n < 8) {
@@ -2613,71 +2703,63 @@ jobs:
                   }
               }
 
-              // side scroll: close to the last programme -> ask for one more day (restarts after every change)
-              LaunchedEffect(ch.id, progs.size, days, vm.epgTick) {
-                  snapshotFlow { rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
-                      .collect { last ->
-                          if (progs.isNotEmpty() && last >= progs.size - 4) vm.loadMoreDays(ch.id)
-                      }
+              // scrolled towards the end of the loaded days: fetch the next day
+              val lastStop = all.lastOrNull()?.stop ?: 0L
+              LaunchedEffect(ch.id, lastStop, winTarget) {
+                  if (lastStop > 0L && (lastStop - base) / 60000f < winTarget + visMin + 180f) vm.loadMoreDays(ch.id)
               }
 
-              Row(
-                  Modifier.fillMaxWidth().height(rowH),
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  // logo tile: touch only (tap = play, long press = favourite); the remote never stops here
-                  Box(
-                      Modifier.padding(start = 4.dp).width(tileW).height(cellH)
+              Row(Modifier.fillMaxWidth().height(rowH)) {
+                  // channel column (touch: tap = play, long press = favourite; the remote never stops here)
+                  Row(
+                      Modifier.width(chanW).fillMaxHeight()
                           .focusProperties { canFocus = false }
-                          .glass(RoundedCornerShape(14.dp), if (selected) 0.26f else 0.10f, if (selected) Accent else Color.White)
-                          .combinedClickable(onLongClick = { vm.toggleFav(ch) }, onClick = onPick),
-                      contentAlignment = Alignment.Center
-                  ) {
-                      var loaded by remember(ch.logo) { mutableStateOf(false) }
-                      if (ch.logo.isNotBlank()) {
-                          AsyncImage(
-                              model = ch.logo, contentDescription = ch.name, contentScale = ContentScale.Fit,
-                              onSuccess = { loaded = true },
-                              modifier = Modifier.fillMaxSize().padding(8.dp)
-                          )
-                      }
-                      if (!loaded) {
-                          Text(
-                              ch.name, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                              textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                              modifier = Modifier.padding(8.dp)
-                          )
-                      }
-                      if (selected) {
-                          Icon(
-                              Icons.Filled.PlayArrow, null, tint = Accent,
-                              modifier = Modifier.align(Alignment.TopStart).padding(4.dp).size(16.dp)
-                          )
-                      }
-                      if (fav) {
-                          Icon(
-                              Icons.Filled.Star, null, tint = Color(0xFFFFC107),
-                              modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(14.dp)
-                          )
-                      }
-                  }
-                  LazyRow(
-                      state = rowState,
-                      modifier = Modifier.weight(1f).fillMaxHeight(),
-                      contentPadding = PaddingValues(start = 10.dp, end = 60.dp, top = 6.dp, bottom = 6.dp),
-                      horizontalArrangement = Arrangement.spacedBy(8.dp),
+                          .combinedClickable(onLongClick = { vm.toggleFav(ch) }, onClick = onPick)
+                          .padding(start = (24 * u).dp),
                       verticalAlignment = Alignment.CenterVertically
                   ) {
-                      if (progs.isEmpty()) {
-                          item {
-                              EmptyCell(vm, ch, cellH, Modifier.focusRequester(myFr), onNav, onPick)
+                      Box(Modifier.width((40 * u).dp), contentAlignment = Alignment.Center) {
+                          Text(num.toString(), color = Color.White, fontSize = (21 * u).sp, maxLines = 1)
+                      }
+                      Spacer(Modifier.width((14 * u).dp))
+                      Box(Modifier.width((64 * u).dp).height((46 * u).dp), contentAlignment = Alignment.Center) {
+                          if (ch.logo.isNotBlank()) {
+                              AsyncImage(
+                                  model = ch.logo, contentDescription = null, contentScale = ContentScale.Fit,
+                                  modifier = Modifier.fillMaxSize()
+                              )
+                          } else {
+                              Text(ch.name.take(1).uppercase(), color = Color.White, fontSize = (20 * u).sp)
                           }
+                      }
+                      Spacer(Modifier.width((16 * u).dp))
+                      Text(
+                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * u).sp,
+                          maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                      )
+                      if (playing) {
+                          Icon(
+                              Icons.Filled.PlayArrow, null, tint = GoldArrow,
+                              modifier = Modifier.padding(horizontal = (10 * u).dp).size((28 * u).dp)
+                          )
+                      } else if (recent) {
+                          Icon(
+                              Icons.Filled.History, null, tint = Color(0xFFA3A3A3),
+                              modifier = Modifier.padding(horizontal = (10 * u).dp).size((26 * u).dp)
+                          )
                       } else {
-                          itemsIndexed(progs, key = { _, p -> p.start }) { idx, p ->
-                              ProgCell(
-                                  vm, ch, p, cellH, idx == 0,
-                                  if (idx == 0) Modifier.focusRequester(myFr) else Modifier,
-                                  onNav, { vm.toggleFav(ch) }, onPick
+                          Spacer(Modifier.width((48 * u).dp))
+                      }
+                  }
+                  // programme blocks on the time scale
+                  Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
+                      for (p in shown) {
+                          key(p.start) {
+                              EpgCell(
+                                  vm, ch, p, u, base, win, dpm, rowH, rowHot,
+                                  p.start == firstStart,
+                                  if (p.start == liveStart) Modifier.focusRequester(myFr) else Modifier,
+                                  { onCell(ch, p) }, onPick
                               )
                           }
                       }
@@ -2685,122 +2767,83 @@ jobs:
               }
           }
 
-          @Composable
-          fun EmptyCell(
-              vm: MainVM,
-              ch: Channel,
-              cellH: Dp,
-              frMod: Modifier,
-              onNav: (Boolean) -> Boolean,
-              onClick: () -> Unit
-          ) {
-              Column(
-                  Modifier.width(200.dp).height(cellH)
-                      .onPreviewKeyEvent(rowKeys(vm, true, onNav))
-                      .then(frMod)
-                      .focusGlow(
-                          corner = 12.dp, focusScale = 1.06f,
-                          onFocusChange = { f -> if (f) vm.hover = null }, onClick = onClick
-                      )
-                      .glass(RoundedCornerShape(12.dp), 0.08f)
-                      .padding(12.dp),
-                  verticalArrangement = Arrangement.Center
-              ) {
-                  Text("No schedule available", color = Color.White, fontSize = 13.sp)
-                  Text(ch.category, color = Dim, fontSize = 11.sp)
-              }
-          }
-
-          private val DAY_FMT = SimpleDateFormat("d MMM", Locale.ENGLISH)
-
-          /** "LIVE NOW" / "Today, 7:30 pm" / "Tomorrow, 7:30 pm" / "12 Nov, 7:30 pm". */
-          fun cardLabel(p: Program, now: Long, live: Boolean): String {
-              if (live) return "LIVE NOW"
-              val c = Calendar.getInstance()
-              c.timeInMillis = now
-              c.set(Calendar.HOUR_OF_DAY, 0)
-              c.set(Calendar.MINUTE, 0)
-              c.set(Calendar.SECOND, 0)
-              c.set(Calendar.MILLISECOND, 0)
-              val diff = (p.start - c.timeInMillis).floorDiv(86_400_000L)
-              val day = when {
-                  diff <= 0L -> "Today"
-                  diff == 1L -> "Tomorrow"
-                  else -> DAY_FMT.format(Date(p.start))
-              }
-              return day + ", " + hm12(p.start)
-          }
-
           /**
-           * One programme card, in three lines:
-           *     LIVE NOW  /  Today, 7:30 pm  /  Tomorrow, 7:30 pm  /  12 Nov, 7:30 pm
-           *     [ 16:9 banner ]
-           *     Programme title
-           * It never expands: when focused it only glows and pops, and the full details appear in the header.
-           * OK plays the channel, long OK adds the channel to Favorites.
+           * One programme block. Width / position follow the (animated) time window in the layout phase, so sliding
+           * the guide never recomposes. Colours: normal #1E1E1E, other blocks of the highlighted row #454545,
+           * highlighted block gold. Text is clipped at the block edge like TiviMate.
            */
           @Composable
-          fun ProgCell(
+          fun EpgCell(
               vm: MainVM,
               ch: Channel,
               p: Program,
-              cellH: Dp,
+              u: Float,
+              base: Long,
+              win: Animatable<Float, AnimationVector1D>,
+              dpm: Float,
+              rowH: Dp,
+              rowHot: Boolean,
               first: Boolean,
               frMod: Modifier,
-              onNav: (Boolean) -> Boolean,
-              onFav: () -> Unit,
+              onFocus: () -> Unit,
               onClick: () -> Unit
           ) {
-              val live = vm.now >= p.start && vm.now < p.stop
-              val label = remember(p.start, live, vm.now / 300_000L) { cardLabel(p, vm.now, live) }
-              val bannerH = (cellH - 40.dp).coerceAtLeast(36.dp)
-              val bw = bannerH * (16f / 9f) + 6.dp
-              Column(
-                  Modifier.width(bw).height(cellH)
-                      .onPreviewKeyEvent(rowKeys(vm, first, onNav))
-                      .then(frMod)
-                      .focusGlow(
-                          corner = 12.dp, focusScale = 1.12f,
-                          onFocusChange = { f -> if (f) vm.hover = Pair(ch, p) },
-                          onLongClick = onFav,
-                          onClick = onClick
-                      )
-                      .padding(3.dp),
-                  verticalArrangement = Arrangement.Top
-              ) {
-                  Box(Modifier.fillMaxWidth().height(16.dp).padding(horizontal = 3.dp), contentAlignment = Alignment.CenterStart) {
-                      Text(
-                          label, color = if (live) LiveRed else Color.White, fontSize = 11.sp,
-                          fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
-                      )
-                  }
-                  Box(
-                      Modifier.fillMaxWidth().height(bannerH)
-                          .clip(RoundedCornerShape(9.dp))
-                          .background(hashColor(p.title).copy(alpha = 0.22f))
-                  ) {
-                      Banner(bannerUrl(p), Modifier.fillMaxSize())
-                      if (live) {
-                          LinearProgressIndicator(
-                              progress = { progressOf(p, vm.now) },
-                              modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp),
-                              color = LiveRed, trackColor = Color.Black.copy(alpha = 0.55f)
-                          )
+              val src = remember { MutableInteractionSource() }
+              val focused by src.collectIsFocusedAsState()
+              val s = (p.start - base) / 60000f
+              val e = (p.stop - base) / 60000f
+              val gap = (4 * u).dp
+              val cellH = (55 * u).dp
+              val inset = (1.5f * u).dp
+              val cb by rememberUpdatedState(onFocus)
+              LaunchedEffect(focused) {
+                  if (focused) cb()
+              }
+              val bg = if (focused) GoldCell else if (rowHot) CellHot else CellBg
+              Box(
+                  Modifier
+                      .offset {
+                          val w0 = win.value
+                          val left = if (s < w0 && e > w0) 0f else (s - w0)
+                          IntOffset((left * dpm).dp.roundToPx(), inset.roundToPx())
                       }
-                  }
-                  Box(Modifier.fillMaxWidth().height(18.dp).padding(horizontal = 3.dp), contentAlignment = Alignment.CenterStart) {
-                      Text(
-                          p.title.ifBlank { "-" }, color = Color.White, fontSize = 12.sp,
-                          fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis
-                      )
-                  }
+                      .layout { m, _ ->
+                          val w0 = win.value
+                          val wMin = if (s < w0 && e > w0) (e - w0) else (e - s)
+                          val w = ((wMin * dpm).dp.roundToPx() - gap.roundToPx()).coerceAtLeast(0)
+                          val h = cellH.roundToPx()
+                          val pl = m.measure(Constraints.fixed(w, h))
+                          layout(w, h) { pl.place(0, 0) }
+                      }
+                      .onPreviewKeyEvent { ev ->
+                          if (ev.type == KeyEventType.KeyDown && first &&
+                              ev.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                          ) {
+                              if (vm.menuLevel == 0) vm.menuLevel = 1
+                              true
+                          } else {
+                              false
+                          }
+                      }
+                      .then(frMod)
+                      .clip(RoundedCornerShape((4 * u).dp))
+                      .background(bg)
+                      .combinedClickable(
+                          interactionSource = src,
+                          indication = null,
+                          onLongClick = { vm.toggleFav(ch) },
+                          onClick = onClick
+                      ),
+                  contentAlignment = Alignment.CenterStart
+              ) {
+                  Text(
+                      p.title.ifBlank { "-" },
+                      color = if (focused) Color(0xFFFFFFF8) else if (rowHot) Color(0xFFEDEDED) else CellText,
+                      fontSize = (21 * u).sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
+                      modifier = Modifier.padding(start = (18 * u).dp)
+                  )
               }
           }
-
-          private val HM12 = SimpleDateFormat("h:mm a", Locale.ENGLISH)
-
-          /** 12-hour clock with am / pm written, e.g. "7:30 pm". */
-          fun hm12(ms: Long): String = HM12.format(Date(ms)).lowercase()
 
           /* ============================================================== SEARCH */
 
@@ -2940,14 +2983,6 @@ jobs:
                       Text("Reloaded automatically 10 minutes before expiry.", color = Dim, fontSize = 12.sp)
                       GlassButton("Refresh now", icon = Icons.Filled.Refresh) { vm.refresh() }
                   }
-                  Section("Home screen") {
-                      Text("Number of channel rows shown under the preview (2 - 6, default 3)", color = Dim)
-                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                          (MIN_ROWS..MAX_ROWS).forEach { n ->
-                              GlassPill("$n", vm.rows == n) { vm.updateRows(n) }
-                          }
-                      }
-                  }
                   Section("Player") {
                       OutlinedTextField(
                           value = vm.userAgent, onValueChange = { vm.setUa(it) }, singleLine = true,
@@ -2966,14 +3001,13 @@ jobs:
                       }
                   }
                   Text(
-                      "Menu: Back (or LEFT on the first card of a row) slides the categories in, Back again adds TV / Search / Settings. " +
-                          "TV opens the categories; moving over a category shows it at once, OK (or RIGHT) hides the menu. UP / DOWN always land on the live card of the next row. " +
-                          "Long-press Back (or press OK on the playing channel / preview) for fullscreen. " +
-                          "Long-press (or hold OK) on a programme card to add its channel to Favorites. " +
-                          "Move over a programme card to read its details in the header; scroll a row sideways to load up to 10 days. " +
-                          "EPG is cached for 30 minutes.\n\n" +
-                          "Fullscreen remote: UP / DOWN change channel, LEFT or OK opens the channel list, " +
-                          "RIGHT or MENU opens options (audio, subtitles, quality, aspect, sleep timer), INFO shows the info card, " +
+                      "Menu: Back (or LEFT on the first programme of a row) slides the categories in, Back again adds TV / Search / Settings. " +
+                          "Moving over a category shows it at once, OK (or RIGHT) hides the menu. " +
+                          "The remote moves over the programme guide in all four directions; the header shows the highlighted programme. " +
+                          "OK on a programme plays its channel, OK on the playing channel goes fullscreen, long OK adds the channel to Favorites. " +
+                          "Long-press Back also goes fullscreen. EPG is cached for 30 minutes.\n\n" +
+                          "Fullscreen remote: UP / DOWN change channel, LEFT or OK opens the channel list (RIGHT hides it), " +
+                          "MENU opens options (audio, subtitles, quality, aspect, sleep timer), INFO shows the info card, " +
                           "BACK leaves fullscreen.",
                       fontSize = 12.sp, color = Dim
                   )
