@@ -2,7 +2,8 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + hidden slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
-# v5: TV-remote fullscreen player, rectangular logo tiles, 16:9 programme cards, 6 rows auto-fit, EPG loads up to 10 days while scrolling sideways.
+# v5.2: preview header 0.8x smaller, no LIVE tag on the live card, upcoming cards show white 12h time (am/pm), focused programme card zooms 1.5x stronger.
+# v5.1: TV-remote fullscreen player, rectangular logo tiles, 16:9 programme cards, 2-6 home rows (default 4), EPG loads up to 10 days while scrolling sideways.
 # Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "LiveTV-APK".
 
 on:
@@ -96,8 +97,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 5
-                  versionName = "5.0"
+                  versionCode = 7
+                  versionName = "5.2"
               }
 
               buildTypes {
@@ -246,6 +247,11 @@ jobs:
           /** Furthest EPG day offset (0 = today) the home rows can scroll into. */
           const val MAX_DAY_OFFSET = 10
 
+          /** Home screen row count limits (Settings). */
+          const val MIN_ROWS = 2
+          const val MAX_ROWS = 6
+          const val DEFAULT_ROWS = 4
+
           data class Channel(
               val id: String,
               val name: String,
@@ -352,6 +358,11 @@ jobs:
               var aspect: Int
                   get() = sp.getInt("aspect", 0)
                   set(v) { sp.edit().putInt("aspect", v).apply() }
+
+              /** Channel rows visible on the home screen (2..6, default 4). */
+              var rows: Int
+                  get() = sp.getInt("rows", DEFAULT_ROWS).coerceIn(MIN_ROWS, MAX_ROWS)
+                  set(v) { sp.edit().putInt("rows", v.coerceIn(MIN_ROWS, MAX_ROWS)).apply() }
 
               fun favorites(): Set<String> = sp.getStringSet("fav", emptySet())?.toSet() ?: emptySet()
               fun saveFavorites(s: Set<String>) {
@@ -787,6 +798,7 @@ jobs:
               var extraHeaders by mutableStateOf(store.extraHeaders)
               var resumeLast by mutableStateOf(store.resumeLast)
               var aspect by mutableIntStateOf(store.aspect)
+              var rows by mutableIntStateOf(store.rows)
 
               var now by mutableLongStateOf(System.currentTimeMillis())
               var current by mutableStateOf<Channel?>(null)
@@ -1123,6 +1135,11 @@ jobs:
               fun setResume(v: Boolean) {
                   resumeLast = v
                   store.resumeLast = v
+              }
+
+              fun setRows(v: Int) {
+                  rows = v.coerceIn(MIN_ROWS, MAX_ROWS)
+                  store.rows = rows
               }
 
               fun updateAspect(v: Int) {
@@ -1983,6 +2000,10 @@ jobs:
           private val HM = SimpleDateFormat("HH:mm", Locale.getDefault())
           fun hm(ms: Long): String = HM.format(Date(ms))
 
+          private val HM12 = SimpleDateFormat("h:mm a", Locale.ENGLISH)
+          /** 12-hour clock with am / pm written, e.g. "7:30 pm". */
+          fun hm12(ms: Long): String = HM12.format(Date(ms)).lowercase()
+
           fun progressOf(p: Program, now: Long): Float =
               ((now - p.start).toFloat() / (p.stop - p.start).coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
 
@@ -2185,9 +2206,10 @@ jobs:
           }
 
           /**
-           * Live preview. Left: the shared player (nothing is drawn over the video).
+           * Live preview (header). Left: the shared player (nothing is drawn over the video).
            * Right: the programme banner at 16:9 with its edges blended into the card, like TV / OTT apps.
            * The small menu button (top right) opens categories / Guide / Search / Settings for touch users.
+           * v5.2: the whole header is 0.8x of its old height (171dp -> 137dp wide, 120dp -> 96dp narrow).
            */
           @Composable
           fun Preview(vm: MainVM, pc: PlayerController, onFull: () -> Unit) {
@@ -2201,11 +2223,11 @@ jobs:
               }
               val np = if (ch != null) vm.nowNext(ch).first else null
               val url = if (np != null) bannerUrl(np) else ""
-              val shape = RoundedCornerShape(28.dp)
+              val shape = RoundedCornerShape(24.dp)
               Box(
                   Modifier.fillMaxWidth()
-                      .padding(horizontal = if (wide) 22.dp else 12.dp, vertical = 8.dp)
-                      .height(if (wide) 214.dp else 150.dp)
+                      .padding(horizontal = if (wide) 22.dp else 12.dp, vertical = 6.dp)
+                      .height(if (wide) 137.dp else 96.dp)
                       .clip(shape)
                       .background(Brush.horizontalGradient(listOf(Color(0xE60A0F1A), Color(0xB3101828))))
                       .border(
@@ -2233,13 +2255,13 @@ jobs:
                       )
                   )
                   Row(
-                      Modifier.fillMaxSize().padding(12.dp),
+                      Modifier.fillMaxSize().padding(10.dp),
                       verticalAlignment = Alignment.CenterVertically
                   ) {
                       // video: plain box, no glass / glow / overlay on top of it
                       Box(
                           Modifier.fillMaxHeight().aspectRatio(16f / 9f)
-                              .clip(RoundedCornerShape(18.dp))
+                              .clip(RoundedCornerShape(16.dp))
                               .background(Color.Black)
                               .clickable(
                                   interactionSource = remember { MutableInteractionSource() },
@@ -2263,49 +2285,49 @@ jobs:
                           )
                           if (pc.buffering) {
                               CircularProgressIndicator(
-                                  Modifier.align(Alignment.Center).size(30.dp), color = Accent, strokeWidth = 3.dp
+                                  Modifier.align(Alignment.Center).size(26.dp), color = Accent, strokeWidth = 3.dp
                               )
                           }
                           pc.error?.let {
                               Text(
                                   it.lineSequence().firstOrNull() ?: "",
-                                  Modifier.align(Alignment.Center).padding(8.dp),
-                                  color = Color.White, fontSize = 11.sp, textAlign = TextAlign.Center, maxLines = 3
+                                  Modifier.align(Alignment.Center).padding(6.dp),
+                                  color = Color.White, fontSize = 10.sp, textAlign = TextAlign.Center, maxLines = 3
                               )
                           }
                       }
-                      Spacer(Modifier.width(18.dp))
+                      Spacer(Modifier.width(16.dp))
                       Column(
                           Modifier.weight(1f).fillMaxHeight().padding(end = if (wide) 140.dp else 40.dp),
-                          verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterVertically)
+                          verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically)
                       ) {
                           if (ch != null) {
                               Row(verticalAlignment = Alignment.CenterVertically) {
-                                  Logo(ch, 28.dp)
+                                  Logo(ch, 24.dp)
                                   Spacer(Modifier.width(8.dp))
                                   Text(
-                                      ch.name, color = Dim, fontWeight = FontWeight.SemiBold,
+                                      ch.name, color = Dim, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
                                       maxLines = 1, overflow = TextOverflow.Ellipsis
                                   )
                               }
                               Text(
-                                  np?.title ?: "Live now", fontSize = if (wide) 22.sp else 17.sp,
-                                  fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis
+                                  np?.title ?: "Live now", fontSize = if (wide) 17.sp else 14.sp,
+                                  fontWeight = FontWeight.ExtraBold, maxLines = if (wide) 2 else 1, overflow = TextOverflow.Ellipsis
                               )
                               if (np != null) {
                                   Text(
                                       "${hm(np.start)} - ${hm(np.stop)}" + (if (np.genre.isNotBlank()) "  -  ${np.genre}" else ""),
-                                      color = Accent, fontSize = 13.sp, maxLines = 1
+                                      color = Accent, fontSize = 12.sp, maxLines = 1
                                   )
                                   LinearProgressIndicator(
                                       progress = { progressOf(np, vm.now) },
                                       modifier = Modifier.fillMaxWidth(0.7f).height(3.dp),
                                       color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
                                   )
-                                  if (np.desc.isNotBlank()) {
+                                  if (np.desc.isNotBlank() && wide) {
                                       Text(
-                                          np.desc, color = Dim, fontSize = 13.sp,
-                                          maxLines = if (wide) 3 else 2, overflow = TextOverflow.Ellipsis
+                                          np.desc, color = Dim, fontSize = 12.sp,
+                                          maxLines = 1, overflow = TextOverflow.Ellipsis
                                       )
                                   }
                               }
@@ -2317,8 +2339,8 @@ jobs:
                   // menu button replaces the old header (touch users; TV remotes use Back)
                   GlassIconButton(
                       Icons.Filled.Menu, "Menu",
-                      Modifier.align(Alignment.TopEnd).padding(10.dp),
-                      size = 34.dp
+                      Modifier.align(Alignment.TopEnd).padding(8.dp),
+                      size = 30.dp
                   ) { vm.menuLevel = 2 }
               }
           }
@@ -2429,8 +2451,8 @@ jobs:
           /* ======================================================== LIVE ROWS (EPG) */
 
           /**
-           * Home rows. The free height under the preview is split so that (at least) 6 channel rows are always visible;
-           * more rows appear while scrolling. No header: all the space goes to the rows.
+           * Home rows. The free height under the preview is split into the number of rows chosen in Settings
+           * (2..6, default 4); more rows appear while scrolling. No header: all the space goes to the rows.
            */
           @Composable
           fun LiveEpg(vm: MainVM, onPick: (Channel, List<Channel>) -> Unit) {
@@ -2468,8 +2490,8 @@ jobs:
                   Text("Nothing here yet", color = Dim, modifier = Modifier.padding(24.dp))
               }
               BoxWithConstraints(Modifier.fillMaxSize()) {
-                  // 6 rows share the available height (4dp content padding on top and bottom)
-                  val rowH = maxOf((maxHeight - 8.dp) / 6, 56.dp)
+                  // the chosen number of rows (Settings, 2..6, default 4) shares the available height
+                  val rowH = maxOf((maxHeight - 8.dp) / vm.rows, 56.dp)
                   LazyColumn(
                       state = state,
                       modifier = Modifier.fillMaxSize(),
@@ -2500,7 +2522,8 @@ jobs:
               onPick: () -> Unit
           ) {
               val wide = isWide()
-              val cellH = rowH - 8.dp
+              // a little extra headroom so a focused (1.5x bigger zoom) card is not clipped by its row
+              val cellH = rowH - 18.dp
               val tileW = if (wide) 150.dp else 104.dp
               val progs = vm.upcoming(ch)
               val days = vm.daysLoaded(ch.id)
@@ -2560,7 +2583,7 @@ jobs:
                   LazyRow(
                       state = rowState,
                       modifier = Modifier.weight(1f).fillMaxHeight(),
-                      contentPadding = PaddingValues(start = 10.dp, end = 60.dp, top = 4.dp, bottom = 4.dp),
+                      contentPadding = PaddingValues(start = 10.dp, end = 60.dp, top = 6.dp, bottom = 6.dp),
                       horizontalArrangement = Arrangement.spacedBy(8.dp),
                       verticalAlignment = Alignment.CenterVertically
                   ) {
@@ -2584,9 +2607,12 @@ jobs:
           }
 
           /**
-           * One programme: a 16:9 card whose banner fills the whole card, with the start time and the LIVE tag
-           * overlaid on the banner and the title along its bottom edge. When focused it grows sideways and shows
-           * the programme name ABOVE the description (plus time and genre).
+           * One programme: a 16:9 card whose banner fills the whole card.
+           *  - live programme: no tag at all, just a progress bar along the bottom of the banner;
+           *  - upcoming programme: start time in white, 12-hour clock with am / pm (e.g. "7:30 pm"), top-left of the banner;
+           *  - title along the bottom edge.
+           * When focused (remote moving over it) the card zooms 1.5x stronger than before (1.09 -> 1.135),
+           * grows sideways and shows the programme name ABOVE the description (plus time and genre).
            */
           @Composable
           fun ProgCell(vm: MainVM, p: Program, cellH: Dp, onClick: () -> Unit) {
@@ -2605,7 +2631,7 @@ jobs:
               val shape = RoundedCornerShape(14.dp)
               Box(
                   Modifier.width(w).height(cellH)
-                      .focusGlow(corner = 14.dp, focusScale = 1.03f, onFocusChange = { foc = it }, onClick = onClick)
+                      .focusGlow(corner = 14.dp, focusScale = 1.135f, onFocusChange = { foc = it }, onClick = onClick)
                       .glass(shape, if (live) 0.18f else 0.09f, if (live) Accent else Color.White)
               ) {
                   Row(Modifier.wrapContentWidth(Alignment.Start, unbounded = true).fillMaxHeight()) {
@@ -2624,26 +2650,16 @@ jobs:
                                   Brush.verticalGradient(0.4f to Color.Transparent, 1f to Color(0xCC05070D))
                               )
                           )
-                          // overlay: start time + LIVE tag
-                          Row(
-                              Modifier.align(Alignment.TopStart).padding(5.dp),
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(4.dp)
-                          ) {
+                          // upcoming programmes only: white start time, 12 hour with am / pm. Live card shows no tag.
+                          if (!live) {
                               Text(
-                                  hm(p.start), color = Color.White, fontSize = 10.sp,
+                                  hm12(p.start), color = Color.White, fontSize = 10.sp,
                                   fontWeight = FontWeight.SemiBold, maxLines = 1,
-                                  modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                  modifier = Modifier.align(Alignment.TopStart).padding(5.dp)
+                                      .clip(RoundedCornerShape(6.dp))
                                       .background(Color.Black.copy(alpha = 0.55f))
                                       .padding(horizontal = 5.dp, vertical = 1.dp)
                               )
-                              if (live) {
-                                  Text(
-                                      "LIVE", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold,
-                                      modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFFE53935))
-                                          .padding(horizontal = 5.dp, vertical = 1.dp)
-                                  )
-                              }
                           }
                           Text(
                               p.title, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
@@ -2672,7 +2688,7 @@ jobs:
                           )
                           val sub = listOf(p.genre, p.category).filter { it.isNotBlank() }.distinct().joinToString("  -  ")
                           Text(
-                              "${hm(p.start)} - ${hm(p.stop)}" + (if (sub.isNotEmpty()) "  -  $sub" else ""),
+                              "${hm12(p.start)} - ${hm12(p.stop)}" + (if (sub.isNotEmpty()) "  -  $sub" else ""),
                               color = Accent, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                           )
                           Text(
@@ -2917,6 +2933,14 @@ jobs:
                       )
                       Text("Reloaded automatically 10 minutes before expiry.", color = Dim, fontSize = 12.sp)
                       GlassButton("Refresh now", icon = Icons.Filled.Refresh) { vm.refresh() }
+                  }
+                  Section("Home screen") {
+                      Text("Number of channel rows shown under the preview (2 - 6, default 4)", color = Dim)
+                      Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          (MIN_ROWS..MAX_ROWS).forEach { n ->
+                              GlassPill("$n", vm.rows == n) { vm.setRows(n) }
+                          }
+                      }
                   }
                   Section("Player") {
                       OutlinedTextField(
