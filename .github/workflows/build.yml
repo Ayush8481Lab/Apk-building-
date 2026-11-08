@@ -1137,7 +1137,7 @@ jobs:
                   store.resumeLast = v
               }
 
-              fun setRows(v: Int) {
+              fun updateRows(v: Int) {
                   rows = v.coerceIn(MIN_ROWS, MAX_ROWS)
                   store.rows = rows
               }
@@ -2938,7 +2938,7 @@ jobs:
                       Text("Number of channel rows shown under the preview (2 - 6, default 4)", color = Dim)
                       Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                           (MIN_ROWS..MAX_ROWS).forEach { n ->
-                              GlassPill("$n", vm.rows == n) { vm.setRows(n) }
+                              GlassPill("$n", vm.rows == n) { vm.updateRows(n) }
                           }
                       }
                   }
