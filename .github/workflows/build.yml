@@ -2,6 +2,7 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + push-aside slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
+# v5.6: 8 guide rows, TiviMate menu (nav + text-only categories), full-bleed faded banner, condensed guide font, ellipsis on long titles, no history tag.
 # v5.5: TiviMate-exact home (header with 6-line description + banner, time axis, channel column, time-scaled programme blocks, now line).
 # v5.4: pure black UI, Up/Down land on the live card of the next row, 3-line cards (LIVE NOW / day+time, banner, title), categories apply on focus, previously-played cards in fullscreen info, lighter animations.
 # v5.4: pure black UI, Up/Down jump to the LIVE card of the next/previous row, 3-line cards (LIVE NOW or day+time / banner / title),
@@ -104,8 +105,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 10
-                  versionName = "5.5"
+                  versionCode = 11
+                  versionName = "5.6"
               }
 
               buildTypes {
@@ -1600,6 +1601,7 @@ jobs:
           import androidx.compose.ui.graphics.drawscope.Stroke
           import androidx.compose.ui.graphics.graphicsLayer
           import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.style.TextOverflow
           import androidx.compose.ui.unit.Dp
@@ -1618,16 +1620,22 @@ jobs:
           val CellBg = Color(0xFF1E1E1E)
           val CellHot = Color(0xFF454545)
           val GoldCell = Color(0xFF6E5711)
-          val CellText = Color(0xFFAFAFAF)
+          val CellText = Color(0xFFC2BCAC)
           val TextDim = Color(0xFFA9A9A9)
           val BarTrack = Color(0xFF474747)
           val BarFill = Color(0xFFBABABA)
           val NowLine = Color(0x99D7BD72)
           val NowDot = Color(0xFFD7BD72)
-          val GoldDate = Color(0xFFE6C463)
-          val GoldName = Color(0xFFDABF72)
-          val GoldArrow = Color(0xFFD8BE71)
-          val AxisLine = Color(0xFF3A3A3A)
+          val GoldDate = Color(0xFFEBD07A)
+          val GoldName = Color(0xFFF0B429)
+          val GoldArrow = Color(0xFFFFC107)
+          val AxisLine = Color(0xFF333333)
+          val NavBg = Color(0xFF262626)
+          val NavSel = Color(0xFF78611B)
+          val MenuFocus = Color(0xFF2A2A2A)
+
+          /** Roboto Condensed (programme titles in the guide, like TiviMate). */
+          val CondFont = FontFamily(android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.NORMAL))
 
           @Composable
           fun AppTheme(content: @Composable () -> Unit) {
@@ -1852,6 +1860,8 @@ jobs:
 
           import android.graphics.drawable.BitmapDrawable
           import android.view.KeyEvent
+          import androidx.compose.ui.graphics.Shadow
+          import androidx.compose.ui.text.TextStyle
           import androidx.compose.animation.core.Animatable
           import androidx.compose.animation.core.AnimationVector1D
           import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -2205,8 +2215,8 @@ jobs:
 
               BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
                   val u = minOf(maxHeight.value / 800f, maxWidth.value / 1340f).coerceAtLeast(0.3f)
-                  val navW = (260 * u).dp
-                  val catW = (340 * u).dp
+                  val navW = (326 * u).dp
+                  val catW = (373 * u).dp
                   val density = LocalDensity.current
                   val totalPx = with(density) { (navW + catW).toPx() }
                   val targetPx = with(density) {
@@ -2261,115 +2271,127 @@ jobs:
               val live = hp != null && vm.now >= hp.start && vm.now < hp.stop
               val url = if (hp != null) bannerUrl(hp) else ""
               val fav = hc != null && hc.id in vm.favorites
+              val bannerW = (285f * u * 16f / 9f).dp
+              val shadow = TextStyle(shadow = Shadow(Color.Black, blurRadius = 8f))
 
-              Row(
-                  Modifier.fillMaxWidth().height((285 * u).dp).background(Bg)
-                      .padding(start = (24 * u).dp, top = (18 * u).dp, end = (24 * u).dp)
-              ) {
-                  // video
-                  Box(
-                      Modifier.width((474 * u).dp).height((267 * u).dp)
-                          .clip(RoundedCornerShape((12 * u).dp))
-                          .background(Color.Black)
-                          .clickable(
-                              interactionSource = remember { MutableInteractionSource() },
-                              indication = null,
-                              onClick = onFull
-                          )
-                  ) {
-                      AndroidView(
-                          factory = { c ->
-                              PlayerView(c).apply {
-                                  useController = false
-                                  player = pc.player
-                                  setShutterBackgroundColor(android.graphics.Color.BLACK)
-                                  isFocusable = false
-                                  isFocusableInTouchMode = false
-                                  keepScreenOn = true
-                              }
-                          },
-                          onRelease = { it.player = null },
-                          modifier = Modifier.fillMaxSize()
-                      )
-                      if (pc.buffering) {
-                          CircularProgressIndicator(
-                              Modifier.align(Alignment.Center).size((34 * u).dp), color = Accent, strokeWidth = 3.dp
-                          )
-                      }
-                      pc.error?.let {
-                          Text(
-                              it.lineSequence().firstOrNull() ?: "",
-                              Modifier.align(Alignment.Center).padding(6.dp),
-                              color = Color.White, fontSize = (16 * u).sp, textAlign = TextAlign.Center, maxLines = 3
-                          )
+              Box(Modifier.fillMaxWidth().height((285 * u).dp).background(Bg)) {
+                  // banner: touches the top and right edge of the screen, its left + bottom edges dissolve (modern OTT look)
+                  if (url.isNotBlank()) {
+                      Box(
+                          Modifier.align(Alignment.TopEnd).width(bannerW).fillMaxHeight()
+                              .fadeEdges(left = 0.62f, bottom = 0.2f)
+                      ) {
+                          Crossfade(url, animationSpec = tween(300), label = "pv") { x ->
+                              Banner(x, Modifier.fillMaxSize())
+                          }
                       }
                   }
-                  Spacer(Modifier.width((33 * u).dp))
-                  // title / time / description
-                  Column(Modifier.weight(1f).padding(top = (10 * u).dp)) {
-                      if (hp != null) {
-                          Text(
-                              hp.title.ifBlank { "Live now" }, color = Color.White, fontSize = (30 * u).sp,
-                              lineHeight = (36 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                          )
-                          Spacer(Modifier.height((12 * u).dp))
-                          Row(verticalAlignment = Alignment.CenterVertically) {
-                              Text(rangeText(hp), color = TextDim, fontSize = (20 * u).sp, maxLines = 1)
-                              Spacer(Modifier.width((20 * u).dp))
-                              if (live) {
-                                  val left = ((hp.stop - vm.now + 59_999L) / 60_000L).coerceAtLeast(1L)
-                                  Box(
-                                      Modifier.width((58 * u).dp).height((4 * u).dp)
-                                          .clip(RoundedCornerShape(2.dp)).background(BarTrack)
-                                  ) {
-                                      Box(
-                                          Modifier.fillMaxHeight().fillMaxWidth(progressOf(hp, vm.now)).background(BarFill)
-                                      )
+                  Row(Modifier.fillMaxSize().padding(start = (24 * u).dp, top = (18 * u).dp)) {
+                      // video
+                      Box(
+                          Modifier.width((474 * u).dp).height((267 * u).dp)
+                              .clip(RoundedCornerShape((12 * u).dp))
+                              .background(Color.Black)
+                              .clickable(
+                                  interactionSource = remember { MutableInteractionSource() },
+                                  indication = null,
+                                  onClick = onFull
+                              )
+                      ) {
+                          AndroidView(
+                              factory = { c ->
+                                  PlayerView(c).apply {
+                                      useController = false
+                                      player = pc.player
+                                      setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                      isFocusable = false
+                                      isFocusableInTouchMode = false
+                                      keepScreenOn = true
                                   }
-                                  Spacer(Modifier.width((20 * u).dp))
-                                  Text("$left min", color = TextDim, fontSize = (20 * u).sp, maxLines = 1)
-                              } else {
-                                  Text(untilText(hp.start - vm.now), color = TextDim, fontSize = (20 * u).sp, maxLines = 1)
-                              }
-                          }
-                          if (hp.desc.isNotBlank()) {
-                              Spacer(Modifier.height((12 * u).dp))
-                              Text(
-                                  hp.desc, color = TextDim, fontSize = (20 * u).sp, lineHeight = (24 * u).sp,
-                                  maxLines = 6, overflow = TextOverflow.Ellipsis
+                              },
+                              onRelease = { it.player = null },
+                              modifier = Modifier.fillMaxSize()
+                          )
+                          if (pc.buffering) {
+                              CircularProgressIndicator(
+                                  Modifier.align(Alignment.Center).size((34 * u).dp), color = Accent, strokeWidth = 3.dp
                               )
                           }
-                      } else if (ch != null) {
-                          Text("Live now", color = Color.White, fontSize = (30 * u).sp)
-                      } else {
-                          Text("Select a channel", color = TextDim, fontSize = (24 * u).sp)
+                          pc.error?.let {
+                              Text(
+                                  it.lineSequence().firstOrNull() ?: "",
+                                  Modifier.align(Alignment.Center).padding(6.dp),
+                                  color = Color.White, fontSize = (16 * u).sp, textAlign = TextAlign.Center, maxLines = 3
+                              )
+                          }
+                      }
+                      Spacer(Modifier.width((33 * u).dp))
+                      // title / time / description (up to 6 lines); the right part of the column sits on the faded banner edge
+                      Column(Modifier.weight(1f).padding(top = (10 * u).dp, end = bannerW * 0.42f)) {
+                          if (hp != null) {
+                              Text(
+                                  hp.title.ifBlank { "Live now" }, color = Color.White, fontSize = (30 * u).sp,
+                                  lineHeight = (36 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                              )
+                              Spacer(Modifier.height((12 * u).dp))
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Text(
+                                      rangeText(hp), color = TextDim, fontSize = (20 * u).sp,
+                                      fontWeight = FontWeight.Light, maxLines = 1
+                                  )
+                                  Spacer(Modifier.width((20 * u).dp))
+                                  if (live) {
+                                      val left = ((hp.stop - vm.now + 59_999L) / 60_000L).coerceAtLeast(1L)
+                                      Box(
+                                          Modifier.width((58 * u).dp).height((4 * u).dp)
+                                              .clip(RoundedCornerShape(2.dp)).background(BarTrack)
+                                      ) {
+                                          Box(
+                                              Modifier.fillMaxHeight().fillMaxWidth(progressOf(hp, vm.now)).background(BarFill)
+                                          )
+                                      }
+                                      Spacer(Modifier.width((20 * u).dp))
+                                      Text(
+                                          "$left min", color = TextDim, fontSize = (20 * u).sp,
+                                          fontWeight = FontWeight.Light, maxLines = 1
+                                      )
+                                  } else {
+                                      Text(
+                                          untilText(hp.start - vm.now), color = TextDim, fontSize = (20 * u).sp,
+                                          fontWeight = FontWeight.Light, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                      )
+                                  }
+                              }
+                              if (hp.desc.isNotBlank()) {
+                                  Spacer(Modifier.height((12 * u).dp))
+                                  Text(
+                                      hp.desc, color = TextDim, fontSize = (20 * u).sp, lineHeight = (24 * u).sp,
+                                      fontWeight = FontWeight.Light, maxLines = 6, overflow = TextOverflow.Ellipsis
+                                  )
+                              }
+                          } else if (ch != null) {
+                              Text("Live now", color = Color.White, fontSize = (30 * u).sp)
+                          } else {
+                              Text("Select a channel", color = TextDim, fontSize = (24 * u).sp)
+                          }
                       }
                   }
-                  Spacer(Modifier.width((20 * u).dp))
-                  // banner (right side) + favourite star + genre
-                  Column(Modifier.width((300 * u).dp), horizontalAlignment = Alignment.End) {
-                      Box(
-                          Modifier.width((300 * u).dp).height((169 * u).dp)
-                              .clip(RoundedCornerShape((10 * u).dp))
-                              .background(CellBg),
-                          contentAlignment = Alignment.Center
-                      ) {
-                          if (url.isNotBlank()) {
-                              Crossfade(url, animationSpec = tween(300), label = "pv") { x ->
-                                  Banner(x, Modifier.fillMaxSize())
-                              }
-                          } else if (hc != null) {
-                              Logo(hc, (80 * u).dp)
-                          }
-                          Icon(
-                              if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
-                              tint = if (fav) Accent else Color.White,
-                              modifier = Modifier.align(Alignment.TopEnd).padding((8 * u).dp).size((30 * u).dp)
-                          )
-                      }
+                  // favourite star + genre, far right (over the banner)
+                  Column(
+                      Modifier.align(Alignment.TopEnd).padding(top = (28 * u).dp, end = (24 * u).dp),
+                      horizontalAlignment = Alignment.End
+                  ) {
+                      Icon(
+                          if (fav) Icons.Filled.Star else Icons.Filled.StarBorder, "Favorite",
+                          tint = if (fav) Accent else Color.White,
+                          modifier = Modifier.size((30 * u).dp)
+                      )
                       if (hp != null && hp.genre.isNotBlank()) {
-                          Spacer(Modifier.height((10 * u).dp))
-                          Text(hp.genre, color = Color.White, fontSize = (20 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          Spacer(Modifier.height((14 * u).dp))
+                          Text(
+                              hp.genre, color = Color.White, fontSize = (20 * u).sp, maxLines = 1,
+                              overflow = TextOverflow.Ellipsis, style = shadow
+                          )
                       }
                   }
               }
@@ -2401,12 +2423,52 @@ jobs:
               }
           }
 
-          /** Far-left panel (level 2): TV, Search, Settings. RIGHT moves into the categories panel. */
+          /** TiviMate menu row: optional icon, 24 px label; gold when selected (nav), grey when the remote is on it. */
+          @Composable
+          fun MenuItem(
+              label: String,
+              icon: ImageVector?,
+              selected: Boolean,
+              u: Float,
+              modifier: Modifier = Modifier,
+              onFocus: ((Boolean) -> Unit)? = null,
+              onClick: () -> Unit
+          ) {
+              val src = remember { MutableInteractionSource() }
+              val focused by src.collectIsFocusedAsState()
+              val cb by rememberUpdatedState(onFocus)
+              LaunchedEffect(focused) {
+                  cb?.invoke(focused)
+              }
+              val bg = if (selected) NavSel else if (focused) MenuFocus else Color.Transparent
+              Row(
+                  modifier.fillMaxWidth().height((58 * u).dp)
+                      .clip(RoundedCornerShape((10 * u).dp))
+                      .background(bg)
+                      .combinedClickable(interactionSource = src, indication = null, onClick = onClick)
+                      .padding(start = (if (icon != null) 19 else 18).times(u).dp, end = (12 * u).dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  if (icon != null) {
+                      Icon(icon, null, tint = Color.White, modifier = Modifier.size((28 * u).dp))
+                      Spacer(Modifier.width((19 * u).dp))
+                  }
+                  Text(label, color = Color.White, fontSize = (24 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+              }
+          }
+
+          /** Far-left panel (level 2): logo, Search, TV, Settings (bottom). RIGHT moves into the categories panel. */
           @Composable
           fun NavPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp, u: Float) {
+              val go: (Int) -> Unit = { t ->
+                  vm.tab = t
+                  // TV -> show the categories next; Search / Settings -> open the page
+                  vm.menuLevel = if (t == 0) 1 else 0
+              }
+              val req: (Int) -> Modifier = { t -> if (t == vm.tab) Modifier.focusRequester(navFr) else Modifier }
               Column(
                   Modifier.width(w).fillMaxHeight()
-                      .background(CellBg)
+                      .background(NavBg)
                       .onPreviewKeyEvent { e ->
                           if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
                               try {
@@ -2418,33 +2480,37 @@ jobs:
                               false
                           }
                       }
-                      .padding(horizontal = (18 * u).dp, vertical = (18 * u).dp),
-                  verticalArrangement = Arrangement.spacedBy(10.dp)
+                      .padding(horizontal = (24 * u).dp, vertical = (24 * u).dp)
               ) {
-                  NAV.forEach { n ->
-                      SideItem(
-                          n.second, n.third, vm.tab == n.first,
-                          if (n.first == vm.tab) Modifier.focusRequester(navFr) else Modifier
-                      ) {
-                          vm.tab = n.first
-                          // TV -> show the categories next; Search / Settings -> open the page
-                          vm.menuLevel = if (n.first == 0) 1 else 0
-                      }
+                  Column(
+                      Modifier.fillMaxWidth().height((216 * u).dp),
+                      horizontalAlignment = Alignment.CenterHorizontally,
+                      verticalArrangement = Arrangement.Center
+                  ) {
+                      Icon(Icons.Filled.LiveTv, null, tint = GoldDate, modifier = Modifier.size((72 * u).dp))
+                      Spacer(Modifier.height((8 * u).dp))
+                      Text("Live TV", color = GoldDate, fontSize = (26 * u).sp, fontWeight = FontWeight.Medium)
                   }
+                  Spacer(Modifier.height((24 * u).dp))
+                  MenuItem("Search", Icons.Filled.Search, vm.tab == 2, u, req(2)) { go(2) }
+                  Spacer(Modifier.height((13 * u).dp))
+                  MenuItem("TV", Icons.Filled.LiveTv, vm.tab == 0, u, req(0)) { go(0) }
+                  Spacer(Modifier.weight(1f))
+                  MenuItem("Settings", Icons.Filled.Settings, vm.tab == 3, u, req(3)) { go(3) }
               }
           }
 
           /**
-           * Categories panel (level 1 and 2). Moving the remote over a category shows its channels at once
-           * (no OK needed); OK or RIGHT hides the menu, LEFT opens the TV / Search / Settings panel.
+           * Categories panel (level 1 and 2), text only like TiviMate. Moving the remote over a category shows its
+           * channels at once (no OK needed); OK or RIGHT hides the menu, LEFT opens the nav panel.
            */
           @Composable
           fun CatPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp, u: Float) {
-              val all = listOf(G_ALL, G_FAV, G_RECENT) + vm.categories
+              val all = listOf(G_FAV, G_ALL, G_RECENT) + vm.categories
               val focusCat = if (vm.tab == 0) vm.category else G_ALL
               Column(
                   Modifier.width(w).fillMaxHeight()
-                      .background(Color(0xFF1A1A1A))
+                      .background(Bg)
                       .onPreviewKeyEvent { e ->
                           val k = e.nativeKeyEvent.keyCode
                           if (e.type != KeyEventType.KeyDown) {
@@ -2469,12 +2535,11 @@ jobs:
               ) {
                   LazyColumn(
                       Modifier.weight(1f),
-                      contentPadding = PaddingValues(horizontal = (18 * u).dp, vertical = (18 * u).dp),
-                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                      contentPadding = PaddingValues(start = (24 * u).dp, end = (24 * u).dp, top = (255 * u).dp, bottom = (80 * u).dp)
                   ) {
                       items(all) { g ->
-                          SideItem(
-                              g, catIcon(g), vm.tab == 0 && vm.category == g,
+                          MenuItem(
+                              g, null, false, u,
                               if (g == focusCat) Modifier.focusRequester(catFr) else Modifier,
                               onFocus = { f ->
                                   if (f && (vm.category != g || vm.tab != 0)) {
@@ -2552,7 +2617,7 @@ jobs:
               BoxWithConstraints(Modifier.fillMaxSize()) {
                   val chanW = (400 * u).dp
                   val axisH = (60 * u).dp
-                  val rowH = (58 * u).dp
+                  val rowH = (maxHeight - axisH) / 8   // exactly 8 guide rows, like TiviMate
                   val dpm = 7.9f * u
                   val visMin = (maxWidth.value - chanW.value) / dpm
 
@@ -2633,13 +2698,13 @@ jobs:
                                       .width((100 * u).dp),
                                   contentAlignment = Alignment.TopCenter
                               ) {
-                                  Text(tickText(base + k * 1_800_000L), color = TextDim, fontSize = (21 * u).sp, maxLines = 1)
+                                  Text(tickText(base + k * 1_800_000L), color = TextDim, fontSize = (21 * u).sp, fontWeight = FontWeight.Light, maxLines = 1)
                               }
                           }
                       }
                   }
                   Text(
-                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, maxLines = 1,
+                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, fontWeight = FontWeight.Medium, maxLines = 1,
                       modifier = Modifier.padding(start = (24 * u).dp, top = (26 * u).dp)
                   )
                   Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(1.dp).background(AxisLine))
@@ -2666,9 +2731,8 @@ jobs:
               onPick: () -> Unit
           ) {
               val all by remember(ch.id, base) { derivedStateOf { vm.timeline(ch, base) } }
-              val rowHot by remember(ch.id) { derivedStateOf { vm.hover?.first?.id == ch.id } }
+              val rowHot by remember(ch.id) { derivedStateOf { (vm.hover?.first?.id ?: vm.current?.id) == ch.id } }
               val playing = ch.id == vm.current?.id
-              val recent = !playing && ch.id in vm.recents
               val myFr = remember { FocusRequester() }
 
               // only blocks near the visible window are composed
@@ -2734,18 +2798,13 @@ jobs:
                       }
                       Spacer(Modifier.width((16 * u).dp))
                       Text(
-                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * u).sp,
+                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * u).sp, fontWeight = FontWeight.Medium,
                           maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                       )
                       if (playing) {
                           Icon(
                               Icons.Filled.PlayArrow, null, tint = GoldArrow,
                               modifier = Modifier.padding(horizontal = (10 * u).dp).size((28 * u).dp)
-                          )
-                      } else if (recent) {
-                          Icon(
-                              Icons.Filled.History, null, tint = Color(0xFFA3A3A3),
-                              modifier = Modifier.padding(horizontal = (10 * u).dp).size((26 * u).dp)
                           )
                       } else {
                           Spacer(Modifier.width((48 * u).dp))
@@ -2793,7 +2852,7 @@ jobs:
               val s = (p.start - base) / 60000f
               val e = (p.stop - base) / 60000f
               val gap = (4 * u).dp
-              val cellH = (55 * u).dp
+              val cellH = rowH - (3 * u).dp
               val inset = (1.5f * u).dp
               val cb by rememberUpdatedState(onFocus)
               LaunchedEffect(focused) {
@@ -2838,9 +2897,10 @@ jobs:
               ) {
                   Text(
                       p.title.ifBlank { "-" },
-                      color = if (focused) Color(0xFFFFFFF8) else if (rowHot) Color(0xFFEDEDED) else CellText,
-                      fontSize = (21 * u).sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
-                      modifier = Modifier.padding(start = (18 * u).dp)
+                      color = if (focused) Color(0xFFFFFFF8) else if (rowHot) Color.White else CellText,
+                      fontSize = (21 * u).sp, fontFamily = CondFont, maxLines = 1, softWrap = false,
+                      overflow = TextOverflow.Ellipsis,
+                      modifier = Modifier.padding(start = (18 * u).dp, end = (10 * u).dp)
                   )
               }
           }
