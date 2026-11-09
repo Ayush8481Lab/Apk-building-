@@ -1668,6 +1668,8 @@ jobs:
           import androidx.compose.material3.Icon
           import androidx.compose.material3.MaterialTheme
           import androidx.compose.material3.OutlinedTextFieldDefaults
+          import androidx.compose.material3.ProvideTextStyle
+          import androidx.compose.ui.text.TextStyle
           import androidx.compose.material3.Text
           import androidx.compose.material3.darkColorScheme
           import androidx.compose.runtime.Composable
@@ -1724,8 +1726,9 @@ jobs:
           val NavSel = Color(0xFF78611B)
           val MenuFocus = Color(0xFF2A2A2A)
 
-          val CondFont = FontFamily(android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.NORMAL))
-          val CondLight = FontFamily(android.graphics.Typeface.create("sans-serif-condensed-light", android.graphics.Typeface.NORMAL))
+          val CondFont = FontFamily(android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.BOLD))
+          /** Everything is bold now (TiviMate look): the "light" family is the same bold condensed face. */
+          val CondLight = CondFont
 
           @Composable
           fun AppTheme(content: @Composable () -> Unit) {
@@ -1741,7 +1744,7 @@ jobs:
                       onSurfaceVariant = Dim,
                       secondaryContainer = Color(0xFF26324A)
                   ),
-                  content = content
+                  content = { ProvideTextStyle(TextStyle(fontWeight = FontWeight.Bold)) { content() } }
               )
           }
 
@@ -2780,12 +2783,13 @@ jobs:
               }
 
               BoxWithConstraints(Modifier.fillMaxSize()) {
-                  val chanW = (400 * u).dp
+                  // everything fits the screen: channel column = 29 % of the width, the rest shows exactly 2 hours
+                  val chanW = (maxWidth.value * 0.29f).dp
                   val axisH = (60 * u).dp
                   val rowH = (maxHeight - axisH) / 8
                   val g = rowH.value / 58f
-                  val dpm = 7.9f * u
-                  val visMin = (maxWidth.value - chanW.value) / dpm
+                  val visMin = 120f
+                  val dpm = (maxWidth.value - chanW.value) / visMin
 
                   val onCell: (Channel, Program) -> Unit = { ch, p ->
                       vm.hover = Pair(ch, p)
@@ -2888,8 +2892,8 @@ jobs:
                       }
                   }
                   Text(
-                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, maxLines = 1,
-                      modifier = Modifier.padding(start = (24 * u).dp, top = (26 * u).dp)
+                      dateText(vm.now), color = GoldDate, fontSize = (21 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                      modifier = Modifier.padding(start = (24 * u).dp, top = (26 * u).dp).widthIn(max = chanW - (70 * u).dp)
                   )
                   Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(1.dp).background(AxisLine))
               }
@@ -2919,6 +2923,7 @@ jobs:
               val rowHot by remember(ch.id) { derivedStateOf { (vm.hover?.first?.id ?: vm.current?.id) == ch.id } }
               val playing = ch.id == vm.current?.id
               val myFr = remember { FocusRequester() }
+              val cu = minOf(u, chanW.value / 330f)
 
               // only blocks near the visible window are composed
               val lo = winTarget - 150f
@@ -2937,7 +2942,7 @@ jobs:
                           continue
                       }
                       val st = maxOf(p.start, prevEnd)
-                      if (p.stop <= st) continue
+                      if (p.stop - st < 60_000L) continue
                       out.add(if (st != p.start) p.copy(start = st) else p)
                       prevEnd = p.stop
                   }
@@ -2974,35 +2979,35 @@ jobs:
                       Modifier.width(chanW).fillMaxHeight()
                           .focusProperties { canFocus = false }
                           .combinedClickable(onLongClick = { vm.toggleFav(ch) }, onClick = onPick)
-                          .padding(start = (24 * u).dp),
+                          .padding(start = (24 * cu).dp),
                       verticalAlignment = Alignment.CenterVertically
                   ) {
-                      Box(Modifier.width((40 * u).dp), contentAlignment = Alignment.Center) {
-                          Text(num.toString(), color = Color.White, fontSize = (21 * u).sp, maxLines = 1)
+                      Box(Modifier.width((40 * cu).dp), contentAlignment = Alignment.Center) {
+                          Text(num.toString(), color = Color.White, fontSize = (21 * cu).sp, maxLines = 1)
                       }
-                      Spacer(Modifier.width((14 * u).dp))
-                      Box(Modifier.width((64 * u).dp).height((46 * u).dp), contentAlignment = Alignment.Center) {
+                      Spacer(Modifier.width((14 * cu).dp))
+                      Box(Modifier.width((64 * cu).dp).height((46 * cu).dp), contentAlignment = Alignment.Center) {
                           if (ch.logo.isNotBlank()) {
                               AsyncImage(
                                   model = ch.logo, contentDescription = null, contentScale = ContentScale.Fit,
                                   modifier = Modifier.fillMaxSize()
                               )
                           } else {
-                              Text(ch.name.take(1).uppercase(), color = Color.White, fontSize = (20 * u).sp)
+                              Text(ch.name.take(1).uppercase(), color = Color.White, fontSize = (20 * cu).sp)
                           }
                       }
-                      Spacer(Modifier.width((16 * u).dp))
+                      Spacer(Modifier.width((16 * cu).dp))
                       Text(
-                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * u).sp,
+                          ch.name, color = if (playing) GoldName else Color.White, fontSize = (22 * cu).sp,
                           maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                       )
                       if (playing) {
                           Icon(
                               Icons.Filled.PlayArrow, null, tint = GoldArrow,
-                              modifier = Modifier.padding(horizontal = (10 * u).dp).size((28 * u).dp)
+                              modifier = Modifier.padding(horizontal = (10 * cu).dp).size((28 * cu).dp)
                           )
                       } else {
-                          Spacer(Modifier.width((48 * u).dp))
+                          Spacer(Modifier.width((48 * cu).dp))
                       }
                   }
                   Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
@@ -3862,7 +3867,7 @@ jobs:
                                       }
                                   }
                               }
-                              if (cur != null && cur.desc.isNotBlank()) {
+                              if (!detailed && cur != null && cur.desc.isNotBlank()) {
                                   Spacer(Modifier.height((8 * u).dp))
                                   Text(
                                       cur.desc, color = TextDim, fontSize = (20 * u).sp, lineHeight = (24 * u).sp,
@@ -3940,10 +3945,6 @@ jobs:
                       bu, np?.title?.ifBlank { c.name } ?: c.name,
                       Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape((6 * u).dp)),
                       (14 * u).sp
-                  )
-                  Text(
-                      np?.title ?: "Live", color = GoldDate, fontSize = (18 * u).sp,
-                      maxLines = 1, overflow = TextOverflow.Ellipsis
                   )
                   if (np != null) {
                       LinearProgressIndicator(
