@@ -1,6 +1,10 @@
 name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
+# v6.2: EPG: a short entry sitting inside a long programme (promo / duplicate on movie channels) no longer cuts the movie in two,
+#       progress bars / "min left" tick every 10 s, EPG downloads are throttled (3 at a time) and wait until the stream has started,
+#       so they never steal bandwidth from video. Player: faster start (700 ms), 20-50 s live buffer, async MediaCodec + decoder fallback,
+#       last video frame stays on screen while zapping, rapid zapping is debounced (only the channel you stop on is opened).
 # v6.1: EPG engine rewritten to behave like TiviMate: the programme START time is the truth, an earlier programme is cut where the next one
 #       starts (a later programme is never pushed / hidden), one entry per start time (real title beats Filler), no more "A | B | A" fragments,
 #       midnight-clipped movies are joined, tiny gaps closed, EPG cache is keyed by the real calendar day (no stale data after midnight),
@@ -103,8 +107,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 16
-                  versionName = "6.1"
+                  versionCode = 17
+                  versionName = "6.2"
               }
 
               buildTypes {
@@ -774,6 +778,8 @@ jobs:
           import kotlinx.coroutines.coroutineScope
           import kotlinx.coroutines.delay
           import kotlinx.coroutines.launch
+          import kotlinx.coroutines.sync.Semaphore
+          import kotlinx.coroutines.sync.withPermit
           import kotlinx.coroutines.withContext
           import java.io.File
 
@@ -786,6 +792,9 @@ jobs:
 
           /** EPG is fetched for this many channels at a time. */
           const val EPG_CHUNK = 7
+
+          /** At most this many EPG downloads run at once, so the video stream always keeps the bandwidth. */
+          const val EPG_PARALLEL = 3
 
           enum class Phase { TOKEN, LOADING, READY }
 
@@ -801,6 +810,10 @@ jobs:
 
           /** Two start times closer than this are the same programme listed twice. */
           private const val SAME_START_MS = 90_000L
+
+          /** A short entry fully inside a programme at least this long (promo / duplicate) never cuts that programme. */
+          private const val LONG_PROG_MS = 3_600_000L
+          private const val INTERSTITIAL_MS = 20 * 60_000L
 
           private fun isGeneric(p: Program): Boolean =
               p.title.isBlank() || p.title.trim().lowercase() in GENERIC_TITLES
@@ -830,6 +843,8 @@ jobs:
            *  1. one entry per start time (the better one: real title beats "Filler", more info beats less);
            *  2. the START time is the truth: when a programme starts before the previous one ended, the PREVIOUS one is cut
            *     where the new one starts (the new one keeps its real start time and its full title);
+           *  2b. exception (movie channels): a SHORT entry (<= 20 min) that lies completely inside a LONG programme (>= 1 h)
+           *     is a promo / duplicate and is dropped, so the movie is not chopped into a stub + a hole;
            *  3. "background" entries (Filler / TBA / 5 h+ blocks) never cut a real programme, they only fill the gaps between them;
            *  4. a programme the service clipped at 23:59:59 and re-listed at 00:00 is joined, gaps under 3 minutes are closed.
            */
@@ -872,6 +887,10 @@ jobs:
                       continue
                   }
                   if (p.stop <= last.stop && p.title == last.title) continue // same programme listed twice
+                  // short promo / duplicate sitting inside a long programme: the long one keeps its full length
+                  val ld = last.stop - last.start
+                  val pd = p.stop - p.start
+                  if (p.stop <= last.stop && ld >= LONG_PROG_MS && pd <= INTERSTITIAL_MS && pd * 4L <= ld) continue
                   chain[chain.size - 1] = last.copy(stop = p.start)
                   chain.add(p)
               }
@@ -950,6 +969,8 @@ jobs:
               /** IST calendar day each epg entry was loaded for: after midnight everything is reloaded. */
               private val epgDay = HashMap<String, Long>()
               private val inflight = HashSet<String>()
+              /** Limits parallel EPG downloads so they never starve the video stream. */
+              private val epgGate = Semaphore(EPG_PARALLEL)
 
               init {
                   EpgApi.dir = File(app.cacheDir, "epg").apply { mkdirs() }
@@ -957,15 +978,16 @@ jobs:
 
                   if (token.isNotEmpty()) viewModelScope.launch { login(token) }
 
+                  // clock: 10 s tick keeps progress bars and "min left" accurate; EPG refresh check every 10 minutes
                   viewModelScope.launch {
                       var n = 0
                       var day = istDay()
                       while (true) {
-                          delay(30_000)
+                          delay(10_000)
                           now = System.currentTimeMillis()
                           n++
                           val d = istDay()
-                          if (n % 20 == 0 || d != day) {
+                          if (n % 60 == 0 || d != day) {
                               day = d
                               epgTick++
                           }
@@ -1102,6 +1124,8 @@ jobs:
               /**
                * Chunked, priority EPG loading. [first]..[last] are the list indexes currently on screen.
                * Order: chunk(s) of 7 channels that are visible, then the next 7 below, then the 7 above.
+               * Waits a moment first (so a channel start / fast scrolling is not disturbed) and downloads at most
+               * EPG_PARALLEL files at a time.
                */
               fun loadEpgFor(list: List<Channel>, first: Int, last: Int) {
                   if (list.isEmpty() || phase != Phase.READY) return
@@ -1120,6 +1144,7 @@ jobs:
                   epgJob?.cancel()
                   val snapshot = list
                   epgJob = viewModelScope.launch {
+                      delay(350)
                       for (c in order) {
                           val part = snapshot.drop(c * EPG_CHUNK).take(EPG_CHUNK)
                           coroutineScope {
@@ -1141,13 +1166,15 @@ jobs:
                   if (System.currentTimeMillis() - t < EPG_TTL_MS && epgDay[k] == today) return
                   if (!inflight.add(k)) return
                   try {
-                      val l = withContext(Dispatchers.IO) {
-                          try {
-                              EpgApi.fetch(id, offset)
-                          } catch (e: CancellationException) {
-                              throw e
-                          } catch (e: Exception) {
-                              null
+                      val l = epgGate.withPermit {
+                          withContext(Dispatchers.IO) {
+                              try {
+                                  EpgApi.fetch(id, offset)
+                              } catch (e: CancellationException) {
+                                  throw e
+                              } catch (e: Exception) {
+                                  null
+                              }
                           }
                       }
                       if (l != null) {
@@ -1330,6 +1357,7 @@ jobs:
           import androidx.media3.datasource.HttpDataSource
           import androidx.media3.datasource.okhttp.OkHttpDataSource
           import androidx.media3.exoplayer.DefaultLoadControl
+          import androidx.media3.exoplayer.DefaultRenderersFactory
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
           import androidx.media3.exoplayer.drm.DefaultDrmSessionManagerProvider
@@ -1337,6 +1365,7 @@ jobs:
           import androidx.media3.exoplayer.drm.FrameworkMediaDrm
           import androidx.media3.exoplayer.drm.LocalMediaDrmCallback
           import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+          import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
           import org.json.JSONArray
           import org.json.JSONObject
           import java.util.Locale
@@ -1446,15 +1475,31 @@ jobs:
               private val defaultDrm = DefaultDrmSessionManagerProvider().apply { setDrmHttpDataSourceFactory(http) }
               private var localDrm: DrmSessionManager? = null
 
-              val player: ExoPlayer = ExoPlayer.Builder(ctx)
+              /**
+               * Fast-start tuning for live TV:
+               *  - playback starts after only 700 ms of media (rebuffer: 2 s), steady buffer 20-50 s absorbs network jitter,
+               *  - bandwidth estimate starts at 8 Mbit/s so the first segments are already picked in good quality,
+               *  - asynchronous MediaCodec queueing + decoder fallback = smoother decoding on weak TV boxes.
+               */
+              val player: ExoPlayer = ExoPlayer.Builder(
+                  ctx,
+                  DefaultRenderersFactory(ctx)
+                      .setEnableDecoderFallback(true)
+                      .forceEnableMediaCodecAsynchronousQueueing()
+              )
                   .setMediaSourceFactory(
                       DefaultMediaSourceFactory(ctx)
                           .setDataSourceFactory(DefaultDataSource.Factory(ctx, http))
                           .setDrmSessionManagerProvider { mi -> localDrm ?: defaultDrm.get(mi) }
                   )
+                  .setBandwidthMeter(
+                      DefaultBandwidthMeter.Builder(ctx).setInitialBitrateEstimate(8_000_000L).build()
+                  )
                   .setLoadControl(
                       DefaultLoadControl.Builder()
-                          .setBufferDurationsMs(12_000, 40_000, 1_500, 3_000)
+                          .setBufferDurationsMs(20_000, 50_000, 700, 2_000)
+                          .setPrioritizeTimeOverSizeThresholds(true)
+                          .setBackBuffer(0, false)
                           .build()
                   )
                   .setHandleAudioBecomingNoisy(true)
@@ -1620,6 +1665,12 @@ jobs:
                   val url = ch.url
                   val low = url.lowercase()
                   val b = MediaItem.Builder().setUri(url)
+                      .setLiveConfiguration(
+                          MediaItem.LiveConfiguration.Builder()
+                              .setMinPlaybackSpeed(0.98f)
+                              .setMaxPlaybackSpeed(1.03f)
+                              .build()
+                      )
 
                   if (scheme != null) {
                       if (!supported(scheme)) {
@@ -2517,6 +2568,7 @@ jobs:
                                       useController = false
                                       player = pc.player
                                       setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                      setKeepContentOnPlayerReset(true)
                                       isFocusable = false
                                       isFocusableInTouchMode = false
                                       keepScreenOn = true
@@ -3530,9 +3582,15 @@ jobs:
           @Composable
           fun AppRoot(vm: MainVM, pc: PlayerController, act: MainActivity) {
               val snack = remember { SnackbarHostState() }
+              val lastPlayAt = remember { longArrayOf(0L) }
 
-              // start / restart playback whenever a channel (or its refreshed keys / url) is selected
+              // start / restart playback whenever a channel (or its refreshed keys / url) is selected.
+              // Rapid zapping is debounced: while the button is held / tapped quickly only the channel you stop on is opened
+              // (a single zap starts immediately), so no half-started streams pile up and no buffering between channels.
               LaunchedEffect(vm.playNonce) {
+                  val gap = System.currentTimeMillis() - lastPlayAt[0]
+                  if (gap < 350L) delay(160)
+                  lastPlayAt[0] = System.currentTimeMillis()
                   vm.current?.let { pc.play(it, vm.userAgent, vm.extraHeaders) }
               }
 
@@ -3707,6 +3765,7 @@ jobs:
                               useController = false
                               player = pc.player
                               setShutterBackgroundColor(android.graphics.Color.BLACK)
+                              setKeepContentOnPlayerReset(true)
                               isFocusable = false
                               isFocusableInTouchMode = false
                               keepScreenOn = true
