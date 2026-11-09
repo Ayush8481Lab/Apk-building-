@@ -1,20 +1,11 @@
 name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
-# Liquid-glass UI, TiviMate-style home (live preview + EPG rows + push-aside slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
-# v5.9: one cleaned schedule for header + guide + fullscreen (no overlaps, long/generic blocks only fill gaps, no lost names), EPG data viewer in Settings.
-# v5.8: guide data fix - overlapping schedule entries no longer cut into the current programme (earlier entry wins).
-# v5.7: Roboto Condensed everywhere (like TiviMate), smaller header (Settings: Header size), sticky titles + ellipsis, overlap-free guide data, fullscreen category column.
-# v5.6: 8 guide rows, TiviMate menu (nav + text-only categories), full-bleed faded banner, condensed guide font, ellipsis on long titles, no history tag.
-# v5.5: TiviMate-exact home (header with 6-line description + banner, time axis, channel column, time-scaled programme blocks, now line).
-# v5.4: pure black UI, Up/Down land on the live card of the next row, 3-line cards (LIVE NOW / day+time, banner, title), categories apply on focus, previously-played cards in fullscreen info, lighter animations.
-# v5.4: pure black UI, Up/Down jump to the LIVE card of the next/previous row, 3-line cards (LIVE NOW or day+time / banner / title),
-#       categories apply while moving over them, fullscreen: OK/LEFT opens channel list, RIGHT hides it, previously played cards, much lighter animations.
-# v5.3: header 1.15x bigger and re-laid out (name / time + progress + minutes left / description / next programme),
-#       focused programme card only glows + pops (its details move to the header), TiviMate-style side panels that push the player aside
-#       (Back or LEFT: categories | Back again: TV / Search / Settings | categories), Guide button removed.
-# v5.2: preview header 0.8x smaller, no LIVE tag on the live card, upcoming cards show white 12h time (am/pm), focused programme card zooms stronger.
-# v5.1: TV-remote fullscreen player, rectangular logo tiles, 16:9 programme cards, 2-6 home rows (default 4), EPG loads up to 10 days while scrolling sideways.
+# v6.0: ambient blurred colour-graded background (grey + programme colour), Up/Down jump to the LIVE block of the next/previous row,
+#       new fullscreen info (3 s brief view -> OK = detailed view with banner, badges, progress, last-played cards), LEFT opens channel list / RIGHT closes it,
+#       banner-first search cards (programme banner + channel name, title shown until the image loads), redesigned menu / categories / settings,
+#       performance: low-res preview video, lighter focus animations, fewer recompositions.
+# v5.9: one cleaned schedule for header + guide + fullscreen, EPG data viewer in Settings.
 # Usage: put this file at .github/workflows/build.yml -> push -> Actions tab -> download "LiveTV-APK".
 
 on:
@@ -108,8 +99,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 14
-                  versionName = "5.9"
+                  versionCode = 15
+                  versionName = "6.0"
               }
 
               buildTypes {
@@ -184,6 +175,7 @@ jobs:
                   android:banner="@drawable/ic_launcher"
                   android:label="Live TV"
                   android:usesCleartextTraffic="true"
+                  android:hardwareAccelerated="true"
                   android:theme="@style/Theme.LiveTV">
 
                   <activity
@@ -258,7 +250,6 @@ jobs:
           /** Furthest EPG day offset (0 = today) the home rows can scroll into. */
           const val MAX_DAY_OFFSET = 10
 
-          /** Home screen row count limits (Settings). */
           const val MIN_ROWS = 2
           const val MAX_ROWS = 6
           const val DEFAULT_ROWS = 3
@@ -349,7 +340,6 @@ jobs:
               var userAgent: String
                   get() {
                       val v = sp.getString("ua", DEFAULT_UA) ?: DEFAULT_UA
-                      // upgrade installs that still carry the old built-in default
                       return if (v.isBlank() || v == OLD_DEFAULT_UA) DEFAULT_UA else v
                   }
                   set(v) { sp.edit().putString("ua", v).apply() }
@@ -370,7 +360,6 @@ jobs:
                   get() = sp.getInt("aspect", 0)
                   set(v) { sp.edit().putInt("aspect", v).apply() }
 
-              /** Channel rows visible on the home screen (2..6, default 3). */
               var rows: Int
                   get() = sp.getInt("rows", DEFAULT_ROWS).coerceIn(MIN_ROWS, MAX_ROWS)
                   set(v) { sp.edit().putInt("rows", v.coerceIn(MIN_ROWS, MAX_ROWS)).apply() }
@@ -464,7 +453,6 @@ jobs:
           }
 
           object EpgApi {
-              /** Set once from the ViewModel; EPG responses are cached here for [EPG_TTL_MS]. */
               @Volatile
               var dir: File? = null
 
@@ -506,11 +494,10 @@ jobs:
                   return out.sortedBy { it.start }
               }
 
-              /** Blocking: call from Dispatchers.IO. offset 0 = today (resets by UTC), up to 10. */
+              /** Blocking: call from Dispatchers.IO. offset 0 = today, up to 10. */
               fun fetch(id: String, offset: Int): List<Program> {
                   val f = cacheFile(id, offset)
 
-                  // 1) fresh cache (younger than 30 min) -> no network call at all
                   if (f != null && f.exists() && System.currentTimeMillis() - f.lastModified() < EPG_TTL_MS) {
                       try {
                           return parse(f.readText())
@@ -519,7 +506,6 @@ jobs:
                       }
                   }
 
-                  // 2) network, then store the raw response
                   try {
                       val body = download(id, offset)
                       val out = parse(body)
@@ -532,7 +518,6 @@ jobs:
                       }
                       return out
                   } catch (e: Exception) {
-                      // 3) network failed: an older cached copy is better than nothing
                       if (f != null && f.exists()) {
                           try {
                               return parse(f.readText())
@@ -582,11 +567,8 @@ jobs:
           }
 
           /**
-           * Cookie jar tuned for CDN streams:
-           *  - cookies from the manifest / redirects / key responses are replayed on every later request;
-           *  - cookies are also sent to sibling hosts of the same site;
-           *  - expiry is judged on the SERVER clock (Date header), so a wrong device clock cannot break tokens;
-           *  - Set-Cookie lines OkHttp refuses to parse are still kept (lenient fallback).
+           * Cookie jar tuned for CDN streams: cookies are replayed on every later request, also to sibling hosts,
+           * expiry is judged on the SERVER clock (Date header), unparsable Set-Cookie lines are kept (lenient fallback).
            */
           class MemoryCookieJar : CookieJar {
               private class Entry(val c: Cookie, val origin: String)
@@ -795,7 +777,7 @@ jobs:
            *  1. entries that CONTAIN another entry, are generic ("Filler", ...) or last 5 h or more are "background";
            *  2. the rest ("foreground") is chained by start time: the earlier / currently airing programme is never cut,
            *     a later one that starts inside it is pushed to start where the earlier one ends, equal titles are merged;
-           *  3. background entries only fill the gaps left over (shortest first), so a long block never hides real names.
+           *  3. background entries only fill the gaps left over (shortest first).
            */
           fun normalizeEpg(raw: List<Program>): List<Program> {
               val src = raw.filter { it.stop > it.start }.distinctBy { it.start }.sortedBy { it.start }
@@ -862,15 +844,13 @@ jobs:
               var channels by mutableStateOf<List<Channel>>(emptyList())
               var categories by mutableStateOf<List<String>>(emptyList())
               var category by mutableStateOf(G_ALL)
-              /** Home navigation: 0 live rows (TV), 2 search, 3 settings (1 = old guide, no longer reachable). Kept here so it survives the fullscreen player. */
+              /** Home navigation: 0 live rows (TV), 2 search, 3 settings. */
               var tab by mutableIntStateOf(0)
-              /** TiviMate-like side menu: 0 hidden, 1 categories panel, 2 TV / Search / Settings panel + categories panel. */
+              /** TiviMate-like side menu: 0 hidden, 1 categories panel, 2 nav + categories panel. */
               var menuLevel by mutableIntStateOf(0)
               var expire by mutableLongStateOf(0L)
               val epg = mutableStateMapOf<String, List<Program>>()
-              /** Day offsets (0 until n) each channel's home row has asked for. Grows while the row is scrolled sideways, up to MAX_DAY_OFFSET + 1. */
               val epgDays = mutableStateMapOf<String, Int>()
-              /** Bumped every ~10 minutes so visible channels re-check their (30 min) EPG cache. */
               var epgTick by mutableIntStateOf(0)
 
               var toast by mutableStateOf<String?>(null)
@@ -888,7 +868,7 @@ jobs:
               var current by mutableStateOf<Channel?>(null)
               var previous by mutableStateOf<Channel?>(null)
               var focused by mutableStateOf<Channel?>(null)
-              /** Programme card the remote / finger is currently on (home rows). The header shows its details. */
+              /** Programme block the remote / finger is currently on (home guide). The header shows its details. */
               var hover by mutableStateOf<Pair<Channel, Program>?>(null)
               var zapList by mutableStateOf<List<Channel>>(emptyList())
               var fullscreen by mutableStateOf(false)
@@ -907,7 +887,6 @@ jobs:
 
                   if (token.isNotEmpty()) viewModelScope.launch { login(token) }
 
-                  // clock tick (progress bars, live markers) + periodic EPG re-check
                   viewModelScope.launch {
                       var n = 0
                       while (true) {
@@ -918,7 +897,6 @@ jobs:
                       }
                   }
 
-                  // session loop: reload 10 minutes before expiry, retry every 20s on failure
                   viewModelScope.launch {
                       while (true) {
                           val wait = if (expire > 0) expire * 1000 - REFRESH_BEFORE_MS - clock() else 30_000L
@@ -1034,7 +1012,6 @@ jobs:
 
                   if (!resumed) {
                       resumed = true
-                      // start the live preview right away (last channel, else the first one)
                       val last = store.lastChannel
                       val start = channels.firstOrNull { it.id == last } ?: channels.firstOrNull()
                       if (start != null) {
@@ -1049,7 +1026,6 @@ jobs:
               /**
                * Chunked, priority EPG loading. [first]..[last] are the list indexes currently on screen.
                * Order: chunk(s) of 7 channels that are visible, then the next 7 below, then the 7 above.
-               * Each response is cached for 30 minutes (see EpgApi), so scrolling back costs nothing.
                */
               fun loadEpgFor(list: List<Channel>, first: Int, last: Int) {
                   if (list.isEmpty() || phase != Phase.READY) return
@@ -1101,7 +1077,6 @@ jobs:
                           epg[k] = l
                           epgAt[k] = System.currentTimeMillis()
                       } else {
-                          // failed: retry after about a minute
                           epgAt[k] = System.currentTimeMillis() - EPG_TTL_MS + 60_000L
                       }
                   } finally {
@@ -1119,16 +1094,11 @@ jobs:
               /** How many day offsets (0 until n) this channel's home row currently shows. Starts at 2 (today + tomorrow). */
               fun daysLoaded(id: String): Int = epgDays[id] ?: 2
 
-              /**
-               * Called when a home row is scrolled close to its last programme: fetches the next day
-               * (offset 2, 3 ... up to MAX_DAY_OFFSET = 10). Stops when the previous day was empty / missing.
-               */
               fun loadMoreDays(id: String) {
                   val d = daysLoaded(id)
                   if (d > MAX_DAY_OFFSET) return
                   val prev = epg["$id:${d - 1}"]
                   if (prev == null) {
-                      // previous day failed or is still loading: retry it (it is rate limited inside ensureEpg)
                       if (d >= 3) viewModelScope.launch { ensureEpg(id, d - 1) }
                       return
                   }
@@ -1137,7 +1107,6 @@ jobs:
                   viewModelScope.launch { ensureEpg(id, d) }
               }
 
-              /** Live programme + everything coming up for the days loaded so far, used for the home rows. */
               fun upcoming(ch: Channel): List<Program> {
                   val days = daysLoaded(ch.id)
                   val out = ArrayList<Program>()
@@ -1149,10 +1118,7 @@ jobs:
 
               private val tlCache = HashMap<String, Pair<Int, List<Program>>>()
 
-              /**
-               * Clean, non-overlapping schedule of a channel (all loaded days). Header, guide and fullscreen all use it,
-               * so they can never disagree. Cached until the channel's EPG data changes.
-               */
+              /** Clean, non-overlapping schedule of a channel (all loaded days). Cached until the channel's EPG data changes. */
               fun fullTimeline(ch: Channel): List<Program> {
                   val days = daysLoaded(ch.id)
                   var sig = days
@@ -1169,7 +1135,6 @@ jobs:
                   return res
               }
 
-              /** Programmes that end after [from] (guide rows, includes the live one). */
               fun timeline(ch: Channel, from: Long): List<Program> = fullTimeline(ch).filter { it.stop > from }
 
               /* ------------------------------------------------------------- channels */
@@ -1422,6 +1387,10 @@ jobs:
               var tracks by mutableStateOf(Tracks.EMPTY)
               var playing by mutableStateOf(false)
               var videoRes by mutableStateOf("")
+              /** "SD" / "HD" / "FHD" / "4K" badge, "25 FPS" badge and "STEREO" badge for the fullscreen info. */
+              var videoClass by mutableStateOf("")
+              var videoFps by mutableStateOf("")
+              var audioDesc by mutableStateOf("")
 
               private var retries = 0
               private val handler = Handler(Looper.getMainLooper())
@@ -1440,6 +1409,7 @@ jobs:
                           if (state == Player.STATE_READY) {
                               error = null
                               retries = 0
+                              refreshInfo()
                           }
                       }
 
@@ -1449,10 +1419,19 @@ jobs:
 
                       override fun onTracksChanged(t: Tracks) {
                           tracks = t
+                          refreshInfo()
                       }
 
                       override fun onVideoSizeChanged(v: VideoSize) {
                           videoRes = if (v.height > 0) "${v.width}x${v.height}" else ""
+                          videoClass = when {
+                              v.height <= 0 -> ""
+                              v.height <= 576 -> "SD"
+                              v.height <= 720 -> "HD"
+                              v.height <= 1080 -> "FHD"
+                              else -> "4K"
+                          }
+                          refreshInfo()
                       }
 
                       override fun onPlayerError(e: PlaybackException) {
@@ -1472,6 +1451,26 @@ jobs:
                           }
                       }
                   })
+              }
+
+              private fun refreshInfo() {
+                  val vf = player.videoFormat
+                  videoFps = if (vf != null && vf.frameRate > 0f) "${vf.frameRate.roundToInt()} FPS" else ""
+                  val ac = player.audioFormat?.channelCount ?: 0
+                  audioDesc = when {
+                      ac <= 0 -> ""
+                      ac == 1 -> "MONO"
+                      ac == 2 -> "STEREO"
+                      ac == 6 -> "5.1"
+                      else -> "${ac}CH"
+                  }
+              }
+
+              /** Home preview does not need full resolution: capping it keeps the guide animations smooth on weak TV boxes. */
+              fun setPreviewMode(on: Boolean) {
+                  val b = player.trackSelectionParameters.buildUpon()
+                  if (on) b.setMaxVideoSize(960, 540) else b.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+                  player.trackSelectionParameters = b.build()
               }
 
               private fun describe(e: PlaybackException): String {
@@ -1702,14 +1701,14 @@ jobs:
 
           val Accent = Color(0xFFDABF72)
           val Accent2 = Color(0xFFB59A4A)
-          /** The app background is pure black everywhere (best contrast on TVs). */
           val Ink = Color.Black
           val Dim = Color(0xFFA9A9A9)
 
           /* TiviMate palette (sampled from the reference screenshot) */
           val Bg = Color(0xFF161616)
-          val CellBg = Color(0xFF1E1E1E)
-          val CellHot = Color(0xFF454545)
+          /** Guide blocks are slightly translucent so the blurred colour background shines through (glass look). */
+          val CellBg = Color(0xB31E1E1E)
+          val CellHot = Color(0xCC454545)
           val GoldCell = Color(0xFF6E5711)
           val CellText = Color(0xFFC2BCAC)
           val TextDim = Color(0xFFA9A9A9)
@@ -1720,12 +1719,11 @@ jobs:
           val GoldDate = Color(0xFFEBD07A)
           val GoldName = Color(0xFFF0B429)
           val GoldArrow = Color(0xFFFFC107)
-          val AxisLine = Color(0xFF333333)
+          val AxisLine = Color(0x33FFFFFF)
           val NavBg = Color(0xFF262626)
           val NavSel = Color(0xFF78611B)
           val MenuFocus = Color(0xFF2A2A2A)
 
-          /** Roboto Condensed (programme titles in the guide, like TiviMate). */
           val CondFont = FontFamily(android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.NORMAL))
           val CondLight = FontFamily(android.graphics.Typeface.create("sans-serif-condensed-light", android.graphics.Typeface.NORMAL))
 
@@ -1747,10 +1745,7 @@ jobs:
               )
           }
 
-          /**
-           * Light "glass" surface for a black background: translucent tint + thin rim.
-           * (No gradients / sheen: those cost a lot of GPU time when dozens of cards are on screen.)
-           */
+          /** Light "glass" surface: translucent tint + thin rim (no gradients, cheap for the GPU). */
           fun Modifier.glass(
               shape: Shape = RoundedCornerShape(24.dp),
               alpha: Float = 0.12f,
@@ -1760,10 +1755,7 @@ jobs:
               .background(tint.copy(alpha = alpha))
               .border(1.dp, tint.copy(alpha = (alpha * 1.1f + 0.08f).coerceAtMost(0.75f)), shape)
 
-          /**
-           * Blends the edges of an image into whatever is behind it (like TV / OTT hero banners).
-           * left / top / bottom = fraction of the size (0..1) over which that edge fades to transparent.
-           */
+          /** Blends the edges of an image into whatever is behind it (hero banners). */
           fun Modifier.fadeEdges(left: Float = 0f, top: Float = 0f, bottom: Float = 0f): Modifier =
               this
                   .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
@@ -1790,8 +1782,7 @@ jobs:
                   }
 
           /**
-           * TV focus: ONE short animation (zoom + glow share it), everything is read in the layer / draw phase so
-           * focusing never recomposes anything. Halo (3 soft rects) + bright accent rim, no per-frame allocations.
+           * TV focus: one short animation read in the layer / draw phase only, so focusing never recomposes anything.
            * Apply BEFORE .glass() so the scale / halo wrap the surface.
            */
           @OptIn(ExperimentalFoundationApi::class)
@@ -1809,7 +1800,7 @@ jobs:
               val pressed by src.collectIsPressedAsState()
               val f = animateFloatAsState(
                   if (focused) 1f else 0f,
-                  tween(170, easing = FastOutSlowInEasing),
+                  tween(140, easing = FastOutSlowInEasing),
                   label = "focus"
               )
               val cb by rememberUpdatedState(onFocused)
@@ -1830,10 +1821,10 @@ jobs:
                       val g = f.value
                       if (g > 0.01f) {
                           val r = corner.toPx()
-                          for (i in 1..3) {
-                              val d = i * 5.dp.toPx()
+                          for (i in 1..2) {
+                              val d = i * 6.dp.toPx()
                               drawRoundRect(
-                                  color = Accent.copy(alpha = 0.13f * g * (1f - i / 4f)),
+                                  color = Accent.copy(alpha = 0.16f * g * (1f - i / 3f)),
                                   topLeft = Offset(-d, -d),
                                   size = Size(size.width + 2 * d, size.height + 2 * d),
                                   cornerRadius = CornerRadius(r + d)
@@ -1872,7 +1863,7 @@ jobs:
           ) {
               Row(
                   modifier
-                      .focusGlow(corner = 100.dp, focusScale = 1.06f, onClick = onClick)
+                      .focusGlow(corner = 100.dp, focusScale = 1.05f, onClick = onClick)
                       .glass(RoundedCornerShape(50), if (primary) 0.30f else 0.12f, if (primary) Accent else Color.White)
                       .padding(horizontal = 22.dp, vertical = 12.dp),
                   verticalAlignment = Alignment.CenterVertically,
@@ -1952,51 +1943,20 @@ jobs:
 
           import android.graphics.drawable.BitmapDrawable
           import android.view.KeyEvent
-          import androidx.compose.material3.AlertDialog
-          import androidx.compose.material3.TextButton
-          import androidx.compose.foundation.layout.heightIn
-          import androidx.compose.ui.text.font.FontFamily
-          import androidx.compose.material3.ProvideTextStyle
-          import androidx.compose.runtime.CompositionLocalProvider
-          import androidx.compose.ui.unit.Density
-          import androidx.compose.ui.graphics.Shadow
-          import androidx.compose.ui.text.TextStyle
-          import androidx.compose.animation.core.Animatable
-          import androidx.compose.animation.core.AnimationVector1D
-          import androidx.compose.foundation.interaction.collectIsFocusedAsState
-          import androidx.compose.foundation.shape.CircleShape
-          import androidx.compose.material.icons.filled.StarBorder
-          import androidx.compose.runtime.key
-          import androidx.compose.runtime.mutableFloatStateOf
-          import androidx.compose.runtime.rememberUpdatedState
-          import androidx.compose.ui.draw.clipToBounds
-          import androidx.compose.ui.layout.layout
-          import androidx.compose.ui.unit.Constraints
-          import androidx.compose.animation.core.animateFloatAsState
-          import androidx.compose.foundation.combinedClickable
-          import androidx.compose.foundation.layout.offset
-          import androidx.compose.runtime.derivedStateOf
-          import androidx.compose.runtime.rememberCoroutineScope
-          import androidx.compose.ui.focus.focusProperties
-          import androidx.compose.ui.platform.LocalDensity
-          import androidx.compose.ui.unit.IntOffset
-          import kotlinx.coroutines.launch
-          import java.util.Calendar
-          import kotlin.math.roundToInt
           import androidx.activity.compose.BackHandler
-          import androidx.compose.animation.AnimatedVisibility
           import androidx.compose.animation.Crossfade
           import androidx.compose.animation.animateColorAsState
+          import androidx.compose.animation.core.Animatable
+          import androidx.compose.animation.core.AnimationVector1D
           import androidx.compose.animation.core.FastOutSlowInEasing
+          import androidx.compose.animation.core.animateFloatAsState
           import androidx.compose.animation.core.tween
-          import androidx.compose.animation.expandHorizontally
-          import androidx.compose.animation.fadeIn
-          import androidx.compose.animation.fadeOut
-          import androidx.compose.animation.shrinkHorizontally
           import androidx.compose.foundation.background
           import androidx.compose.foundation.border
           import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.combinedClickable
           import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.interaction.collectIsFocusedAsState
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.BoxWithConstraints
@@ -2009,13 +1969,14 @@ jobs:
           import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.foundation.layout.fillMaxWidth
           import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.heightIn
+          import androidx.compose.foundation.layout.offset
           import androidx.compose.foundation.layout.padding
           import androidx.compose.foundation.layout.size
           import androidx.compose.foundation.layout.systemBarsPadding
           import androidx.compose.foundation.layout.width
           import androidx.compose.foundation.layout.widthIn
           import androidx.compose.foundation.lazy.LazyColumn
-          import androidx.compose.foundation.lazy.LazyRow
           import androidx.compose.foundation.lazy.grid.GridCells
           import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
           import androidx.compose.foundation.lazy.grid.items
@@ -2024,45 +1985,56 @@ jobs:
           import androidx.compose.foundation.lazy.itemsIndexed
           import androidx.compose.foundation.lazy.rememberLazyListState
           import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.foundation.text.KeyboardActions
           import androidx.compose.foundation.text.KeyboardOptions
           import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.Category
-          import androidx.compose.material.icons.filled.History
           import androidx.compose.material.icons.filled.LiveTv
           import androidx.compose.material.icons.filled.Lock
-          import androidx.compose.material.icons.filled.Menu
           import androidx.compose.material.icons.filled.PlayArrow
           import androidx.compose.material.icons.filled.Refresh
           import androidx.compose.material.icons.filled.Search
           import androidx.compose.material.icons.filled.Settings
           import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.StarBorder
+          import androidx.compose.material3.AlertDialog
           import androidx.compose.material3.CircularProgressIndicator
           import androidx.compose.material3.Icon
           import androidx.compose.material3.LinearProgressIndicator
           import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.ProvideTextStyle
           import androidx.compose.material3.Switch
           import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
           import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.CompositionLocalProvider
           import androidx.compose.runtime.DisposableEffect
           import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.derivedStateOf
           import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.key
+          import androidx.compose.runtime.mutableFloatStateOf
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberCoroutineScope
+          import androidx.compose.runtime.rememberUpdatedState
           import androidx.compose.runtime.saveable.rememberSaveable
           import androidx.compose.runtime.setValue
           import androidx.compose.runtime.snapshotFlow
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
           import androidx.compose.ui.draw.alpha
-          import androidx.compose.ui.draw.blur
           import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.draw.clipToBounds
           import androidx.compose.ui.focus.FocusRequester
+          import androidx.compose.ui.focus.focusProperties
           import androidx.compose.ui.focus.focusRequester
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.FilterQuality
+          import androidx.compose.ui.graphics.Shadow
           import androidx.compose.ui.graphics.lerp
           import androidx.compose.ui.graphics.luminance
           import androidx.compose.ui.graphics.vector.ImageVector
@@ -2070,14 +2042,22 @@ jobs:
           import androidx.compose.ui.input.key.onPreviewKeyEvent
           import androidx.compose.ui.input.key.type
           import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.layout.layout
           import androidx.compose.ui.platform.LocalConfiguration
           import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalDensity
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.input.ImeAction
           import androidx.compose.ui.text.input.VisualTransformation
           import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Constraints
+          import androidx.compose.ui.unit.Density
           import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.IntOffset
+          import androidx.compose.ui.unit.TextUnit
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.compose.ui.viewinterop.AndroidView
@@ -2089,10 +2069,12 @@ jobs:
           import coil.request.SuccessResult
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
           import kotlinx.coroutines.withContext
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
+          import kotlin.math.roundToInt
 
           private val HM = SimpleDateFormat("HH:mm", Locale.getDefault())
           fun hm(ms: Long): String = HM.format(Date(ms))
@@ -2131,7 +2113,7 @@ jobs:
                   if (url.isBlank()) return@LaunchedEffect
                   try {
                       val res = ctx.imageLoader.execute(
-                          ImageRequest.Builder(ctx).data(url).allowHardware(false).size(160).build()
+                          ImageRequest.Builder(ctx).data(url).allowHardware(false).size(96).build()
                       )
                       val bmp = ((res as? SuccessResult)?.drawable as? BitmapDrawable)?.bitmap
                       if (bmp != null) {
@@ -2178,6 +2160,32 @@ jobs:
           fun Banner(url: String, modifier: Modifier = Modifier) {
               if (url.isNotBlank()) {
                   AsyncImage(model = url, contentDescription = null, contentScale = ContentScale.Crop, modifier = modifier)
+              }
+          }
+
+          /**
+           * Hotstar / Netflix style card face: the programme banner only. While the image is not loaded (or missing)
+           * the [label] (programme title) is shown on a soft coloured tile; the opaque banner covers it once it arrives.
+           */
+          @Composable
+          fun BannerBox(url: String, label: String, modifier: Modifier = Modifier, fontSize: TextUnit = 12.sp) {
+              Box(
+                  modifier.background(
+                      Brush.linearGradient(listOf(hashColor(label).copy(alpha = 0.28f), Color(0xFF1E1E1E)))
+                  ),
+                  contentAlignment = Alignment.Center
+              ) {
+                  Text(
+                      label, color = Color.White, fontSize = fontSize, fontWeight = FontWeight.SemiBold,
+                      textAlign = TextAlign.Center, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                      modifier = Modifier.padding(6.dp)
+                  )
+                  if (url.isNotBlank()) {
+                      AsyncImage(
+                          model = url, contentDescription = null, contentScale = ContentScale.Crop,
+                          modifier = Modifier.fillMaxSize()
+                      )
+                  }
               }
           }
 
@@ -2235,43 +2243,28 @@ jobs:
 
           /* =============================================================== HOME */
 
-          /** Left panel entries: (tab, label, icon). */
-          private val NAV = listOf(
-              Triple(0, "TV", Icons.Filled.LiveTv),
-              Triple(2, "Search", Icons.Filled.Search),
-              Triple(3, "Settings", Icons.Filled.Settings)
-          )
-
-          private fun catIcon(g: String): ImageVector = when (g) {
-              G_ALL -> Icons.Filled.LiveTv
-              G_FAV -> Icons.Filled.Star
-              G_RECENT -> Icons.Filled.History
-              else -> Icons.Filled.Category
-          }
-
           private val DATE_FMT = SimpleDateFormat("EEE, d MMM, h:mm a", Locale.ENGLISH)
           private val TICK_FMT = SimpleDateFormat("hh:mm a", Locale.ENGLISH)
           private val RANGE_FMT = SimpleDateFormat("hh:mm a", Locale.ENGLISH)
 
-          private fun dateText(ms: Long): String =
+          fun dateText(ms: Long): String =
               DATE_FMT.format(Date(ms)).replace("AM", "am").replace("PM", "pm")
 
           private fun tickText(ms: Long): String = TICK_FMT.format(Date(ms)).lowercase()
 
           /** "12:01 \u2014 02:14 am" (am / pm written once when both ends share it). */
-          private fun rangeText(p: Program): String {
+          fun rangeText(p: Program): String {
               val s = RANGE_FMT.format(Date(p.start)).lowercase()
               val e = RANGE_FMT.format(Date(p.stop)).lowercase()
               return if (s.takeLast(2) == e.takeLast(2)) s.dropLast(3) + " \u2014 " + e else s + " \u2014 " + e
           }
 
           /**
-           * TiviMate layout, every size is a fraction of the reference screenshot (1340 x 800) scaled by [u]:
-           *   header 285 | time axis 60 | guide rows 58 each; channel column 400 wide; 7.9 px per minute.
-           * The side panels push the whole screen to the right (placement only, nothing is re-measured):
+           * TiviMate layout, every size is a fraction of the reference screenshot (1340 x 800) scaled by [u].
+           * Side panels push the whole screen to the right:
            *   level 0:  | header + guide |
            *   level 1:  | categories | header + guide |          (Back, or LEFT on the first programme of a row)
-           *   level 2:  | TV / Search / Settings | categories | header + guide |   (Back again)
+           *   level 2:  | menu | categories | header + guide |   (Back again)
            */
           @Composable
           fun HomeScreen(vm: MainVM, pc: PlayerController) {
@@ -2291,10 +2284,9 @@ jobs:
                   onDispose { vm.hover = null }
               }
 
-              // move focus into the panel that just slid in
               LaunchedEffect(vm.menuLevel) {
                   if (vm.menuLevel > 0) {
-                      delay(260)
+                      delay(240)
                       try {
                           if (vm.menuLevel >= 2) navFr.requestFocus() else catFr.requestFocus()
                       } catch (e: Exception) {
@@ -2302,7 +2294,6 @@ jobs:
                   }
               }
 
-              // TiviMate-like Back: other page -> TV; TV -> categories -> + TV/Search/Settings -> (exit)
               BackHandler(enabled = tab != 0 || vm.menuLevel < 2) {
                   if (tab != 0) {
                       vm.tab = 0
@@ -2315,7 +2306,7 @@ jobs:
               val d0 = LocalDensity.current
               CompositionLocalProvider(LocalDensity provides Density(d0.density, 1f)) {
               ProvideTextStyle(TextStyle(fontFamily = CondFont)) {
-              BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
+              BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF111111))) {
                   val u = minOf(maxHeight.value / 800f, maxWidth.value / 1340f).coerceAtLeast(0.3f)
                   val navW = (326 * u).dp
                   val catW = (373 * u).dp
@@ -2324,8 +2315,11 @@ jobs:
                   val targetPx = with(density) {
                       (if (vm.menuLevel >= 2) navW + catW else if (vm.menuLevel == 1) catW else 0.dp).toPx()
                   }
-                  val shift = animateFloatAsState(targetPx, tween(230, easing = FastOutSlowInEasing), label = "shift")
+                  val shift = animateFloatAsState(targetPx, tween(210, easing = FastOutSlowInEasing), label = "shift")
                   val showPanels by remember { derivedStateOf { vm.menuLevel > 0 || shift.value > 0.5f } }
+
+                  // grey + programme-colour graded, blurred background behind everything
+                  AmbientBg(vm)
 
                   if (showPanels) {
                       Row(
@@ -2355,9 +2349,45 @@ jobs:
           }
 
           /**
-           * Header exactly like the reference: video (left), then the programme name, "12:01 - 02:14 am" + progress bar +
-           * minutes left, description (up to 6 lines), and the programme banner on the right (star = favourite, genre under it).
-           * It shows the programme the remote is on; when nothing is highlighted it shows what is playing.
+           * Soft grey background tinted with the colour of the highlighted programme's banner. A tiny copy of the banner
+           * (48 px) stretched over the screen gives a real blur for free (no RenderEffect, works on every TV box).
+           */
+          @Composable
+          fun AmbientBg(vm: MainVM) {
+              val ch = vm.current
+              val np = if (ch != null) vm.nowNext(ch).first else null
+              val hp = vm.hover?.second ?: np
+              val url = if (hp != null) bannerUrl(hp) else ""
+              val tint = rememberBannerColor(url, Color(0xFF3C3C3C))
+              val top = lerp(Color(0xFF2B2B2B), tint, 0.34f)
+              val ctx = LocalContext.current
+              Box(Modifier.fillMaxSize()) {
+                  Box(
+                      Modifier.fillMaxSize().background(
+                          Brush.verticalGradient(listOf(top, Color(0xFF1C1C1C), Color(0xFF121212)))
+                      )
+                  )
+                  Crossfade(url, animationSpec = tween(450), label = "amb") { u ->
+                      if (u.isNotBlank()) {
+                          AsyncImage(
+                              model = ImageRequest.Builder(ctx).data(u).size(48, 27).build(),
+                              contentDescription = null, contentScale = ContentScale.Crop,
+                              filterQuality = FilterQuality.Low,
+                              modifier = Modifier.fillMaxSize().alpha(0.40f)
+                          )
+                      }
+                  }
+                  Box(
+                      Modifier.fillMaxSize().background(
+                          Brush.verticalGradient(0f to Color.Transparent, 0.5f to Color(0x99121212), 1f to Color(0xEE121212))
+                      )
+                  )
+              }
+          }
+
+          /**
+           * Header: video (left), programme name, "12:01 - 02:14 am" + progress bar + minutes left, description (6 lines),
+           * and the programme banner on the right. Shows the highlighted programme (time included); otherwise the playing one.
            */
           @Composable
           fun Preview(vm: MainVM, pc: PlayerController, u: Float, onFull: () -> Unit) {
@@ -2378,20 +2408,18 @@ jobs:
               val bannerW = (285f * u * 16f / 9f).dp
               val shadow = TextStyle(shadow = Shadow(Color.Black, blurRadius = 8f))
 
-              Box(Modifier.fillMaxWidth().height((285 * u).dp).background(Bg)) {
-                  // banner: touches the top and right edge of the screen, its left + bottom edges dissolve (modern OTT look)
+              Box(Modifier.fillMaxWidth().height((285 * u).dp)) {
                   if (url.isNotBlank()) {
                       Box(
                           Modifier.align(Alignment.TopEnd).width(bannerW).fillMaxHeight()
                               .fadeEdges(left = 0.62f, bottom = 0.2f)
                       ) {
-                          Crossfade(url, animationSpec = tween(300), label = "pv") { x ->
+                          Crossfade(url, animationSpec = tween(260), label = "pv") { x ->
                               Banner(x, Modifier.fillMaxSize())
                           }
                       }
                   }
                   Row(Modifier.fillMaxSize().padding(start = (24 * u).dp, top = (18 * u).dp)) {
-                      // video
                       Box(
                           Modifier.width((474 * u).dp).height((267 * u).dp)
                               .clip(RoundedCornerShape((12 * u).dp))
@@ -2430,7 +2458,6 @@ jobs:
                           }
                       }
                       Spacer(Modifier.width((33 * u).dp))
-                      // title / time / description (up to 6 lines); the right part of the column sits on the faded banner edge
                       Column(Modifier.weight(1f).padding(top = (10 * u).dp, end = bannerW * 0.42f)) {
                           if (hp != null) {
                               Text(
@@ -2480,7 +2507,6 @@ jobs:
                           }
                       }
                   }
-                  // favourite star + genre, far right (over the banner)
                   Column(
                       Modifier.align(Alignment.TopEnd).padding(top = (28 * u).dp, end = (24 * u).dp),
                       horizontalAlignment = Alignment.End
@@ -2527,7 +2553,10 @@ jobs:
               }
           }
 
-          /** TiviMate menu row: optional icon, 24 px label; gold when selected (nav), grey when the remote is on it. */
+          /**
+           * Menu row (nav + categories + fullscreen category column): rounded, gold when selected / current,
+           * light fill + white rim while the remote is on it, optional item count on the right.
+           */
           @Composable
           fun MenuItem(
               label: String,
@@ -2535,6 +2564,7 @@ jobs:
               selected: Boolean,
               u: Float,
               modifier: Modifier = Modifier,
+              trailing: String? = null,
               onFocus: ((Boolean) -> Unit)? = null,
               onClick: () -> Unit
           ) {
@@ -2544,35 +2574,47 @@ jobs:
               LaunchedEffect(focused) {
                   cb?.invoke(focused)
               }
-              val bg = if (selected) NavSel else if (focused) MenuFocus else Color.Transparent
+              val shape = RoundedCornerShape((12 * u).dp)
+              val bg = if (focused) Color(0x33FFFFFF) else if (selected) Color(0x6678611B) else Color.Transparent
               Row(
                   modifier.fillMaxWidth().height((58 * u).dp)
-                      .clip(RoundedCornerShape((10 * u).dp))
+                      .clip(shape)
                       .background(bg)
+                      .then(if (focused) Modifier.border(1.5.dp, Color(0xCCFFFFFF), shape) else Modifier)
                       .combinedClickable(interactionSource = src, indication = null, onClick = onClick)
-                      .padding(start = (if (icon != null) 19 else 18).times(u).dp, end = (12 * u).dp),
+                      .padding(start = (18 * u).dp, end = (14 * u).dp),
                   verticalAlignment = Alignment.CenterVertically
               ) {
-                  if (icon != null) {
-                      Icon(icon, null, tint = Color.White, modifier = Modifier.size((28 * u).dp))
-                      Spacer(Modifier.width((19 * u).dp))
+                  if (selected) {
+                      Box(Modifier.width((4 * u).dp).height((26 * u).dp).clip(RoundedCornerShape(2.dp)).background(GoldDate))
+                      Spacer(Modifier.width((12 * u).dp))
                   }
-                  Text(label, color = Color.White, fontSize = (24 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  if (icon != null) {
+                      Icon(icon, null, tint = if (selected) GoldDate else Color.White, modifier = Modifier.size((28 * u).dp))
+                      Spacer(Modifier.width((18 * u).dp))
+                  }
+                  Text(
+                      label, color = if (selected) GoldDate else Color.White, fontSize = (24 * u).sp,
+                      maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                  )
+                  if (trailing != null) {
+                      Spacer(Modifier.width((8 * u).dp))
+                      Text(trailing, color = TextDim, fontSize = (19 * u).sp, maxLines = 1)
+                  }
               }
           }
 
-          /** Far-left panel (level 2): logo, Search, TV, Settings (bottom). RIGHT moves into the categories panel. */
+          /** Far-left panel (level 2): logo, TV, Search and Settings (bottom). RIGHT moves into the categories panel. */
           @Composable
           fun NavPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp, u: Float) {
               val go: (Int) -> Unit = { t ->
                   vm.tab = t
-                  // TV -> show the categories next; Search / Settings -> open the page
                   vm.menuLevel = if (t == 0) 1 else 0
               }
               val req: (Int) -> Modifier = { t -> if (t == vm.tab) Modifier.focusRequester(navFr) else Modifier }
               Column(
                   Modifier.width(w).fillMaxHeight()
-                      .background(NavBg)
+                      .background(Brush.verticalGradient(listOf(Color(0xF22E2E2E), Color(0xF21A1A1A))))
                       .onPreviewKeyEvent { e ->
                           if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
                               try {
@@ -2584,37 +2626,48 @@ jobs:
                               false
                           }
                       }
-                      .padding(horizontal = (24 * u).dp, vertical = (24 * u).dp)
+                      .padding(horizontal = (22 * u).dp, vertical = (24 * u).dp)
               ) {
                   Column(
                       Modifier.fillMaxWidth().height((216 * u).dp),
                       horizontalAlignment = Alignment.CenterHorizontally,
                       verticalArrangement = Arrangement.Center
                   ) {
-                      Icon(Icons.Filled.LiveTv, null, tint = GoldDate, modifier = Modifier.size((72 * u).dp))
-                      Spacer(Modifier.height((8 * u).dp))
-                      Text("Live TV", color = GoldDate, fontSize = (26 * u).sp)
+                      Box(
+                          Modifier.size((92 * u).dp).clip(CircleShape)
+                              .background(Color(0x26EBD07A))
+                              .border(2.dp, GoldDate.copy(alpha = 0.8f), CircleShape),
+                          contentAlignment = Alignment.Center
+                      ) {
+                          Icon(Icons.Filled.LiveTv, null, tint = GoldDate, modifier = Modifier.size((50 * u).dp))
+                      }
+                      Spacer(Modifier.height((10 * u).dp))
+                      Text("Live TV", color = GoldDate, fontSize = (28 * u).sp)
+                      Text("${vm.channels.size} channels", color = TextDim, fontSize = (18 * u).sp)
                   }
-                  Spacer(Modifier.height((24 * u).dp))
-                  MenuItem("Search", Icons.Filled.Search, vm.tab == 2, u, req(2)) { go(2) }
-                  Spacer(Modifier.height((13 * u).dp))
+                  Spacer(Modifier.height((20 * u).dp))
+                  Box(Modifier.fillMaxWidth().height(1.dp).background(AxisLine))
+                  Spacer(Modifier.height((20 * u).dp))
                   MenuItem("TV", Icons.Filled.LiveTv, vm.tab == 0, u, req(0)) { go(0) }
+                  Spacer(Modifier.height((10 * u).dp))
+                  MenuItem("Search", Icons.Filled.Search, vm.tab == 2, u, req(2)) { go(2) }
                   Spacer(Modifier.weight(1f))
                   MenuItem("Settings", Icons.Filled.Settings, vm.tab == 3, u, req(3)) { go(3) }
               }
           }
 
           /**
-           * Categories panel (level 1 and 2), text only like TiviMate. Moving the remote over a category shows its
-           * channels at once (no OK needed); OK or RIGHT hides the menu, LEFT opens the nav panel.
+           * Categories panel (level 1 and 2). Moving the remote over a category shows its channels at once (no OK needed);
+           * OK or RIGHT hides the menu, LEFT opens the nav panel.
            */
           @Composable
           fun CatPanel(vm: MainVM, navFr: FocusRequester, catFr: FocusRequester, w: Dp, u: Float) {
               val all = listOf(G_FAV, G_ALL, G_RECENT) + vm.categories
+              val counts = remember(all, vm.channels, vm.favorites, vm.recents) { all.associateWith { vm.filter(it).size } }
               val focusCat = if (vm.tab == 0) vm.category else G_ALL
               Column(
                   Modifier.width(w).fillMaxHeight()
-                      .background(Bg)
+                      .background(Color(0xF0181818))
                       .onPreviewKeyEvent { e ->
                           val k = e.nativeKeyEvent.keyCode
                           if (e.type != KeyEventType.KeyDown) {
@@ -2637,14 +2690,26 @@ jobs:
                           }
                       }
               ) {
+                  Column(
+                      Modifier.fillMaxWidth().height((200 * u).dp).padding(start = (26 * u).dp, end = (24 * u).dp),
+                      verticalArrangement = Arrangement.Bottom
+                  ) {
+                      Text("Categories", color = GoldDate, fontSize = (30 * u).sp)
+                      Spacer(Modifier.height((4 * u).dp))
+                      Text("Move to preview, OK to close", color = TextDim, fontSize = (17 * u).sp, maxLines = 1)
+                      Spacer(Modifier.height((14 * u).dp))
+                      Box(Modifier.fillMaxWidth().height(1.dp).background(AxisLine))
+                  }
                   LazyColumn(
                       Modifier.weight(1f),
-                      contentPadding = PaddingValues(start = (24 * u).dp, end = (24 * u).dp, top = (255 * u).dp, bottom = (80 * u).dp)
+                      contentPadding = PaddingValues(start = (20 * u).dp, end = (20 * u).dp, top = (14 * u).dp, bottom = (80 * u).dp),
+                      verticalArrangement = Arrangement.spacedBy((4 * u).dp)
                   ) {
                       items(all) { g ->
                           MenuItem(
-                              g, null, false, u,
+                              g, null, g == vm.category && vm.tab == 0, u,
                               if (g == focusCat) Modifier.focusRequester(catFr) else Modifier,
+                              trailing = counts[g]?.toString(),
                               onFocus = { f ->
                                   if (f && (vm.category != g || vm.tab != 0)) {
                                       vm.category = g
@@ -2665,30 +2730,29 @@ jobs:
 
           /**
            * The programme guide: time axis on top, one row per channel (number, logo, name | programme blocks laid out
-           * on a real time scale), a vertical line for "now". The remote moves over the programme blocks in 2D like TiviMate;
-           * the time window slides sideways by itself to keep the highlighted block visible.
+           * on a real time scale), a vertical line for "now". LEFT / RIGHT move over the blocks of a row,
+           * UP / DOWN jump straight to the LIVE block of the previous / next channel (the channel column is never focused).
            */
           @Composable
           fun EpgGrid(vm: MainVM, u: Float, onPick: (Channel, List<Channel>) -> Unit) {
               val list = remember(vm.channels, vm.category, vm.favorites, vm.recents) { vm.filter(vm.category) }
               val state = rememberLazyListState()
+              val scope = rememberCoroutineScope()
               var pending by remember { mutableStateOf<String?>(null) }
-              // grid time zero = last half hour; re-based every two hours
               val base = remember(vm.now / 7_200_000L) { (vm.now / 1_800_000L) * 1_800_000L }
-              val win = remember { Animatable(0f) }          // minutes after [base] shown at the left edge of the guide
+              val win = remember { Animatable(0f) }
               var winTarget by remember { mutableFloatStateOf(0f) }
               val curIdx = list.indexOfFirst { it.id == vm.current?.id }
               val focusIdx = if (curIdx >= 0) curIdx else 0
 
               LaunchedEffect(winTarget) {
-                  win.animateTo(winTarget, tween(220, easing = FastOutSlowInEasing))
+                  win.animateTo(winTarget, tween(200, easing = FastOutSlowInEasing))
               }
               LaunchedEffect(base) {
                   winTarget = 0f
                   win.snapTo(0f)
               }
 
-              // chunked EPG: whatever is on screen first (7 channels per chunk), then neighbours; reacts to scrolling
               LaunchedEffect(list, vm.epgTick) {
                   snapshotFlow {
                       val v = state.layoutInfo.visibleItemsInfo
@@ -2696,13 +2760,11 @@ jobs:
                   }.collect { r -> vm.loadEpgFor(list, r.first, r.second) }
               }
 
-              // new category / screen appears: show the playing channel, header goes back to the playing channel
               LaunchedEffect(vm.category) {
                   vm.hover = null
                   state.scrollToItem((focusIdx - 2).coerceAtLeast(0))
               }
 
-              // focus the live programme of the playing channel on entering home, after fullscreen and after the menu closes
               LaunchedEffect(vm.category, vm.menuLevel) {
                   if (vm.menuLevel == 0) {
                       delay(250)
@@ -2710,7 +2772,6 @@ jobs:
                   }
               }
 
-              // safety: never keep a stale focus request
               LaunchedEffect(pending) {
                   if (pending != null) {
                       delay(900)
@@ -2721,27 +2782,41 @@ jobs:
               BoxWithConstraints(Modifier.fillMaxSize()) {
                   val chanW = (400 * u).dp
                   val axisH = (60 * u).dp
-                  val rowH = (maxHeight - axisH) / 8   // exactly 8 guide rows, like TiviMate
+                  val rowH = (maxHeight - axisH) / 8
                   val g = rowH.value / 58f
                   val dpm = 7.9f * u
                   val visMin = (maxWidth.value - chanW.value) / dpm
 
-                  // every focused block: header follows it, the window slides so the block stays visible
                   val onCell: (Channel, Program) -> Unit = { ch, p ->
                       vm.hover = Pair(ch, p)
                       val s = (p.start - base) / 60000f
                       val e = (p.stop - base) / 60000f
                       var t = winTarget
                       if (e <= t + 3f) {
-                          // block is (almost) fully left of the window: bring its start back in
                           t = s - visMin * 0.1f
                       } else if (s >= t + visMin - 12f) {
-                          // block starts at / beyond the right edge: slide so its start sits in the middle
                           t = s - visMin * 0.55f
                       }
-                      // a block that only starts before the left edge keeps its title pinned there: no scrolling needed
                       t = t.coerceAtLeast(0f)
                       if (Math.abs(t - winTarget) > 0.01f) winTarget = t
+                  }
+
+                  // UP / DOWN: jump to the LIVE block of the neighbouring channel, window goes back to "now"
+                  val onVert: (String, Int) -> Unit = { id, d ->
+                      val i = list.indexOfFirst { it.id == id }
+                      val t = i + d
+                      if (i >= 0 && t in list.indices) {
+                          winTarget = 0f
+                          pending = list[t].id
+                          val v = state.layoutInfo.visibleItemsInfo
+                          val fi = v.firstOrNull()?.index ?: 0
+                          val li = v.lastOrNull()?.index ?: 0
+                          if (d < 0 && t <= fi) {
+                              scope.launch { state.animateScrollToItem((t - 1).coerceAtLeast(0)) }
+                          } else if (d > 0 && t >= li) {
+                              scope.launch { state.animateScrollToItem((t - 6).coerceAtLeast(0)) }
+                          }
+                      }
                   }
 
                   Column(Modifier.fillMaxSize()) {
@@ -2753,7 +2828,7 @@ jobs:
                           itemsIndexed(list, key = { _, c -> c.id }) { i, ch ->
                               EpgRow(
                                   vm, ch, i + 1, g, rowH, chanW, base, win, winTarget, visMin, dpm, pending,
-                                  { pending = null }, onCell
+                                  { pending = null }, onCell, onVert
                               ) { onPick(ch, list) }
                           }
                       }
@@ -2820,7 +2895,7 @@ jobs:
               }
           }
 
-          /** One guide row: channel column (number, logo, name, playing / recent marker) + programme blocks. */
+          /** One guide row: channel column (number, logo, name, playing marker) + programme blocks. */
           @Composable
           fun EpgRow(
               vm: MainVM,
@@ -2837,6 +2912,7 @@ jobs:
               pending: String?,
               onFocusDone: () -> Unit,
               onCell: (Channel, Program) -> Unit,
+              onVert: (String, Int) -> Unit,
               onPick: () -> Unit
           ) {
               val all by remember(ch.id, base) { derivedStateOf { vm.timeline(ch, base) } }
@@ -2853,7 +2929,6 @@ jobs:
                   } else {
                       all
                   }
-                  // safety net: whatever the data looks like, two blocks of a row can never overlap
                   val out = ArrayList<Program>()
                   var prevEnd = Long.MIN_VALUE
                   for (p in src) {
@@ -2871,17 +2946,17 @@ jobs:
               val liveStart = shown.firstOrNull { vm.now >= it.start && vm.now < it.stop }?.start ?: shown.firstOrNull()?.start
               val firstStart = all.firstOrNull()?.start ?: base
 
-              // initial focus (playing channel) arrives here
+              // focus requests (initial focus, UP / DOWN jumps) arrive here
               LaunchedEffect(pending) {
                   if (pending == ch.id) {
                       var ok = false
                       var n = 0
-                      while (!ok && n < 8) {
+                      while (!ok && n < 10) {
                           try {
                               myFr.requestFocus()
                               ok = true
                           } catch (e: Exception) {
-                              delay(60)
+                              delay(50)
                           }
                           n++
                       }
@@ -2889,14 +2964,12 @@ jobs:
                   }
               }
 
-              // scrolled towards the end of the loaded days: fetch the next day
               val lastStop = all.lastOrNull()?.stop ?: 0L
               LaunchedEffect(ch.id, lastStop, winTarget) {
                   if (lastStop > 0L && (lastStop - base) / 60000f < winTarget + visMin + 180f) vm.loadMoreDays(ch.id)
               }
 
               Row(Modifier.fillMaxWidth().height(rowH)) {
-                  // channel column (touch: tap = play, long press = favourite; the remote never stops here)
                   Row(
                       Modifier.width(chanW).fillMaxHeight()
                           .focusProperties { canFocus = false }
@@ -2932,7 +3005,6 @@ jobs:
                           Spacer(Modifier.width((48 * u).dp))
                       }
                   }
-                  // programme blocks on the time scale
                   Box(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
                       for (p in shown) {
                           key(p.start) {
@@ -2940,7 +3012,7 @@ jobs:
                                   vm, ch, p, u, base, win, dpm, rowH, rowHot,
                                   p.start == firstStart,
                                   if (p.start == liveStart) Modifier.focusRequester(myFr) else Modifier,
-                                  { onCell(ch, p) }, onPick
+                                  { onCell(ch, p) }, { d -> onVert(ch.id, d) }, onPick
                               )
                           }
                       }
@@ -2950,8 +3022,7 @@ jobs:
 
           /**
            * One programme block. Width / position follow the (animated) time window in the layout phase, so sliding
-           * the guide never recomposes. Colours: normal #1E1E1E, other blocks of the highlighted row #454545,
-           * highlighted block gold. Text is clipped at the block edge like TiviMate.
+           * the guide never recomposes. UP / DOWN are handled here (jump to the live block of the next row).
            */
           @Composable
           fun EpgCell(
@@ -2967,6 +3038,7 @@ jobs:
               first: Boolean,
               frMod: Modifier,
               onFocus: () -> Unit,
+              onVert: (Int) -> Unit,
               onClick: () -> Unit
           ) {
               val src = remember { MutableInteractionSource() }
@@ -2997,13 +3069,22 @@ jobs:
                           layout(w, h) { pl.place(0, 0) }
                       }
                       .onPreviewKeyEvent { ev ->
-                          if (ev.type == KeyEventType.KeyDown && first &&
-                              ev.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_LEFT
-                          ) {
-                              if (vm.menuLevel == 0) vm.menuLevel = 1
-                              true
-                          } else {
+                          if (ev.type != KeyEventType.KeyDown) {
                               false
+                          } else {
+                              val k = ev.nativeKeyEvent.keyCode
+                              if (k == KeyEvent.KEYCODE_DPAD_UP) {
+                                  onVert(-1)
+                                  true
+                              } else if (k == KeyEvent.KEYCODE_DPAD_DOWN) {
+                                  onVert(1)
+                                  true
+                              } else if (first && k == KeyEvent.KEYCODE_DPAD_LEFT) {
+                                  if (vm.menuLevel == 0) vm.menuLevel = 1
+                                  true
+                              } else {
+                                  false
+                              }
                           }
                       }
                       .then(frMod)
@@ -3046,10 +3127,10 @@ jobs:
               }
               LazyVerticalGrid(
                   state = gs,
-                  columns = GridCells.Adaptive(if (wide) 230.dp else 160.dp),
-                  contentPadding = PaddingValues(horizontal = 22.dp, vertical = 18.dp),
-                  horizontalArrangement = Arrangement.spacedBy(18.dp),
-                  verticalArrangement = Arrangement.spacedBy(18.dp),
+                  columns = GridCells.Adaptive(if (wide) 250.dp else 170.dp),
+                  contentPadding = PaddingValues(horizontal = 24.dp, vertical = 18.dp),
+                  horizontalArrangement = Arrangement.spacedBy(20.dp),
+                  verticalArrangement = Arrangement.spacedBy(22.dp),
                   modifier = modifier.fillMaxWidth()
               ) {
                   items(list, key = { it.id }) { ch ->
@@ -3058,6 +3139,10 @@ jobs:
               }
           }
 
+          /**
+           * Search result card: the live programme's banner is the card (programme title shows until the image loads),
+           * the channel name sits under it. A thin bar shows how far the programme is.
+           */
           @Composable
           fun ChannelCard(vm: MainVM, ch: Channel, onOpen: () -> Unit) {
               val np = vm.nowNext(ch).first
@@ -3066,29 +3151,21 @@ jobs:
               Column(
                   Modifier.fillMaxWidth()
                       .focusGlow(
-                          corner = 22.dp, focusScale = 1.08f,
+                          corner = 14.dp, focusScale = 1.07f,
                           onFocused = { vm.focused = ch },
                           onLongClick = { vm.toggleFav(ch) },
                           onClick = onOpen
                       )
-                      .glass(RoundedCornerShape(22.dp), 0.10f)
               ) {
-                  Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
-                      if (url.isNotBlank()) {
-                          Banner(url, Modifier.fillMaxSize())
-                      } else {
-                          Box(
-                              Modifier.fillMaxSize().background(
-                                  Brush.linearGradient(listOf(Accent.copy(alpha = 0.22f), Accent2.copy(alpha = 0.12f)))
-                              )
+                  Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))) {
+                      BannerBox(url, np?.title?.ifBlank { ch.name } ?: ch.name, Modifier.fillMaxSize(), 14.sp)
+                      if (np != null) {
+                          LinearProgressIndicator(
+                              progress = { progressOf(np, vm.now) },
+                              modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(3.dp),
+                              color = Accent, trackColor = Color.Black.copy(alpha = 0.45f)
                           )
                       }
-                      Box(
-                          Modifier.fillMaxSize().background(
-                              Brush.verticalGradient(listOf(Color.Transparent, Color(0xAA05070D)))
-                          )
-                      )
-                      Box(Modifier.align(Alignment.BottomStart).padding(8.dp)) { Logo(ch, 36.dp) }
                       if (fav) {
                           Icon(
                               Icons.Filled.Star, "Favorite", tint = Color(0xFFFFC107),
@@ -3096,20 +3173,11 @@ jobs:
                           )
                       }
                   }
-                  Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                      Text(ch.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                      Text(
-                          np?.title ?: ch.category, fontSize = 12.sp, color = Dim,
-                          maxLines = 1, overflow = TextOverflow.Ellipsis
-                      )
-                      if (np != null) {
-                          LinearProgressIndicator(
-                              progress = { progressOf(np, vm.now) },
-                              modifier = Modifier.fillMaxWidth().padding(top = 3.dp).height(3.dp),
-                              color = Accent, trackColor = Color.White.copy(alpha = 0.15f)
-                          )
-                      }
-                  }
+                  Text(
+                      ch.name, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
+                      maxLines = 1, overflow = TextOverflow.Ellipsis,
+                      modifier = Modifier.padding(start = 4.dp, top = 8.dp, end = 4.dp)
+                  )
               }
           }
 
@@ -3121,11 +3189,22 @@ jobs:
                   OutlinedTextField(
                       value = q, onValueChange = { q = it }, singleLine = true,
                       placeholder = { Text("Search channels, categories, programmes", color = Dim) },
-                      leadingIcon = { Icon(Icons.Filled.Search, null, tint = Dim) },
+                      leadingIcon = { Icon(Icons.Filled.Search, null, tint = GoldDate) },
                       colors = glassFieldColors(),
                       shape = RoundedCornerShape(50),
-                      modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp)
+                      modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)
                   )
+                  if (q.trim().length >= 2) {
+                      Text(
+                          "${res.size} result" + (if (res.size == 1) "" else "s"), color = Dim, fontSize = 13.sp,
+                          modifier = Modifier.padding(horizontal = 30.dp)
+                      )
+                  } else {
+                      Text(
+                          "Type at least 2 letters", color = Dim, fontSize = 13.sp,
+                          modifier = Modifier.padding(horizontal = 30.dp)
+                      )
+                  }
                   ChannelGrid(vm, res, Modifier.weight(1f), onOpen)
               }
           }
@@ -3135,10 +3214,10 @@ jobs:
           @Composable
           fun Section(title: String, content: @Composable () -> Unit) {
               Column(
-                  Modifier.fillMaxWidth().glass(RoundedCornerShape(26.dp), 0.09f).padding(20.dp),
+                  Modifier.fillMaxWidth().glass(RoundedCornerShape(22.dp), 0.08f).padding(20.dp),
                   verticalArrangement = Arrangement.spacedBy(12.dp)
               ) {
-                  Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                  Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = GoldDate)
                   content()
               }
           }
@@ -3151,8 +3230,8 @@ jobs:
               val t = vm.token
               val masked = "*".repeat((t.length - 4).coerceAtLeast(0)) + t.takeLast(4)
               Column(
-                  Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(22.dp),
-                  verticalArrangement = Arrangement.spacedBy(18.dp)
+                  Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+                  verticalArrangement = Arrangement.spacedBy(16.dp)
               ) {
                   Section("Account") {
                       Text("Access token: $masked", color = Dim)
@@ -3197,19 +3276,18 @@ jobs:
                       }
                   }
                   Text(
-                      "Menu: Back (or LEFT on the first programme of a row) slides the categories in, Back again adds TV / Search / Settings. " +
+                      "Home: Back (or LEFT on the first programme of a row) slides the categories in, Back again adds TV / Search / Settings. " +
                           "Moving over a category shows it at once, OK (or RIGHT) hides the menu. " +
-                          "The remote moves over the programme guide in all four directions; the header shows the highlighted programme. " +
+                          "LEFT / RIGHT move over the programmes of a row, UP / DOWN jump to the LIVE programme of the previous / next channel; the header shows the highlighted programme. " +
                           "OK on a programme plays its channel, OK on the playing channel goes fullscreen, long OK adds the channel to Favorites. " +
                           "Long-press Back also goes fullscreen. EPG is cached for 30 minutes.\n\n" +
-                          "Fullscreen remote: UP / DOWN change channel, LEFT or OK opens the channel list (RIGHT hides it), " +
-                          "MENU opens options (audio, subtitles, quality, aspect, sleep timer), INFO shows the info card, " +
-                          "BACK leaves fullscreen.",
+                          "Fullscreen: UP / DOWN change channel, OK shows the detailed info (OK again hides it), " +
+                          "LEFT opens the channel list (RIGHT closes it), RIGHT / MENU opens options (audio, subtitles, quality, aspect, sleep timer), " +
+                          "INFO shows / hides the info, BACK leaves fullscreen.",
                       fontSize = 12.sp, color = Dim
                   )
               }
           }
-
 
           private val DBG_FMT = SimpleDateFormat("dd HH:mm", Locale.ENGLISH)
 
@@ -3261,6 +3339,7 @@ jobs:
           import android.view.KeyEvent
           import androidx.activity.compose.BackHandler
           import androidx.compose.animation.AnimatedVisibility
+          import androidx.compose.animation.core.tween
           import androidx.compose.animation.fadeIn
           import androidx.compose.animation.fadeOut
           import androidx.compose.animation.slideInHorizontally
@@ -3268,13 +3347,12 @@ jobs:
           import androidx.compose.foundation.background
           import androidx.compose.foundation.border
           import androidx.compose.foundation.clickable
-          import androidx.compose.foundation.lazy.LazyRow
-          import kotlinx.coroutines.launch
           import androidx.compose.foundation.focusable
           import androidx.compose.foundation.gestures.detectTapGestures
           import androidx.compose.foundation.gestures.detectVerticalDragGestures
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.BoxWithConstraints
           import androidx.compose.foundation.layout.Column
           import androidx.compose.foundation.layout.PaddingValues
           import androidx.compose.foundation.layout.Row
@@ -3288,8 +3366,9 @@ jobs:
           import androidx.compose.foundation.layout.padding
           import androidx.compose.foundation.layout.width
           import androidx.compose.foundation.lazy.LazyColumn
-          import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.lazy.LazyRow
           import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.lazy.itemsIndexed
           import androidx.compose.foundation.lazy.rememberLazyListState
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.material.icons.Icons
@@ -3297,8 +3376,6 @@ jobs:
           import androidx.compose.material.icons.filled.AspectRatio
           import androidx.compose.material.icons.filled.Audiotrack
           import androidx.compose.material.icons.filled.BugReport
-          import androidx.compose.material.icons.filled.ChevronLeft
-          import androidx.compose.material.icons.filled.ChevronRight
           import androidx.compose.material.icons.filled.FormatListBulleted
           import androidx.compose.material.icons.filled.HighQuality
           import androidx.compose.material.icons.filled.PictureInPictureAlt
@@ -3311,15 +3388,18 @@ jobs:
           import androidx.compose.material3.AlertDialog
           import androidx.compose.material3.CircularProgressIndicator
           import androidx.compose.material3.LinearProgressIndicator
+          import androidx.compose.material3.ProvideTextStyle
           import androidx.compose.material3.RadioButton
           import androidx.compose.material3.SnackbarHost
           import androidx.compose.material3.SnackbarHostState
           import androidx.compose.material3.Text
           import androidx.compose.material3.TextButton
           import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.CompositionLocalProvider
           import androidx.compose.runtime.DisposableEffect
           import androidx.compose.runtime.LaunchedEffect
           import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableIntStateOf
           import androidx.compose.runtime.mutableStateOf
           import androidx.compose.runtime.remember
           import androidx.compose.runtime.setValue
@@ -3329,7 +3409,9 @@ jobs:
           import androidx.compose.ui.draw.drawBehind
           import androidx.compose.ui.focus.FocusRequester
           import androidx.compose.ui.focus.focusRequester
+          import androidx.compose.ui.geometry.CornerRadius
           import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.input.key.KeyEventType
@@ -3338,11 +3420,14 @@ jobs:
           import androidx.compose.ui.input.key.type
           import androidx.compose.ui.input.pointer.pointerInput
           import androidx.compose.ui.platform.LocalClipboardManager
+          import androidx.compose.ui.platform.LocalDensity
           import androidx.compose.ui.text.AnnotatedString
+          import androidx.compose.ui.text.TextStyle
           import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
           import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Density
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.compose.ui.viewinterop.AndroidView
@@ -3353,6 +3438,7 @@ jobs:
           import androidx.media3.ui.AspectRatioFrameLayout
           import androidx.media3.ui.PlayerView
           import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
 
           /* ================================================================== ROOT */
 
@@ -3365,7 +3451,9 @@ jobs:
                   vm.current?.let { pc.play(it, vm.userAgent, vm.extraHeaders) }
               }
 
-              // leaving the READY phase (logout) must silence the player
+              // the small home preview is capped to 540p (smooth guide on weak TV boxes), fullscreen gets full quality
+              LaunchedEffect(vm.fullscreen) { pc.setPreviewMode(!vm.fullscreen) }
+
               LaunchedEffect(vm.phase) {
                   if (vm.phase != Phase.READY) pc.stop()
               }
@@ -3427,15 +3515,15 @@ jobs:
           /**
            * Fullscreen player, built for a TV remote (touch works as well):
            *   UP / CH+       next channel            DOWN / CH-   previous channel
-           *   LEFT / OK      channel list            RIGHT / MENU options panel (audio, subtitles, quality, aspect, sleep ...)
-           *   INFO           show / hide info card   LAST         last channel
-           *   PLAY/PAUSE     pause / resume          BACK         closes a panel, otherwise leaves fullscreen
-           * Touch: tap shows the info card + top buttons, swipe up / down zaps, double tap = last channel.
-           * While no panel or dialog is open the root keeps focus, so every remote key reaches the handler below.
+           *   OK             detailed info (again = hide)         LEFT   channel list (RIGHT inside the list closes it)
+           *   RIGHT / MENU   options panel           INFO   show / hide info       LAST   last channel
+           *   PLAY/PAUSE     pause / resume          BACK   closes a panel, otherwise leaves fullscreen
+           * Info: every channel change / entering fullscreen shows the brief info for 3 s; OK shows the detailed info.
            */
           @Composable
           fun PlayerScreen(vm: MainVM, pc: PlayerController, act: MainActivity) {
-              var showInfo by remember { mutableStateOf(true) }
+              // 0 hidden, 1 brief (3 s), 2 detailed (banner, badges, progress bar, last played channels)
+              var infoMode by remember { mutableIntStateOf(1) }
               var showBar by remember { mutableStateOf(false) }
               var showList by remember { mutableStateOf(false) }
               var showOpts by remember { mutableStateOf(false) }
@@ -3445,17 +3533,14 @@ jobs:
               val inPip = act.inPip
               val panelOpen = showList || showOpts || dialog.isNotEmpty()
 
-              // info card / touch buttons hide themselves
-              LaunchedEffect(showInfo, showBar, panelOpen, vm.playNonce) {
-                  if ((showInfo || showBar) && !panelOpen) {
-                      delay(5000)
-                      showInfo = false
+              LaunchedEffect(infoMode, showBar, panelOpen, vm.playNonce) {
+                  if (!panelOpen && (infoMode != 0 || showBar)) {
+                      delay(if (infoMode == 1 && !showBar) 3000L else 10000L)
+                      infoMode = 0
                       showBar = false
                   }
               }
-              // every channel change shows the info card
-              LaunchedEffect(vm.playNonce) { showInfo = true }
-              // give focus back to the root whenever the last panel / dialog closes
+              LaunchedEffect(vm.playNonce) { infoMode = 1 }
               LaunchedEffect(panelOpen) {
                   if (!panelOpen) {
                       delay(80)
@@ -3466,7 +3551,6 @@ jobs:
                   }
               }
 
-              // back closes a panel first, then leaves fullscreen (the channel keeps playing in the home preview)
               BackHandler {
                   if (dialog.isNotEmpty()) dialog = ""
                   else if (showOpts) showOpts = false
@@ -3497,8 +3581,11 @@ jobs:
                               true
                           } else {
                               when (k) {
-                                  KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
-                                  KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_GUIDE -> {
+                                  KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                                      infoMode = if (infoMode == 2) 0 else 2
+                                      true
+                                  }
+                                  KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_GUIDE -> {
                                       showList = true
                                       true
                                   }
@@ -3507,7 +3594,7 @@ jobs:
                                       true
                                   }
                                   KeyEvent.KEYCODE_INFO -> {
-                                      showInfo = !showInfo
+                                      infoMode = if (infoMode == 0) 2 else 0
                                       true
                                   }
                                   KeyEvent.KEYCODE_LAST_CHANNEL -> {
@@ -3553,10 +3640,12 @@ jobs:
                                   onTap = {
                                       if (showList) showList = false
                                       else if (showOpts) showOpts = false
-                                      else {
-                                          val s = !(showInfo || showBar)
-                                          showInfo = s
-                                          showBar = s
+                                      else if (infoMode != 0 || showBar) {
+                                          infoMode = 0
+                                          showBar = false
+                                      } else {
+                                          infoMode = 2
+                                          showBar = true
                                       }
                                   },
                                   onDoubleTap = { vm.recall() }
@@ -3585,7 +3674,17 @@ jobs:
                       )
                   }
 
-                  // ---- touch buttons (top bar); TV remotes use the keys listed above
+                  // ---- info overlay (brief 3 s / detailed after OK)
+                  AnimatedVisibility(
+                      visible = infoMode != 0 && !panelOpen && !inPip && ch != null,
+                      modifier = Modifier.fillMaxSize(),
+                      enter = fadeIn(tween(180)),
+                      exit = fadeOut(tween(220))
+                  ) {
+                      if (ch != null) PlayerInfo(vm, pc, ch, infoMode == 2, !showBar)
+                  }
+
+                  // ---- touch buttons (top bar)
                   AnimatedVisibility(
                       visible = showBar && !panelOpen && !inPip,
                       modifier = Modifier.align(Alignment.TopCenter),
@@ -3613,22 +3712,12 @@ jobs:
                       }
                   }
 
-                  // ---- info card (bottom)
-                  AnimatedVisibility(
-                      visible = showInfo && !panelOpen && !inPip && ch != null,
-                      modifier = Modifier.align(Alignment.BottomCenter),
-                      enter = fadeIn(),
-                      exit = fadeOut()
-                  ) {
-                      if (ch != null) InfoCard(vm, pc, ch)
-                  }
-
-                  // ---- channel list (left, LEFT / OK)
+                  // ---- channel list (left): LEFT opens, RIGHT closes
                   AnimatedVisibility(
                       visible = showList && !inPip,
                       modifier = Modifier.align(Alignment.CenterStart),
-                      enter = slideInHorizontally { -it },
-                      exit = slideOutHorizontally { -it }
+                      enter = slideInHorizontally(tween(200)) { -it },
+                      exit = slideOutHorizontally(tween(180)) { -it }
                   ) {
                       ChannelPanel(vm) { showList = false }
                   }
@@ -3637,8 +3726,8 @@ jobs:
                   AnimatedVisibility(
                       visible = showOpts && !inPip,
                       modifier = Modifier.align(Alignment.CenterEnd),
-                      enter = slideInHorizontally { it },
-                      exit = slideOutHorizontally { it }
+                      enter = slideInHorizontally(tween(200)) { it },
+                      exit = slideOutHorizontally(tween(180)) { it }
                   ) {
                       OptionsPanel(
                           vm, ch, aspectName,
@@ -3659,7 +3748,6 @@ jobs:
                   }
               }
 
-              // ---- dialogs
               when (dialog) {
                   "audio" -> TrackDialog("Audio", C.TRACK_TYPE_AUDIO, pc, null) { dialog = "" }
                   "sub" -> TrackDialog("Subtitles", C.TRACK_TYPE_TEXT, pc, "Off") { dialog = "" }
@@ -3680,19 +3768,19 @@ jobs:
           }
 
           /**
-           * Bottom card: banner, title, time, description, up-next. Under it a single row (up to 10) of small cards
-           * for the channels played before this one (newest first): channel name, its live programme banner and title.
+           * Fullscreen info, laid out like the TiviMate reference (1340 x 800, scaled by u):
+           *  - top: category name (left), date + time (right)
+           *  - bottom: programme banner | title, "12:00 - 03:00 pm  [bar]  46 min   3 Star Plus", description, next programme
+           *  - detailed (after OK): quality / fps / audio badges, full-width programme progress bar with dot and a single row
+           *    (up to 10) of the previously played channels: channel name, its live programme banner, programme title.
            */
           @Composable
-          fun InfoCard(vm: MainVM, pc: PlayerController, ch: Channel) {
+          fun PlayerInfo(vm: MainVM, pc: PlayerController, ch: Channel, detailed: Boolean, showTop: Boolean) {
               val nn = vm.nowNext(ch)
               val cur = nn.first
               val next = nn.second
               val bUrl = if (cur != null) bannerUrl(cur) else ""
-              val hasBanner = bUrl.isNotBlank()
-              val tint = rememberBannerColor(
-                  bUrl, hashColor((cur?.title ?: ch.name) + (cur?.genre ?: ""))
-              )
+              val num = vm.zapList.indexOfFirst { it.id == ch.id } + 1
               val recent = remember(vm.recents, vm.channels, ch.id) {
                   vm.recents.filter { it != ch.id }
                       .mapNotNull { id -> vm.channels.firstOrNull { it.id == id } }
@@ -3701,130 +3789,169 @@ jobs:
               LaunchedEffect(recent) {
                   recent.forEach { c -> launch { vm.ensureEpg(c.id, 0) } }
               }
-              Column(Modifier.fillMaxWidth()) {
-                  Row(
-                      Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
-                          .glass(RoundedCornerShape(26.dp), 0.10f, Color.Black)
-                          .background(Color(0xCC000000))
-                          .drawBehind {
-                              drawRect(
-                                  Brush.horizontalGradient(
-                                      listOf(
-                                          Color.Transparent,
-                                          tint.copy(alpha = 0.16f),
-                                          tint.copy(alpha = 0.46f)
-                                      ),
-                                      startX = size.width * 0.30f,
-                                      endX = size.width
-                                  )
-                              )
-                          }
-                          .padding(14.dp),
-                      verticalAlignment = Alignment.CenterVertically
+
+              val d0 = LocalDensity.current
+              CompositionLocalProvider(LocalDensity provides Density(d0.density, 1f)) {
+              ProvideTextStyle(TextStyle(fontFamily = CondFont)) {
+              BoxWithConstraints(Modifier.fillMaxSize()) {
+                  val u = minOf(maxHeight.value / 800f, maxWidth.value / 1340f).coerceAtLeast(0.3f)
+
+                  if (showTop) {
+                      Box(
+                          Modifier.align(Alignment.TopStart).fillMaxWidth().height((100 * u).dp)
+                              .background(Brush.verticalGradient(listOf(Color(0xB3000000), Color.Transparent)))
+                      )
+                      Text(
+                          vm.category, Modifier.align(Alignment.TopStart).padding(start = (24 * u).dp, top = (18 * u).dp),
+                          color = Color.White, fontSize = (26 * u).sp, maxLines = 1
+                      )
+                      Text(
+                          dateText(vm.now), Modifier.align(Alignment.TopEnd).padding(end = (24 * u).dp, top = (18 * u).dp),
+                          color = Color.White, fontSize = (26 * u).sp, maxLines = 1
+                      )
+                  }
+
+                  Column(
+                      Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                          .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xE6000000))))
+                          .padding(top = (70 * u).dp, bottom = ((if (detailed) 14f else 34f) * u).dp)
                   ) {
-                      if (hasBanner) {
-                          Box(
-                              Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
-                                  .background(Color.White.copy(alpha = 0.08f))
-                          ) { Banner(bUrl, Modifier.fillMaxSize()) }
-                      } else {
-                          Logo(ch, 56.dp)
-                      }
-                      Spacer(Modifier.width(16.dp))
-                      Column(Modifier.weight(1.7f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                          Text(ch.name, color = Dim, fontSize = 12.sp, maxLines = 1)
-                          if (cur != null) {
+                      Row(Modifier.fillMaxWidth().padding(start = (59 * u).dp, end = (59 * u).dp)) {
+                          BannerBox(
+                              bUrl, cur?.title?.ifBlank { ch.name } ?: ch.name,
+                              Modifier.width((205 * u).dp).height((115 * u).dp).clip(RoundedCornerShape((8 * u).dp)),
+                              (18 * u).sp
+                          )
+                          Spacer(Modifier.width((22 * u).dp))
+                          Column(Modifier.weight(1f)) {
                               Text(
-                                  cur.title, color = Color.White, fontWeight = FontWeight.Bold,
-                                  fontSize = 19.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                  cur?.title?.ifBlank { ch.name } ?: ch.name, color = Color.White, fontSize = (30 * u).sp,
+                                  lineHeight = (36 * u).sp, maxLines = 1, overflow = TextOverflow.Ellipsis
                               )
-                              Text(
-                                  "${hm(cur.start)} - ${hm(cur.stop)}" +
-                                      (if (cur.genre.isNotBlank()) "  -  ${cur.genre}" else ""),
-                                  color = Accent, fontSize = 12.sp, maxLines = 1
-                              )
-                              LinearProgressIndicator(
-                                  progress = { progressOf(cur, vm.now) },
-                                  modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).height(3.dp),
-                                  color = Accent, trackColor = Color.White.copy(alpha = 0.18f)
-                              )
-                              if (cur.desc.isNotBlank()) {
+                              Spacer(Modifier.height((8 * u).dp))
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  if (cur != null) {
+                                      val left = ((cur.stop - vm.now + 59_999L) / 60_000L).coerceAtLeast(1L)
+                                      Text(rangeText(cur), color = TextDim, fontSize = (20 * u).sp, fontFamily = CondLight, maxLines = 1)
+                                      Spacer(Modifier.width((20 * u).dp))
+                                      Box(
+                                          Modifier.width((58 * u).dp).height((4 * u).dp)
+                                              .clip(RoundedCornerShape(2.dp)).background(BarTrack)
+                                      ) {
+                                          Box(Modifier.fillMaxHeight().fillMaxWidth(progressOf(cur, vm.now)).background(BarFill))
+                                      }
+                                      Spacer(Modifier.width((20 * u).dp))
+                                      Text("$left min", color = TextDim, fontSize = (20 * u).sp, fontFamily = CondLight, maxLines = 1)
+                                      Spacer(Modifier.width((26 * u).dp))
+                                  }
                                   Text(
-                                      cur.desc, color = Color(0xFFDDE3EE), fontSize = 13.sp,
-                                      lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis
+                                      (if (num > 0) "$num  " else "") + ch.name, color = Color.White, fontSize = (21 * u).sp,
+                                      fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                      modifier = Modifier.weight(1f, fill = false)
+                                  )
+                                  if (detailed) {
+                                      Spacer(Modifier.width((24 * u).dp))
+                                      listOf(pc.videoClass, pc.videoFps, pc.audioDesc).filter { it.isNotBlank() }.forEach { b ->
+                                          Box(
+                                              Modifier.clip(RoundedCornerShape((4 * u).dp)).background(Color(0xFFB4B4B4))
+                                                  .padding(horizontal = (9 * u).dp, vertical = (2 * u).dp)
+                                          ) {
+                                              Text(b, color = Color(0xFF222222), fontSize = (15 * u).sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                          }
+                                          Spacer(Modifier.width((9 * u).dp))
+                                      }
+                                  }
+                              }
+                              if (cur != null && cur.desc.isNotBlank()) {
+                                  Spacer(Modifier.height((8 * u).dp))
+                                  Text(
+                                      cur.desc, color = TextDim, fontSize = (20 * u).sp, lineHeight = (24 * u).sp,
+                                      fontFamily = CondLight, maxLines = 2, overflow = TextOverflow.Ellipsis
                                   )
                               }
-                          } else {
-                              Text("Live", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                              if (next != null) {
+                                  Spacer(Modifier.height((8 * u).dp))
+                                  Row(verticalAlignment = Alignment.CenterVertically) {
+                                      Text(rangeText(next), color = TextDim, fontSize = (20 * u).sp, fontFamily = CondLight, maxLines = 1)
+                                      Spacer(Modifier.width((20 * u).dp))
+                                      Text(
+                                          next.title, color = Color(0xFFD0D0D0), fontSize = (22 * u).sp,
+                                          maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                                      )
+                                  }
+                              }
                           }
                       }
-                      Spacer(Modifier.width(12.dp))
-                      Column(
-                          Modifier.weight(1f),
-                          horizontalAlignment = Alignment.End,
-                          verticalArrangement = Arrangement.spacedBy(4.dp)
-                      ) {
-                          if (hasBanner) Logo(ch, 44.dp)
-                          if (pc.videoRes.isNotEmpty()) {
-                              Text(pc.videoRes, color = Color.White.copy(alpha = 0.8f), fontSize = 12.sp)
-                          }
-                          if (next != null) {
-                              Text(
-                                  "UP NEXT  ${hm(next.start)}", color = Color.White.copy(alpha = 0.85f),
-                                  fontSize = 11.sp, fontWeight = FontWeight.Bold
-                              )
-                              Text(
-                                  next.title, color = Color.White, fontSize = 13.sp,
-                                  textAlign = TextAlign.End, maxLines = 2, overflow = TextOverflow.Ellipsis
-                              )
+                      if (detailed) {
+                          Spacer(Modifier.height((14 * u).dp))
+                          val p = if (cur != null) progressOf(cur, vm.now) else 0f
+                          Box(
+                              Modifier.fillMaxWidth().padding(horizontal = (59 * u).dp).height((16 * u).dp)
+                                  .drawBehind {
+                                      val h = 4.dp.toPx()
+                                      val cy = size.height / 2f
+                                      drawRoundRect(
+                                          Color(0xFF6B6B6B), Offset(0f, cy - h / 2f), Size(size.width, h), CornerRadius(h / 2f)
+                                      )
+                                      val fx = size.width * p
+                                      drawRoundRect(
+                                          GoldArrow, Offset(0f, cy - h / 2f), Size(fx, h), CornerRadius(h / 2f)
+                                      )
+                                      drawCircle(Color(0xFFDDDDDD), 7.dp.toPx(), Offset(fx, cy))
+                                  }
+                          )
+                          if (recent.isNotEmpty()) {
+                              Spacer(Modifier.height((10 * u).dp))
+                              LazyRow(
+                                  contentPadding = PaddingValues(horizontal = (47 * u).dp),
+                                  horizontalArrangement = Arrangement.spacedBy((8 * u).dp)
+                              ) {
+                                  items(recent, key = { it.id }) { c -> MiniChannelCard(vm, c, u) }
+                              }
                           }
                       }
                   }
-                  if (recent.isNotEmpty()) {
-                      LazyRow(
-                          contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-                          horizontalArrangement = Arrangement.spacedBy(8.dp)
-                      ) {
-                          items(recent, key = { it.id }) { c -> MiniChannelCard(vm, c) }
-                      }
-                  }
-                  Text(
-                      "UP / DOWN  channel     OK or LEFT  channel list (RIGHT hides it)     MENU  options     BACK  home",
-                      Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 8.dp),
-                      color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, textAlign = TextAlign.Center
-                  )
+              }
+              }
               }
           }
 
-          /** Small "previously played" card: channel name, live programme banner, programme title. */
+          /**
+           * "Previously played" card: channel name, the live programme banner of that channel
+           * (programme title on the tile until the image loads), programme title in gold, progress bar.
+           */
           @Composable
-          fun MiniChannelCard(vm: MainVM, c: Channel) {
+          fun MiniChannelCard(vm: MainVM, c: Channel, u: Float) {
               val np = vm.nowNext(c).first
-              val shape = RoundedCornerShape(12.dp)
+              val shape = RoundedCornerShape((10 * u).dp)
+              val bu = if (np != null) bannerUrl(np) else ""
               Column(
-                  Modifier.width(150.dp).clip(shape)
-                      .background(Color(0xD9000000))
-                      .border(1.dp, Color.White.copy(alpha = 0.2f), shape)
+                  Modifier.width((196 * u).dp).clip(shape)
+                      .background(Color(0xE61E1E1E))
                       .clickable { vm.play(c, vm.zapList) }
-                      .padding(6.dp),
-                  verticalArrangement = Arrangement.spacedBy(3.dp)
+                      .padding((6 * u).dp),
+                  verticalArrangement = Arrangement.spacedBy((4 * u).dp)
               ) {
                   Text(
-                      c.name, color = Dim, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                      c.name, color = TextDim, fontSize = (16 * u).sp, fontWeight = FontWeight.Bold,
                       maxLines = 1, overflow = TextOverflow.Ellipsis
                   )
-                  Box(
-                      Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))
-                          .background(Color.White.copy(alpha = 0.08f)),
-                      contentAlignment = Alignment.Center
-                  ) {
-                      val u = if (np != null) bannerUrl(np) else ""
-                      if (u.isNotBlank()) Banner(u, Modifier.fillMaxSize()) else Logo(c, 28.dp)
-                  }
+                  BannerBox(
+                      bu, np?.title?.ifBlank { c.name } ?: c.name,
+                      Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape((6 * u).dp)),
+                      (14 * u).sp
+                  )
                   Text(
-                      np?.title ?: "Live", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                      np?.title ?: "Live", color = GoldDate, fontSize = (18 * u).sp,
                       maxLines = 1, overflow = TextOverflow.Ellipsis
                   )
+                  if (np != null) {
+                      LinearProgressIndicator(
+                          progress = { progressOf(np, vm.now) },
+                          modifier = Modifier.fillMaxWidth().height(3.dp),
+                          color = Accent, trackColor = Color.White.copy(alpha = 0.15f)
+                      )
+                  }
               }
           }
 
@@ -3899,6 +4026,7 @@ jobs:
               }
           }
 
+          /** Channel row of the fullscreen list: logo, name, programme title + progress, small banner of the live programme at the side. */
           @Composable
           fun PlayerChannelRow(vm: MainVM, ch: Channel, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
               val np = vm.nowNext(ch).first
@@ -3926,18 +4054,18 @@ jobs:
                           )
                       }
                   }
-                  // small banner of the programme that is on now
-                  if (bu.isNotBlank()) {
-                      Spacer(Modifier.width(10.dp))
-                      Banner(bu, Modifier.width(84.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)))
-                  }
+                  Spacer(Modifier.width(10.dp))
+                  BannerBox(
+                      bu, np?.title ?: ch.name,
+                      Modifier.width(96.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)), 9.sp
+                  )
               }
           }
 
           /**
-           * Left channel list (fullscreen): opens with OK / LEFT, closes with RIGHT (or BACK).
-           * LEFT inside the list slides the category column in (TiviMate style); moving over a category updates the
-           * channels at once, RIGHT / OK on a category goes back to the channels.
+           * Left channel list (fullscreen): LEFT opens it, RIGHT closes it (or BACK).
+           * LEFT inside the list slides the category column in; moving over a category updates the channels at once,
+           * RIGHT / OK on a category goes back to the channels.
            */
           @Composable
           fun ChannelPanel(vm: MainVM, onPick: () -> Unit) {
@@ -3952,7 +4080,6 @@ jobs:
 
               BackHandler(enabled = showCats) { showCats = false }
 
-              // focus follows the visible column
               LaunchedEffect(showCats) {
                   delay(180)
                   try {
@@ -3963,7 +4090,6 @@ jobs:
               LaunchedEffect(g) {
                   state.scrollToItem(curIdx)
               }
-              // load EPG for the channels showing in this panel (chunks of 7, follows scrolling)
               LaunchedEffect(list, vm.epgTick) {
                   androidx.compose.runtime.snapshotFlow {
                       val v = state.layoutInfo.visibleItemsInfo
@@ -3999,7 +4125,7 @@ jobs:
                       }
                   }
                   Column(
-                      Modifier.width(430.dp).fillMaxHeight()
+                      Modifier.width(450.dp).fillMaxHeight()
                           .onPreviewKeyEvent { e ->
                               val k = e.nativeKeyEvent.keyCode
                               if (e.type != KeyEventType.KeyDown) {
@@ -4017,7 +4143,8 @@ jobs:
                   ) {
                       Text(
                           g, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
-                          fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                          fontWeight = FontWeight.Bold, fontSize = 18.sp, color = GoldDate,
+                          maxLines = 1, overflow = TextOverflow.Ellipsis
                       )
                       if (list.isEmpty()) {
                           Text("Nothing here yet", Modifier.padding(16.dp), color = Dim)
@@ -4220,7 +4347,6 @@ jobs:
               }
 
               // Long-press Back on the home screen -> fullscreen the playing channel.
-              // (startTracking lets the system tell a long press from a normal Back click.)
               override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
                   if (keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0) {
                       event.startTracking()
@@ -4245,9 +4371,7 @@ jobs:
 
               override fun onStart() {
                   super.onStart()
-                  // session may have expired while the app was in the background
                   vm.checkExpiry()
-                  // resume the live preview / fullscreen stream
                   if (vm.current != null) vm.playNonce++
               }
 
