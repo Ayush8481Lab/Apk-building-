@@ -1,6 +1,10 @@
 name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
+# v6.1: EPG engine rewritten to behave like TiviMate: the programme START time is the truth, an earlier programme is cut where the next one
+#       starts (a later programme is never pushed / hidden), one entry per start time (real title beats Filler), no more "A | B | A" fragments,
+#       midnight-clipped movies are joined, tiny gaps closed, EPG cache is keyed by the real calendar day (no stale data after midnight),
+#       EPG data viewer now marks overlapping rows of the raw API response.
 # v6.0: ambient blurred colour-graded background (grey + programme colour), Up/Down jump to the LIVE block of the next/previous row,
 #       new fullscreen info (3 s brief view -> OK = detailed view with banner, badges, progress, last-played cards), LEFT opens channel list / RIGHT closes it,
 #       banner-first search cards (programme banner + channel name, title shown until the image loads), redesigned menu / categories / settings,
@@ -99,8 +103,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 15
-                  versionName = "6.0"
+                  versionCode = 16
+                  versionName = "6.1"
               }
 
               buildTypes {
@@ -253,6 +257,12 @@ jobs:
           const val MIN_ROWS = 2
           const val MAX_ROWS = 6
           const val DEFAULT_ROWS = 3
+
+          /**
+           * Number of the current calendar day in IST (the EPG service counts its "offset" days in IST, serverDate +05:30).
+           * Cache files / memory entries are tied to this number, so "offset 0" can never serve yesterday's schedule after midnight.
+           */
+          fun istDay(ms: Long = System.currentTimeMillis()): Long = (ms + 19_800_000L).floorDiv(86_400_000L)
 
           data class Channel(
               val id: String,
@@ -456,10 +466,22 @@ jobs:
               @Volatile
               var dir: File? = null
 
+              /** Cache file of one channel + one REAL calendar day (not "offset"), so a new day always means a fresh download. */
               private fun cacheFile(id: String, offset: Int): File? {
                   val d = dir ?: return null
                   val safe = id.replace(Regex("[^A-Za-z0-9_-]"), "_")
-                  return File(d, "epg_${safe}_$offset.json")
+                  return File(d, "epg_${safe}_d${istDay() + offset}.json")
+              }
+
+              /** Removes cache files older than 3 days (called once at start). */
+              fun cleanup() {
+                  val d = dir ?: return
+                  val limit = System.currentTimeMillis() - 3 * 86_400_000L
+                  try {
+                      d.listFiles()?.forEach { if (it.lastModified() < limit) it.delete() }
+                  } catch (e: Exception) {
+                      // harmless
+                  }
               }
 
               private fun download(id: String, offset: Int): String {
@@ -772,50 +794,90 @@ jobs:
               "programme", "program", "programs", "programmes", "closed", "off air", "no programme"
           )
 
+          /** Entries this long (or longer) are treated as a "block" that real programmes may sit inside. */
+          private const val BLOCK_MS = 5 * 3_600_000L
+          private const val DAY_MS = 86_400_000L
+          private const val IST_MS = 19_800_000L
+
+          /** Two start times closer than this are the same programme listed twice. */
+          private const val SAME_START_MS = 90_000L
+
+          private fun isGeneric(p: Program): Boolean =
+              p.title.isBlank() || p.title.trim().lowercase() in GENERIC_TITLES
+
+          /** Distance (ms) of [t] from the nearest IST midnight. */
+          private fun midnightDist(t: Long): Long {
+              val m = (t + IST_MS).mod(DAY_MS)
+              return minOf(m, DAY_MS - m)
+          }
+
+          /** The EPG service cuts a programme that runs over midnight at 23:59:59 (the day file ends there). */
+          private fun clippedAtMidnight(stop: Long): Boolean = (stop + IST_MS).mod(DAY_MS) >= DAY_MS - SAME_START_MS
+
+          /** Of two entries that start together, is [a] the better one to keep (real title > Filler, more info > less, longer > shorter). */
+          private fun better(a: Program, b: Program): Boolean {
+              val ga = isGeneric(a)
+              val gb = isGeneric(b)
+              if (ga != gb) return gb
+              val ia = (if (a.thumb.isNotBlank()) 2 else 0) + (if (a.desc.isNotBlank()) 1 else 0)
+              val ib = (if (b.thumb.isNotBlank()) 2 else 0) + (if (b.desc.isNotBlank()) 1 else 0)
+              if (ia != ib) return ia > ib
+              return (a.stop - a.start) > (b.stop - b.start)
+          }
+
           /**
-           * Turns whatever the EPG service returned into a clean schedule (no overlaps, no lost names):
-           *  1. entries that CONTAIN another entry, are generic ("Filler", ...) or last 5 h or more are "background";
-           *  2. the rest ("foreground") is chained by start time: the earlier / currently airing programme is never cut,
-           *     a later one that starts inside it is pushed to start where the earlier one ends, equal titles are merged;
-           *  3. background entries only fill the gaps left over (shortest first).
+           * Turns whatever the EPG service returned into a clean, TiviMate-like schedule: no overlaps, no title ever pushed or hidden.
+           *  1. one entry per start time (the better one: real title beats "Filler", more info beats less);
+           *  2. the START time is the truth: when a programme starts before the previous one ended, the PREVIOUS one is cut
+           *     where the new one starts (the new one keeps its real start time and its full title);
+           *  3. "background" entries (Filler / TBA / 5 h+ blocks) never cut a real programme, they only fill the gaps between them;
+           *  4. a programme the service clipped at 23:59:59 and re-listed at 00:00 is joined, gaps under 3 minutes are closed.
            */
           fun normalizeEpg(raw: List<Program>): List<Program> {
-              val src = raw.filter { it.stop > it.start }.distinctBy { it.start }.sortedBy { it.start }
-              if (src.size < 2) return src
-              val bg = BooleanArray(src.size)
-              for (i in src.indices) {
-                  val a = src[i]
-                  var big = a.title.trim().lowercase() in GENERIC_TITLES || (a.stop - a.start) >= 5 * 3_600_000L
-                  if (!big) {
-                      for (j in src.indices) {
-                          if (j == i) continue
-                          val b = src[j]
-                          if (a.start <= b.start && b.stop <= a.stop && b.title != a.title) {
-                              big = true
-                              break
-                          }
-                      }
-                  }
-                  bg[i] = big
+              val byStart = HashMap<Long, Program>()
+              for (p in raw) {
+                  if (p.stop - p.start < 30_000L) continue
+                  val o = byStart[p.start]
+                  if (o == null || better(p, o)) byStart[p.start] = p
               }
-              val placed = ArrayList<Program>()
-              for (i in src.indices) {
-                  if (bg[i]) continue
-                  var p = src[i]
-                  val last = placed.lastOrNull()
-                  if (last != null && p.start < last.stop) {
-                      if (p.title == last.title) {
-                          placed[placed.size - 1] = last.copy(stop = maxOf(last.stop, p.stop))
-                          continue
-                      }
-                      if (p.stop <= last.stop) continue
-                      p = p.copy(start = last.stop)
+              val all = byStart.values.sortedBy { it.start }
+              if (all.isEmpty()) return all
+
+              val bg = ArrayList<Program>()
+              val chain = ArrayList<Program>()
+              for (p in all) {
+                  if (isGeneric(p) || p.stop - p.start >= BLOCK_MS) {
+                      bg.add(p)
+                      continue
                   }
-                  placed.add(p)
+                  val last = chain.lastOrNull()
+                  if (last == null) {
+                      chain.add(p)
+                      continue
+                  }
+                  // movie cut at 23:59:59 and continued at 00:00 -> one block
+                  if (p.title == last.title && clippedAtMidnight(last.stop) &&
+                      p.start - last.stop <= SAME_START_MS && midnightDist(p.start) <= SAME_START_MS
+                  ) {
+                      chain[chain.size - 1] = last.copy(stop = maxOf(last.stop, p.stop))
+                      continue
+                  }
+                  if (p.start >= last.stop) {
+                      chain.add(p)
+                      continue
+                  }
+                  // p starts before the previous programme ended
+                  if (p.start - last.start < SAME_START_MS) {
+                      if (better(p, last)) chain[chain.size - 1] = p.copy(start = last.start)
+                      continue
+                  }
+                  if (p.stop <= last.stop && p.title == last.title) continue // same programme listed twice
+                  chain[chain.size - 1] = last.copy(stop = p.start)
+                  chain.add(p)
               }
-              val order = src.indices.filter { bg[it] }.sortedBy { src[it].stop - src[it].start }
-              for (i in order) {
-                  val a = src[i]
+
+              val placed = ArrayList<Program>(chain)
+              for (a in bg.sortedBy { it.stop - it.start }) {
                   var cur = a.start
                   val pieces = ArrayList<Program>()
                   for (q in placed) {
@@ -830,6 +892,11 @@ jobs:
                       if (pc.stop - pc.start >= 60_000L) placed.add(pc)
                   }
                   placed.sortBy { it.start }
+              }
+
+              for (i in 0 until placed.size - 1) {
+                  val gap = placed[i + 1].start - placed[i].stop
+                  if (gap in 1L..179_999L) placed[i] = placed[i].copy(stop = placed[i + 1].start)
               }
               return placed
           }
@@ -880,20 +947,28 @@ jobs:
               private var epgJob: Job? = null
               private var epgKey = ""
               private val epgAt = HashMap<String, Long>()
+              /** IST calendar day each epg entry was loaded for: after midnight everything is reloaded. */
+              private val epgDay = HashMap<String, Long>()
               private val inflight = HashSet<String>()
 
               init {
                   EpgApi.dir = File(app.cacheDir, "epg").apply { mkdirs() }
+                  viewModelScope.launch(Dispatchers.IO) { EpgApi.cleanup() }
 
                   if (token.isNotEmpty()) viewModelScope.launch { login(token) }
 
                   viewModelScope.launch {
                       var n = 0
+                      var day = istDay()
                       while (true) {
                           delay(30_000)
                           now = System.currentTimeMillis()
                           n++
-                          if (n % 20 == 0) epgTick++
+                          val d = istDay()
+                          if (n % 20 == 0 || d != day) {
+                              day = d
+                              epgTick++
+                          }
                       }
                   }
 
@@ -945,6 +1020,7 @@ jobs:
                   categories = emptyList()
                   epg.clear()
                   epgAt.clear()
+                  epgDay.clear()
                   epgDays.clear()
                   tlCache.clear()
                   expire = 0L
@@ -1061,7 +1137,8 @@ jobs:
               suspend fun ensureEpg(id: String, offset: Int) {
                   val k = "$id:$offset"
                   val t = epgAt[k] ?: 0L
-                  if (System.currentTimeMillis() - t < EPG_TTL_MS) return
+                  val today = istDay()
+                  if (System.currentTimeMillis() - t < EPG_TTL_MS && epgDay[k] == today) return
                   if (!inflight.add(k)) return
                   try {
                       val l = withContext(Dispatchers.IO) {
@@ -1079,6 +1156,7 @@ jobs:
                       } else {
                           epgAt[k] = System.currentTimeMillis() - EPG_TTL_MS + 60_000L
                       }
+                      epgDay[k] = today
                   } finally {
                       inflight.remove(k)
                   }
@@ -2935,16 +3013,9 @@ jobs:
                       all
                   }
                   val out = ArrayList<Program>()
-                  var prevEnd = Long.MIN_VALUE
                   for (p in src) {
-                      if ((p.stop - base) / 60000f <= lo || (p.start - base) / 60000f >= hi) {
-                          prevEnd = maxOf(prevEnd, p.stop)
-                          continue
-                      }
-                      val st = maxOf(p.start, prevEnd)
-                      if (p.stop - st < 60_000L) continue
-                      out.add(if (st != p.start) p.copy(start = st) else p)
-                      prevEnd = p.stop
+                      if ((p.stop - base) / 60000f <= lo || (p.start - base) / 60000f >= hi) continue
+                      out.add(p)
                   }
                   out
               }
@@ -3260,7 +3331,7 @@ jobs:
                       }
                   }
                   Section("EPG data") {
-                      Text("Shows the raw schedule and the cleaned schedule of the playing channel (for checking wrong times).", color = Dim)
+                      Text("Shows the raw schedule (overlapping rows are marked with !!) and the cleaned schedule of the playing channel.", color = Dim)
                       GlassButton("Show EPG of playing channel") { showDbg = true }
                   }
                   Section("Player") {
@@ -3309,7 +3380,16 @@ jobs:
                           val l = vm.epg["${ch.id}:$o"]
                           out.add("")
                           out.add("RAW day offset $o: " + (l?.size?.toString() ?: "not loaded"))
-                          l?.forEach { out.add(DBG_FMT.format(Date(it.start)) + " - " + DBG_FMT.format(Date(it.stop)) + "  " + it.title) }
+                          var maxStop = Long.MIN_VALUE
+                          l?.sortedBy { it.start }?.forEach {
+                              val ov = if (maxStop != Long.MIN_VALUE && it.start < maxStop - 1000L) {
+                                  "   !! overlaps previous by " + ((maxStop - it.start) / 60_000L) + " min"
+                              } else {
+                                  ""
+                              }
+                              out.add(DBG_FMT.format(Date(it.start)) + " - " + DBG_FMT.format(Date(it.stop)) + "  " + it.title + ov)
+                              maxStop = maxOf(maxStop, it.stop)
+                          }
                       }
                       out.add("")
                       out.add("CLEANED schedule used by the app:")
