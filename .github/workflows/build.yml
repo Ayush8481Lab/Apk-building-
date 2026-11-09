@@ -2,6 +2,7 @@ name: Build Live TV APK
 
 # Live TV - token-gated live channel app for Android (phone + Android TV).
 # Liquid-glass UI, TiviMate-style home (live preview + EPG rows + push-aside slide menu), DRM (ClearKey / Widevine), auto session refresh, cached chunked Jio EPG.
+# v5.9: one cleaned schedule for header + guide + fullscreen (no overlaps, long/generic blocks only fill gaps, no lost names), EPG data viewer in Settings.
 # v5.8: guide data fix - overlapping schedule entries no longer cut into the current programme (earlier entry wins).
 # v5.7: Roboto Condensed everywhere (like TiviMate), smaller header (Settings: Header size), sticky titles + ellipsis, overlap-free guide data, fullscreen category column.
 # v5.6: 8 guide rows, TiviMate menu (nav + text-only categories), full-bleed faded banner, condensed guide font, ellipsis on long titles, no history tag.
@@ -107,8 +108,8 @@ jobs:
                   applicationId = "com.livetv.glass"
                   minSdk = 23
                   targetSdk = 34
-                  versionCode = 13
-                  versionName = "5.8"
+                  versionCode = 14
+                  versionName = "5.9"
               }
 
               buildTypes {
@@ -784,6 +785,73 @@ jobs:
 
           enum class Phase { TOKEN, LOADING, READY }
 
+          private val GENERIC_TITLES = setOf(
+              "filler", "fillers", "no information", "no information available", "to be announced", "tba",
+              "programme", "program", "programs", "programmes", "closed", "off air", "no programme"
+          )
+
+          /**
+           * Turns whatever the EPG service returned into a clean schedule (no overlaps, no lost names):
+           *  1. entries that CONTAIN another entry, are generic ("Filler", ...) or last 5 h or more are "background";
+           *  2. the rest ("foreground") is chained by start time: the earlier / currently airing programme is never cut,
+           *     a later one that starts inside it is pushed to start where the earlier one ends, equal titles are merged;
+           *  3. background entries only fill the gaps left over (shortest first), so a long block never hides real names.
+           */
+          fun normalizeEpg(raw: List<Program>): List<Program> {
+              val src = raw.filter { it.stop > it.start }.distinctBy { it.start }.sortedBy { it.start }
+              if (src.size < 2) return src
+              val bg = BooleanArray(src.size)
+              for (i in src.indices) {
+                  val a = src[i]
+                  var big = a.title.trim().lowercase() in GENERIC_TITLES || (a.stop - a.start) >= 5 * 3_600_000L
+                  if (!big) {
+                      for (j in src.indices) {
+                          if (j == i) continue
+                          val b = src[j]
+                          if (a.start <= b.start && b.stop <= a.stop && b.title != a.title) {
+                              big = true
+                              break
+                          }
+                      }
+                  }
+                  bg[i] = big
+              }
+              val placed = ArrayList<Program>()
+              for (i in src.indices) {
+                  if (bg[i]) continue
+                  var p = src[i]
+                  val last = placed.lastOrNull()
+                  if (last != null && p.start < last.stop) {
+                      if (p.title == last.title) {
+                          placed[placed.size - 1] = last.copy(stop = maxOf(last.stop, p.stop))
+                          continue
+                      }
+                      if (p.stop <= last.stop) continue
+                      p = p.copy(start = last.stop)
+                  }
+                  placed.add(p)
+              }
+              val order = src.indices.filter { bg[it] }.sortedBy { src[it].stop - src[it].start }
+              for (i in order) {
+                  val a = src[i]
+                  var cur = a.start
+                  val pieces = ArrayList<Program>()
+                  for (q in placed) {
+                      if (q.stop <= cur) continue
+                      if (q.start >= a.stop) break
+                      if (q.start > cur) pieces.add(a.copy(start = cur, stop = minOf(q.start, a.stop)))
+                      cur = maxOf(cur, q.stop)
+                      if (cur >= a.stop) break
+                  }
+                  if (cur < a.stop) pieces.add(a.copy(start = cur))
+                  for (pc in pieces) {
+                      if (pc.stop - pc.start >= 60_000L) placed.add(pc)
+                  }
+                  placed.sortBy { it.start }
+              }
+              return placed
+          }
+
           class MainVM(app: Application) : AndroidViewModel(app) {
               val store = Store(app)
 
@@ -900,6 +968,7 @@ jobs:
                   epg.clear()
                   epgAt.clear()
                   epgDays.clear()
+                  tlCache.clear()
                   expire = 0L
                   token = ""
                   store.token = ""
@@ -1041,16 +1110,10 @@ jobs:
               }
 
               fun nowNext(ch: Channel): Pair<Program?, Program?> {
-                  val a = epg["${ch.id}:0"] ?: emptyList()
-                  val b = epg["${ch.id}:1"] ?: emptyList()
-                  var i = a.indexOfFirst { now >= it.start && now < it.stop }
-                  if (i >= 0) {
-                      val cur = a[i]
-                      return Pair(cur, a.getOrNull(i + 1) ?: b.firstOrNull { it.start >= cur.stop })
-                  }
-                  i = b.indexOfFirst { now >= it.start && now < it.stop }
-                  if (i >= 0) return Pair(b[i], b.getOrNull(i + 1))
-                  return Pair(null, a.firstOrNull { it.start > now } ?: b.firstOrNull { it.start > now })
+                  val tl = fullTimeline(ch)
+                  val i = tl.indexOfFirst { now >= it.start && now < it.stop }
+                  if (i >= 0) return Pair(tl[i], tl.getOrNull(i + 1))
+                  return Pair(null, tl.firstOrNull { it.start > now })
               }
 
               /** How many day offsets (0 until n) this channel's home row currently shows. Starts at 2 (today + tomorrow). */
@@ -1084,32 +1147,30 @@ jobs:
                   return out.filter { it.stop > now }.distinctBy { it.start }.sortedBy { it.start }
               }
 
-              /** Every programme of the loaded days that ends after [from] (guide rows, includes the live one). */
-              fun timeline(ch: Channel, from: Long): List<Program> {
+              private val tlCache = HashMap<String, Pair<Int, List<Program>>>()
+
+              /**
+               * Clean, non-overlapping schedule of a channel (all loaded days). Header, guide and fullscreen all use it,
+               * so they can never disagree. Cached until the channel's EPG data changes.
+               */
+              fun fullTimeline(ch: Channel): List<Program> {
                   val days = daysLoaded(ch.id)
-                  val raw = ArrayList<Program>()
+                  var sig = days
+                  val lists = ArrayList<List<Program>>()
                   for (o in 0 until days) {
-                      epg["${ch.id}:$o"]?.let { raw.addAll(it) }
+                      val l = epg["${ch.id}:$o"]
+                      sig = sig * 31 + (if (l == null) 0 else System.identityHashCode(l))
+                      if (l != null) lists.add(l)
                   }
-                  val sorted = raw.filter { it.stop > from && it.stop > it.start }.distinctBy { it.start }.sortedBy { it.start }
-                  // Overlapping entries (a day file that disagrees with the next one): the EARLIER / current programme always
-                  // wins, a later entry is pushed to start where the earlier one ends (or dropped when it is fully covered).
-                  val res = ArrayList<Program>()
-                  for (q in sorted) {
-                      var p = q
-                      val last = res.lastOrNull()
-                      if (last != null && p.start < last.stop) {
-                          if (p.title == last.title) {
-                              res[res.size - 1] = last.copy(stop = maxOf(last.stop, p.stop))
-                              continue
-                          }
-                          if (p.stop <= last.stop) continue
-                          p = p.copy(start = last.stop)
-                      }
-                      res.add(p)
-                  }
+                  val c = tlCache[ch.id]
+                  if (c != null && c.first == sig) return c.second
+                  val res = normalizeEpg(lists.flatten())
+                  tlCache[ch.id] = Pair(sig, res)
                   return res
               }
+
+              /** Programmes that end after [from] (guide rows, includes the live one). */
+              fun timeline(ch: Channel, from: Long): List<Program> = fullTimeline(ch).filter { it.stop > from }
 
               /* ------------------------------------------------------------- channels */
 
@@ -1891,6 +1952,10 @@ jobs:
 
           import android.graphics.drawable.BitmapDrawable
           import android.view.KeyEvent
+          import androidx.compose.material3.AlertDialog
+          import androidx.compose.material3.TextButton
+          import androidx.compose.foundation.layout.heightIn
+          import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.material3.ProvideTextStyle
           import androidx.compose.runtime.CompositionLocalProvider
           import androidx.compose.ui.unit.Density
@@ -2788,7 +2853,20 @@ jobs:
                   } else {
                       all
                   }
-                  src.filter { (it.stop - base) / 60000f > lo && (it.start - base) / 60000f < hi }
+                  // safety net: whatever the data looks like, two blocks of a row can never overlap
+                  val out = ArrayList<Program>()
+                  var prevEnd = Long.MIN_VALUE
+                  for (p in src) {
+                      if ((p.stop - base) / 60000f <= lo || (p.start - base) / 60000f >= hi) {
+                          prevEnd = maxOf(prevEnd, p.stop)
+                          continue
+                      }
+                      val st = maxOf(p.start, prevEnd)
+                      if (p.stop <= st) continue
+                      out.add(if (st != p.start) p.copy(start = st) else p)
+                      prevEnd = p.stop
+                  }
+                  out
               }
               val liveStart = shown.firstOrNull { vm.now >= it.start && vm.now < it.stop }?.start ?: shown.firstOrNull()?.start
               val firstStart = all.firstOrNull()?.start ?: base
@@ -3067,6 +3145,8 @@ jobs:
 
           @Composable
           fun SettingsTab(vm: MainVM) {
+              var showDbg by remember { mutableStateOf(false) }
+              if (showDbg) EpgDebugDialog(vm) { showDbg = false }
               val mins = if (vm.expire > 0) ((vm.expire * 1000 - (vm.now + Http.jar.skew)) / 60_000L).coerceAtLeast(0) else -1L
               val t = vm.token
               val masked = "*".repeat((t.length - 4).coerceAtLeast(0)) + t.takeLast(4)
@@ -3094,6 +3174,10 @@ jobs:
                               GlassPill("$n%", vm.headerPct == n) { vm.updateHeader(n) }
                           }
                       }
+                  }
+                  Section("EPG data") {
+                      Text("Shows the raw schedule and the cleaned schedule of the playing channel (for checking wrong times).", color = Dim)
+                      GlassButton("Show EPG of playing channel") { showDbg = true }
                   }
                   Section("Player") {
                       OutlinedTextField(
@@ -3124,6 +3208,48 @@ jobs:
                       fontSize = 12.sp, color = Dim
                   )
               }
+          }
+
+
+          private val DBG_FMT = SimpleDateFormat("dd HH:mm", Locale.ENGLISH)
+
+          @Composable
+          fun EpgDebugDialog(vm: MainVM, onDismiss: () -> Unit) {
+              val ch = vm.current
+              val lines = remember(ch?.id, vm.now / 60_000L) {
+                  val out = ArrayList<String>()
+                  if (ch == null) {
+                      out.add("No channel playing")
+                  } else {
+                      out.add(ch.name + "  (id " + ch.id + ")")
+                      for (o in 0 until vm.daysLoaded(ch.id)) {
+                          val l = vm.epg["${ch.id}:$o"]
+                          out.add("")
+                          out.add("RAW day offset $o: " + (l?.size?.toString() ?: "not loaded"))
+                          l?.forEach { out.add(DBG_FMT.format(Date(it.start)) + " - " + DBG_FMT.format(Date(it.stop)) + "  " + it.title) }
+                      }
+                      out.add("")
+                      out.add("CLEANED schedule used by the app:")
+                      vm.fullTimeline(ch).forEach {
+                          out.add(DBG_FMT.format(Date(it.start)) + " - " + DBG_FMT.format(Date(it.stop)) + "  " + it.title)
+                      }
+                  }
+                  out
+              }
+              AlertDialog(
+                  onDismissRequest = onDismiss,
+                  containerColor = Color(0xF21A2030),
+                  shape = RoundedCornerShape(24.dp),
+                  title = { Text("EPG data") },
+                  text = {
+                      LazyColumn(Modifier.heightIn(max = 340.dp)) {
+                          items(lines) { l ->
+                              Text(l, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(vertical = 1.dp))
+                          }
+                      }
+                  },
+                  confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+              )
           }
           __SB_EOF__
 
