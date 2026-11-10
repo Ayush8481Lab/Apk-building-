@@ -155,31 +155,32 @@ jobs:
 
           import android.app.Activity
           import android.app.UiModeManager
+          import android.content.Context
           import android.content.res.Configuration
           import android.graphics.Color
           import android.graphics.Outline
           import android.graphics.Rect
           import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
           import android.graphics.drawable.GradientDrawable
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
           import android.text.TextUtils
-          import android.util.DisplayMetrics
           import android.util.TypedValue
           import android.view.*
+          import android.view.animation.DecelerateInterpolator
           import android.widget.*
           import androidx.media3.common.AudioAttributes
           import androidx.media3.common.MediaItem
           import androidx.media3.common.PlaybackException
           import androidx.media3.common.Player
+          import androidx.media3.common.VideoSize
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.recyclerview.widget.LinearLayoutManager
           import androidx.recyclerview.widget.LinearSmoothScroller
           import androidx.recyclerview.widget.RecyclerView
           import com.bumptech.glide.Glide
-          import org.json.JSONObject
-          import android.graphics.drawable.Drawable
           import com.bumptech.glide.Priority
           import com.bumptech.glide.load.DataSource
           import com.bumptech.glide.load.DecodeFormat
@@ -187,18 +188,20 @@ jobs:
           import com.bumptech.glide.load.engine.GlideException
           import com.bumptech.glide.request.RequestListener
           import com.bumptech.glide.request.target.Target
-          import android.content.Context
-          import androidx.media3.common.VideoSize
-          import java.util.concurrent.LinkedBlockingDeque
-          import java.util.concurrent.ConcurrentHashMap
           import okhttp3.ConnectionPool
           import okhttp3.Dispatcher
           import okhttp3.OkHttpClient
           import okhttp3.Request
-          import java.util.concurrent.TimeUnit
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
           import java.util.concurrent.Callable
+          import java.util.concurrent.ConcurrentHashMap
           import java.util.concurrent.Executors
           import java.util.concurrent.Future
+          import java.util.concurrent.LinkedBlockingDeque
+          import java.util.concurrent.TimeUnit
           import kotlin.math.abs
           import kotlin.math.max
           import kotlin.math.min
@@ -217,8 +220,8 @@ jobs:
           )
 
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
-          class Season(val id: String, val title: String, val count: Int)
-          class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int)
+          class Season(val id: String, val title: String, val count: Int, val num: Int, val air: Long)
+          class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
 
           object Net {
               val client: OkHttpClient = OkHttpClient.Builder()
@@ -257,6 +260,25 @@ jobs:
           // CDN resizing: small + eco quality = much faster
           fun img(u: String?, w: Int): String? =
               if (u.isNullOrBlank()) null else u + (if (u.contains("?")) "&" else "?") + "h=auto&w=" + w + "&q=eco"
+
+          // safe string getter: null when missing / JSON null / blank
+          fun JSONObject.str(k: String): String? {
+              if (!has(k) || isNull(k)) return null
+              val v = optString(k, "")
+              return if (v.isBlank() || v == "null") null else v
+          }
+
+          fun fmtDur(sec: Int): String {
+              if (sec <= 0) return ""
+              val h = sec / 3600
+              val m = (sec % 3600) / 60
+              return if (h > 0) "${h}h ${m}m" else "$m mins"
+          }
+
+          fun fmtDate(ms: Long, withYear: Boolean): String {
+              if (ms <= 0L) return ""
+              return SimpleDateFormat(if (withYear) "dd MMM yyyy" else "dd MMM", Locale.ENGLISH).format(Date(ms))
+          }
 
           // ONE background thread, downloads to disk only (no bitmaps in RAM), waits while the visible banner loads
           object Prefetch {
@@ -308,49 +330,48 @@ jobs:
               } catch (e: Exception) { null }
           }
 
-          // handles CONTENT_ITEM and LAUNCHER_ITEM (name-png + description fallback from editorialMetadata)
+          // Lenient parser: CONTENT_ITEM, LAUNCHER_ITEM and any other slide type that has a title or image.
+          // Title image priority: masthead_logo -> masthead_logo_v1 -> launcher_logo
+          // Description priority: shortDescription -> launcher_short_description -> longDescription
           fun parseItem(o: JSONObject): Item? {
-              val layout = o.optString("layout")
-              if (layout != "CONTENT_ITEM" && layout != "LAUNCHER_ITEM") return null
+              val low = o.optString("layout").lowercase()
+              if (low.startsWith("ad_") || low.contains("template") || low.contains("promotion")) return null
               val m = o.optJSONObject("metadata") ?: JSONObject()
               val ed = o.optJSONObject("editorialMetadata") ?: JSONObject()
               val am = o.optJSONObject("assetMetadata") ?: JSONObject()
               val e = m.optJSONObject("emfAttributes") ?: JSONObject()
               val ae = am.optJSONObject("emfAttributes") ?: JSONObject()
-              fun s(k: String): String? = e.optString(k, "").ifBlank { ae.optString(k, "") }.ifBlank { null }
-              fun ev(k: String): String? = ed.optString(k, "").ifBlank { null }
+              fun s(k: String): String? = e.str(k) ?: ae.str(k)
+              fun ev(k: String): String? = ed.str(k)
 
-              var title = m.optString("title")
-              if (title.isBlank()) title = am.optString("title")
-              if (title.isBlank()) title = ed.optString("card_name")
+              val title = m.str("title") ?: am.str("title") ?: ev("card_name") ?: ""
+              val landscape = s("thumbnail") ?: s("landscape_thumb") ?: ev("landscape_image")
+              val portrait = s("portrait_thumb") ?: ev("poster") ?: ev("mweb_poster")
+              val bgU = s("tv_background_image") ?: bgFromJson(ev("poster_background")) ?: s("detail_cover_bg_V2")
+              val spotU = s("mweb_spotlight")
+              if (title.isBlank() && landscape == null && portrait == null && bgU == null && spotU == null) return null
 
-              val cid = if (am.has("contentId")) am.optString("contentId") else m.optString("contentId")
-              val id = m.optString("contentId").ifBlank { o.optString("id") }
+              val cid = am.str("contentId") ?: m.str("contentId") ?: o.optString("id")
+              val id = m.str("contentId") ?: o.optString("id")
 
-              val pv = trailerFrom(o)
               val parts = ArrayList<String>()
               s("IMDB")?.let { parts.add("IMDb $it") }
-              (s("region_of_origin") ?: m.optString("language")).takeIf { it.isNotBlank() }?.let { parts.add(it) }
+              (s("region_of_origin") ?: m.str("language"))?.let { parts.add(it) }
               m.optJSONArray("genres")?.optString(0)?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
 
-              val desc = m.optString("shortDescription").ifBlank { ev("launcher_short_description") ?: "" }
-              return Item(
-                  id, title,
-                  s("portrait_thumb") ?: ev("poster") ?: ev("mweb_poster"),
-                  s("thumbnail") ?: s("landscape_thumb") ?: ev("landscape_image"),
-                  s("tv_background_image") ?: bgFromJson(ev("poster_background")),
-                  s("masthead_logo_v1") ?: s("masthead_logo") ?: ev("launcher_logo"),
-                  parts.joinToString(" • "), desc, pv, s("mweb_spotlight"), cid
-              )
+              val desc = m.str("shortDescription") ?: ev("launcher_short_description") ?: m.str("longDescription") ?: ""
+              val logoU = s("masthead_logo") ?: s("masthead_logo_v1") ?: ev("launcher_logo")
+              return Item(id, title, portrait, landscape, bgU, logoU, parts.joinToString(" • "), desc, trailerFrom(o), spotU, cid)
           }
 
           fun parseEp(o: JSONObject?): Ep? {
               if (o == null) return null
               val m = o.optJSONObject("metadata") ?: return null
               val e = m.optJSONObject("emfAttributes") ?: JSONObject()
-              val thumb = e.optString("thumbnail", "").ifBlank { e.optString("landscape_thumb", "") }.ifBlank { null }
-              val title = m.optString("episodeTitle").ifBlank { m.optString("title") }
-              return Ep(m.optString("contentId"), title, m.optInt("episodeNumber"), m.optString("shortDescription"), thumb, m.optInt("duration"))
+              val thumb = e.str("thumbnail") ?: e.str("landscape_thumb")
+              val title = m.str("episodeTitle") ?: m.str("title") ?: ""
+              val desc = m.str("shortDescription") ?: m.str("longDescription") ?: ""
+              return Ep(m.optString("contentId"), title, m.optInt("episodeNumber"), desc, thumb, m.optInt("duration"), m.optLong("originalAirDate"))
           }
 
           class MainActivity : Activity() {
@@ -360,10 +381,12 @@ jobs:
               private fun u(v: Int) = (v * W / 1280f).toInt()
               private fun tx(t: TextView, size: Float) = t.setTextSize(TypedValue.COMPLEX_UNIT_PX, size * W / 1280f)
 
+              // ---- home
               private lateinit var root: FrameLayout
               private lateinit var content: FrameLayout
               private lateinit var bg: ImageView
               private lateinit var videoView: TextureView
+              private lateinit var videoBox: FrameLayout
               private lateinit var info: LinearLayout
               private lateinit var logo: ImageView
               private lateinit var titleTv: TextView
@@ -373,6 +396,8 @@ jobs:
               private lateinit var status: TextView
               private lateinit var remote: LinearLayout
               private lateinit var chip: TextView
+              private lateinit var side: LinearLayout
+              private lateinit var brand: TextView
               private lateinit var rowAdapter: RowAdapter
               private val tabViews = ArrayList<ImageView>()
               private val tabNames = listOf("Search", "Home", "Shows", "Movies", "Sports", "Settings")
@@ -386,45 +411,54 @@ jobs:
               private var trailerRun: Runnable? = null
               private var advanceRun: Runnable? = null
               private var revealed = false
-              private var boxW = 0; private var boxH = 0
-              private lateinit var videoBox: FrameLayout
               private var heroToken = 0
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
               private var logoW = 0; private var logoH = 0; private var bgW = 1280; private var bgH = 720
-              private var epW = 0; private var epH = 0
+
+              // trailer box sizes: home = 1.25x the old size, detail = 1.5x, both stuck to the top-right edge
+              private var homeBoxW = 0; private var homeBoxH = 0
+              private var detBoxW = 0; private var detBoxH = 0
+              private var curBoxW = 0; private var curBoxH = 0
 
               // spotlight loop / row focus tracking
               private var curRow = -1
               private var curPos = 0
-              private var spotRv: RecyclerView? = null
               private var spotLoopOn = false
               private val trailerCache = ConcurrentHashMap<String, String>()
 
-              // which surface the trailer is currently drawn on (home or detail)
+              // surface the trailer is currently drawn on (home or detail)
               private lateinit var curBox: FrameLayout
               private lateinit var curVideo: TextureView
               private lateinit var curBg: ImageView
 
-              // detail page
+              // ---- detail
               private lateinit var detail: FrameLayout
+              private lateinit var heroLayer: FrameLayout
+              private lateinit var epLayer: FrameLayout
               private lateinit var dBg: ImageView
               private lateinit var dBox: FrameLayout
               private lateinit var dVideo: TextureView
               private lateinit var dLogo: ImageView
               private lateinit var dTitle: TextView
+              private lateinit var dTag: TextView
               private lateinit var dMeta: TextView
               private lateinit var dDesc: TextView
-              private lateinit var dSeasonScroll: HorizontalScrollView
-              private lateinit var dSeasonRow: LinearLayout
-              private lateinit var dEpLabel: TextView
+              private lateinit var dWatch: TextView
+              private lateinit var dPlus: TextView
+              private lateinit var dHint: TextView
+              private lateinit var epTab: TextView
+              private lateinit var sScroll: ScrollView
+              private lateinit var sCol: LinearLayout
               private lateinit var dEpRv: RecyclerView
               private lateinit var dStatus: TextView
+              private lateinit var epStatus: TextView
               private lateinit var epAdapter: EpAdapter
               private val chips = ArrayList<TextView>()
               private val seasons = ArrayList<Season>()
               private val eps = ArrayList<Ep>()
               private var inDetail = false
+              private var epMode = false
               private var detailToken = 0
               private var detailTrailerUrl: String? = null
               private var curSeason = -1
@@ -432,12 +466,19 @@ jobs:
               private var epLoading = false
               private var epHasMore = true
               private var epToken = 0
+              private var wantEpFocus = false
+              private var latestEp: Ep? = null
+              private var selRun: Runnable? = null
               private var lastCard: View? = null
+              private var epImgW = 0; private var epImgH = 0; private var seasonColW = 0
 
               // identical options for preload + real load => disk/memory cache hit, downsampled decode
               private fun cardReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).centerCrop()
                   .format(DecodeFormat.PREFER_RGB_565).diskCacheStrategy(DiskCacheStrategy.ALL)
               private fun bgReq(url: String?) = Glide.with(this).load(url).override(bgW, bgH).centerCrop()
+                  .diskCacheStrategy(DiskCacheStrategy.ALL)
+              private fun bgBigReq(url: String?) = Glide.with(this).load(url)
+                  .override(min(W, 1800), min(W, 1800) * 9 / 16).centerCrop()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
               private fun logoReq(url: String?) = Glide.with(this).load(url).override(logoW, logoH).fitCenter()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
@@ -462,8 +503,11 @@ jobs:
                   rvH = rowH + titleH + padV / 2          // one full row + ONLY the next row's title
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
                   bgW = min(W, 1280); bgH = bgW * 9 / 16
-                  boxW = (W * 0.67f).toInt(); boxH = (H * 0.725f).toInt()   // trailer area
-                  epH = (H * 0.21f).toInt(); epW = epH * 16 / 9
+                  homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
+                  detBoxW = (W * 0.67f * 1.5f).toInt(); detBoxH = (H * 0.725f * 1.5f).toInt()
+                  curBoxW = homeBoxW; curBoxH = homeBoxH
+                  epImgW = (W * 0.2f).toInt(); epImgH = epImgW * 9 / 16
+                  seasonColW = (W * 0.2f).toInt()
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -493,11 +537,11 @@ jobs:
                   bg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
                   content.addView(bg, lp(-1, -1))
 
-                  // trailer plays ONLY inside this box (right side, above the thumbnail strip)
+                  // trailer: 1.25x, stuck to the top-right edge
                   videoBox = FrameLayout(this).apply { alpha = 0f; visibility = View.GONE }
                   videoView = TextureView(this)
-                  videoBox.addView(videoView, lp(boxW, boxH, Gravity.CENTER))
-                  content.addView(videoBox, lp(boxW, boxH, Gravity.TOP or Gravity.END))
+                  videoBox.addView(videoView, lp(homeBoxW, homeBoxH, Gravity.CENTER))
+                  content.addView(videoBox, lp(homeBoxW, homeBoxH, Gravity.TOP or Gravity.END))
                   curBox = videoBox; curVideo = videoView; curBg = bg
 
                   val left = View(this).apply {
@@ -516,25 +560,30 @@ jobs:
                   titleTv = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
                   }
-                  tx(titleTv, 34f)
-                  metaTv = TextView(this).apply { setTextColor(Color.parseColor("#E0E0E0")); typeface = Typeface.DEFAULT_BOLD }
-                  tx(metaTv, 13f)
+                  tx(titleTv, 40f)
+                  metaTv = TextView(this).apply { setTextColor(Color.parseColor("#E8E8E8")); typeface = Typeface.DEFAULT_BOLD }
+                  tx(metaTv, 16f)
                   descTv = TextView(this).apply {
-                      setTextColor(Color.parseColor("#D0D0D8")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+                      setTextColor(Color.parseColor("#DADAE2")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                   }
-                  tx(descTv, 14f)
+                  tx(descTv, 17f)
                   info.addView(logo, LinearLayout.LayoutParams(logoH * 16 / 9, logoH))
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
                   content.addView(info, lp((W * 0.42).toInt(), -2).apply { leftMargin = u(125); topMargin = (H * 0.06).toInt() })
 
-                  rowRv = RecyclerView(this).apply {
+                  // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll
+                  rowRv = object : RecyclerView(this@MainActivity) {
+                      override fun requestChildRectangleOnScreen(child: View, rect: Rect, immediate: Boolean): Boolean = false
+                  }.apply {
                       layoutManager = LinearLayoutManager(this@MainActivity)
                       clipChildren = false; clipToPadding = false
                       itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
+                      setHasFixedSize(true)
+                      setItemViewCacheSize(4)
                       setPadding(0, 0, 0, rvH - rowH)
                   }
                   rowAdapter = RowAdapter()
@@ -551,7 +600,7 @@ jobs:
                   root.addView(status, lp(-1, -2, Gravity.CENTER))
 
                   // sidebar
-                  val side = LinearLayout(this).apply {
+                  side = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
                       background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                           intArrayOf(Color.argb(230, 0, 0, 0), Color.argb(0, 0, 0, 0)))
@@ -571,7 +620,7 @@ jobs:
                   }
                   root.addView(side, lp(u(76), -1))
 
-                  val brand = TextView(this).apply {
+                  brand = TextView(this).apply {
                       text = "liv"; setTextColor(Color.parseColor("#FFC107")); typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
                   }
                   tx(brand, 26f)
@@ -580,71 +629,156 @@ jobs:
                   buildRemote()
               }
 
+              // pill button used on the detail page
+              private fun heroBtn(label: String, onClick: () -> Unit): TextView {
+                  val t = TextView(this).apply {
+                      text = label; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                      setPadding(u(26), u(12), u(26), u(12))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  tx(t, 17f)
+                  fun st() {
+                      val f = t.isFocused
+                      t.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      t.background = GradientDrawable().apply {
+                          cornerRadius = u(10).toFloat()
+                          setColor(if (f) Color.WHITE else Color.argb(110, 120, 124, 140))
+                      }
+                  }
+                  st()
+                  t.setOnFocusChangeListener { _, _ -> st() }
+                  t.setOnClickListener { onClick() }
+                  return t
+              }
+
+              private fun styleEpTab() {
+                  val f = epTab.isFocused
+                  epTab.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                  epTab.background = GradientDrawable().apply {
+                      cornerRadius = u(24).toFloat()
+                      if (f) setColor(Color.WHITE) else { setColor(Color.TRANSPARENT); setStroke(u(2), Color.WHITE) }
+                  }
+              }
+
               private fun buildDetail() {
                   val dark = Color.argb(255, 5, 6, 12)
                   detail = FrameLayout(this).apply { setBackgroundColor(dark); visibility = View.GONE }
-                  dBg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
-                  detail.addView(dBg, lp(-1, -1))
 
+                  // ---------- hero state: background / trailer / info / buttons
+                  heroLayer = FrameLayout(this)
+                  dBg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                  heroLayer.addView(dBg, lp(-1, -1))
+
+                  // trailer: 1.5x, stuck to the top-right edge
                   dBox = FrameLayout(this).apply { alpha = 0f; visibility = View.GONE }
                   dVideo = TextureView(this)
-                  dBox.addView(dVideo, lp(boxW, boxH, Gravity.CENTER))
-                  detail.addView(dBox, lp(boxW, boxH, Gravity.TOP or Gravity.END))
+                  dBox.addView(dVideo, lp(detBoxW, detBoxH, Gravity.CENTER))
+                  heroLayer.addView(dBox, lp(detBoxW, detBoxH, Gravity.TOP or Gravity.END))
 
                   val left = View(this).apply {
                       background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                          intArrayOf(dark, Color.argb(235, 5, 6, 12), Color.argb(0, 5, 6, 12)))
+                          intArrayOf(dark, Color.argb(225, 5, 6, 12), Color.argb(0, 5, 6, 12)))
                   }
-                  detail.addView(left, lp((W * 0.62).toInt(), -1))
+                  heroLayer.addView(left, lp((W * 0.62).toInt(), -1))
                   val bottom = View(this).apply {
                       background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
                           intArrayOf(dark, Color.argb(240, 5, 6, 12), Color.argb(0, 5, 6, 12)))
                   }
-                  detail.addView(bottom, lp(-1, (H * 0.62).toInt(), Gravity.BOTTOM))
+                  heroLayer.addView(bottom, lp(-1, (H * 0.45).toInt(), Gravity.BOTTOM))
 
                   val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                   dLogo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
                   dTitle = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
                   }
-                  tx(dTitle, 34f)
-                  dMeta = TextView(this).apply { setTextColor(Color.parseColor("#E0E0E0")); typeface = Typeface.DEFAULT_BOLD }
-                  tx(dMeta, 13f)
+                  tx(dTitle, 40f)
+                  dTag = TextView(this).apply {
+                      setTextColor(Color.parseColor("#4FC3F7")); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
+                  }
+                  tx(dTag, 16f)
+                  dMeta = TextView(this).apply { setTextColor(Color.parseColor("#E8E8E8")); typeface = Typeface.DEFAULT_BOLD }
+                  tx(dMeta, 16f)
                   dDesc = TextView(this).apply {
-                      setTextColor(Color.parseColor("#D0D0D8")); maxLines = 4; ellipsize = TextUtils.TruncateAt.END
+                      setTextColor(Color.parseColor("#DADAE2")); maxLines = 2; ellipsize = TextUtils.TruncateAt.END
                   }
-                  tx(dDesc, 14f)
-                  dSeasonScroll = HorizontalScrollView(this).apply {
-                      isHorizontalScrollBarEnabled = false; isFocusable = false
-                      overScrollMode = View.OVER_SCROLL_NEVER; visibility = View.GONE
+                  tx(dDesc, 17f)
+                  dWatch = heroBtn("▶  Watch Latest Episode") {
+                      Toast.makeText(this, "Play: " + (latestEp?.title ?: "latest episode"), Toast.LENGTH_SHORT).show()
                   }
-                  dSeasonRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  dSeasonScroll.addView(dSeasonRow)
+                  dPlus = heroBtn("+") {
+                      Toast.makeText(this, "Added to watchlist", Toast.LENGTH_SHORT).show()
+                  }
+                  val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  btnRow.addView(dWatch, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(12) })
+                  btnRow.addView(dPlus, LinearLayout.LayoutParams(-2, -2))
+
                   dInfo.addView(dLogo, LinearLayout.LayoutParams(logoH * 16 / 9, logoH))
                   dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
+                  dInfo.addView(dTag, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
-                  dInfo.addView(dSeasonScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(14) })
-                  detail.addView(dInfo, lp((W * 0.42).toInt(), -2).apply { leftMargin = u(125); topMargin = (H * 0.06).toInt() })
+                  dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
+                  heroLayer.addView(dInfo, lp((W * 0.5f).toInt(), -2).apply { leftMargin = u(100); topMargin = (H * 0.07f).toInt() })
 
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  dEpLabel = TextView(this).apply {
-                      text = "Episodes"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                      gravity = Gravity.CENTER_VERTICAL; setPadding(u(46), 0, 0, 0)
+                  dHint = TextView(this).apply {
+                      text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
                   }
-                  tx(dEpLabel, 17f)
+                  tx(dHint, 17f)
+                  heroLayer.addView(dHint, lp(-2, -2, Gravity.BOTTOM or Gravity.START).apply {
+                      leftMargin = u(100); bottomMargin = (H * 0.05f).toInt()
+                  })
+                  detail.addView(heroLayer, lp(-1, -1))
+
+                  // ---------- episodes state: tab pill, divider, [bundle column] + vertical episode list
+                  epLayer = FrameLayout(this).apply {
+                      setBackgroundColor(Color.argb(255, 12, 13, 20)); visibility = View.GONE
+                  }
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  epTab = TextView(this).apply {
+                      text = "Episodes"; typeface = Typeface.DEFAULT_BOLD
+                      setPadding(u(22), u(8), u(22), u(8))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  tx(epTab, 18f)
+                  styleEpTab()
+                  epTab.setOnFocusChangeListener { _, _ -> styleEpTab() }
+
+                  val divider = View(this).apply { setBackgroundColor(Color.argb(150, 255, 255, 255)) }
+
+                  sScroll = ScrollView(this).apply {
+                      isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; visibility = View.GONE
+                  }
+                  sCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  sScroll.addView(sCol, FrameLayout.LayoutParams(-1, -2))
+
                   dEpRv = RecyclerView(this).apply {
-                      layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
-                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      layoutManager = LinearLayoutManager(this@MainActivity)
+                      clipToPadding = false; itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
-                      setPadding(u(46), padV, u(60), padV)
+                      setPadding(0, padV, 0, padV * 4)
                   }
                   epAdapter = EpAdapter()
                   dEpRv.adapter = epAdapter
-                  col.addView(dEpLabel, LinearLayout.LayoutParams(-1, titleH))
-                  col.addView(dEpRv, LinearLayout.LayoutParams(-1, epH + 2 * padV))
-                  detail.addView(col, lp(-1, -2, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.01f).toInt() })
+
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  body.addView(sScroll, LinearLayout.LayoutParams(seasonColW, -1).apply { rightMargin = u(24) })
+                  body.addView(dEpRv, LinearLayout.LayoutParams(0, -1, 1f))
+
+                  col.addView(epTab, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(96); topMargin = (H * 0.06f).toInt() })
+                  col.addView(divider, LinearLayout.LayoutParams(-1, max(1, u(2))).apply {
+                      leftMargin = u(96); rightMargin = u(60); topMargin = u(14)
+                  })
+                  col.addView(body, LinearLayout.LayoutParams(-1, 0, 1f).apply { leftMargin = u(96); rightMargin = u(40); topMargin = u(10) })
+                  epLayer.addView(col, lp(-1, -1))
+
+                  epStatus = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE }
+                  tx(epStatus, 16f)
+                  epLayer.addView(epStatus, lp(-2, -2, Gravity.CENTER))
+                  epLayer.translationY = H.toFloat()
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  detail.addView(epLayer, lp(-1, -1))
 
                   dStatus = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER; text = "Loading…" }
                   tx(dStatus, 16f)
@@ -749,42 +883,53 @@ jobs:
                   if (tv) { remote.visibility = View.GONE; chip.visibility = View.GONE }
               }
 
-              // up/down on the Shows page: always land on the FIRST card of the next / previous row
+              // ---------------------------------------------------------------- Navigation
               private fun rowNavActive(): Boolean {
+                  if (inDetail || tab != 2 || content.visibility != View.VISIBLE || curRow < 0) return false
                   val f = currentFocus ?: return false
-                  return !inDetail && tab == 2 && content.visibility == View.VISIBLE &&
-                          tabViews.none { it === f } && curRow >= 0
+                  return tabViews.none { it === f }
               }
 
+              // Shows page: up/down always lands on the FIRST card of the next / previous row
               private fun moveRow(delta: Int) {
                   val target = curRow + delta
                   if (target < 0 || target >= rows.size) return
-                  focusRowFirst(target, 12)
+                  focusRowFirst(target, 14)
               }
 
               private fun focusRowFirst(target: Int, tries: Int) {
-                  rowRv.scrollToPosition(target)
-                  ui.postDelayed({
-                      val rvh = rowRv.findViewHolderForAdapterPosition(target) as? RowVH
-                      val first = rvh?.rv?.findViewHolderForAdapterPosition(0)?.itemView
-                      if (first != null) {
-                          first.requestFocus()
-                      } else {
-                          rvh?.rv?.scrollToPosition(0)
-                          if (tries > 0) focusRowFirst(target, tries - 1)
-                      }
-                  }, 80)
+                  val rvh = rowRv.findViewHolderForAdapterPosition(target) as? RowVH
+                  if (rvh == null) {
+                      if (tries == 14) smoothVertical(target)       // row not laid out yet: glide there, then focus
+                      if (tries > 0) ui.postDelayed({ focusRowFirst(target, tries - 1) }, 60)
+                      return
+                  }
+                  val first = rvh.rv.findViewHolderForAdapterPosition(0)?.itemView
+                  if (first != null) first.requestFocus()
+                  else {
+                      rvh.rv.scrollToPosition(0)
+                      if (tries > 0) ui.postDelayed({ focusRowFirst(target, tries - 1) }, 40)
+                  }
+              }
+
+              // detail page: down = open episodes, up (from the Episodes tab) = back to the trailer view
+              private fun handleVertical(dir: Int): Boolean {
+                  if (inDetail) {
+                      if (!epMode && dir == View.FOCUS_DOWN) { showEpisodes(); return true }
+                      if (epMode && dir == View.FOCUS_UP && currentFocus === epTab) { hideEpisodes(); return true }
+                      return false
+                  }
+                  if (rowNavActive()) { moveRow(if (dir == View.FOCUS_UP) -1 else 1); return true }
+                  return false
               }
 
               private fun move(dir: Int) {
-                  if ((dir == View.FOCUS_UP || dir == View.FOCUS_DOWN) && rowNavActive()) {
-                      moveRow(if (dir == View.FOCUS_UP) -1 else 1)
-                      return
-                  }
+                  if ((dir == View.FOCUS_UP || dir == View.FOCUS_DOWN) && handleVertical(dir)) return
                   val f = currentFocus
                   if (f == null) {
                       if (inDetail) {
-                          (dEpRv.getChildAt(0) ?: chips.firstOrNull())?.requestFocus()
+                          val t: View? = if (epMode) dEpRv.getChildAt(0) else dWatch
+                          t?.requestFocus()
                       } else rowRv.getChildAt(0)?.requestFocus()
                       return
                   }
@@ -792,10 +937,13 @@ jobs:
               }
 
               override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
-                  if (ev.action == KeyEvent.ACTION_DOWN &&
-                      (ev.keyCode == KeyEvent.KEYCODE_DPAD_UP || ev.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) && rowNavActive()) {
-                      moveRow(if (ev.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
-                      return true
+                  if (ev.action == KeyEvent.ACTION_DOWN) {
+                      val d = when (ev.keyCode) {
+                          KeyEvent.KEYCODE_DPAD_UP -> View.FOCUS_UP
+                          KeyEvent.KEYCODE_DPAD_DOWN -> View.FOCUS_DOWN
+                          else -> 0
+                      }
+                      if (d != 0 && handleVertical(d)) return true
                   }
                   return super.dispatchKeyEvent(ev)
               }
@@ -833,7 +981,10 @@ jobs:
 
               @Suppress("DEPRECATION")
               override fun onBackPressed() {
-                  if (inDetail) { closeDetail(true); return }
+                  if (inDetail) {
+                      if (epMode) hideEpisodes() else closeDetail(true)
+                      return
+                  }
                   val f = currentFocus
                   if (tab == 2 && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()
                   else super.onBackPressed()
@@ -860,19 +1011,30 @@ jobs:
                           if (spot) { if (gotSpot) continue; gotSpot = true }
                           val uri = c.optJSONObject("retrieveItems")?.optString("uri").orEmpty()
                           if (uri.isEmpty()) continue
-                          val title = c.optJSONObject("metadata")?.optString("title").orEmpty()
+                          val cm = c.optJSONObject("metadata")
+                          val title = cm?.str("title") ?: cm?.str("label") ?: c.str("title")
+                              ?: c.optJSONObject("editorialMetadata")?.str("title") ?: ""
                           val url = BASE + uri + (if (spot) "" else "&from=0&to=15")
                           jobs.add(Job(title, spot, Api.pool.submit(Callable<JSONObject?> { Api.get(url) })))
                       }
                       for (j in jobs) {
                           val res = try { j.f.get() } catch (e: Exception) { null }
-                          val arr = res?.optJSONObject("resultObj")?.optJSONArray("containers")
+                          val ro = res?.optJSONObject("resultObj")
+                          val arr = ro?.optJSONArray("containers")
                           val items = ArrayList<Item>()
                           if (arr != null) for (k in 0 until arr.length()) {
-                              arr.optJSONObject(k)?.let { parseItem(it) }?.let { items.add(it) }
+                              val c = arr.optJSONObject(k) ?: continue
+                              parseItem(c)?.let { items.add(it) }
+                              if (j.spot) {
+                                  val dual = c.optJSONObject("editorialMetadata")?.optJSONArray("dual_spotlight_items")
+                                  if (dual != null) for (d in 0 until dual.length()) {
+                                      dual.optJSONObject(d)?.let { parseItem(it) }?.let { items.add(it) }
+                                  }
+                              }
                           }
                           if (items.isEmpty()) continue
-                          val row = Row(j.title, j.spot, items)
+                          val title = if (j.title.isNotBlank()) j.title else (ro?.str("trayTitle") ?: "")
+                          val row = Row(title, j.spot, items)
                           ui.post { addRow(row) }
                       }
                       ui.post { if (rows.isEmpty()) status.text = "No rows returned\n" + Api.lastError }
@@ -895,10 +1057,10 @@ jobs:
                   }, 300)
               }
 
-              // ---------------------------------------------------------------- Hero + trailer
+              // ---------------------------------------------------------------- Hero + trailer (home)
               private fun heroUrl(i: Item) = img(i.bg ?: i.spot ?: i.landscape, 1500)
               private fun cardUrl(spot: Boolean, i: Item) =
-                  if (spot) img(i.spot ?: i.landscape ?: i.portrait, 700) else img(i.portrait ?: i.landscape, 700)
+                  if (spot) img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, 700) else img(i.portrait ?: i.landscape ?: i.bg, 700)
               private fun prefetchHero(i: Item, first: Boolean = false) {
                   Prefetch.add(heroUrl(i), first); Prefetch.add(i.logo, first)
               }
@@ -926,9 +1088,14 @@ jobs:
                   if (pos == lastSnap) return
                   lastSnap = pos
                   for (d in 1..2) rows.getOrNull(pos + d)?.let { prefetchRow(it, 8) }   // next rows, in order, after banner
+                  smoothVertical(pos)
+              }
+
+              // vertical row scroll: fixed ~300ms decelerate glide
+              private fun smoothVertical(pos: Int) {
                   val s = object : LinearSmoothScroller(this) {
                       override fun getVerticalSnapPreference() = SNAP_TO_START
-                      override fun calculateSpeedPerPixel(dm: DisplayMetrics) = 45f / dm.densityDpi
+                      override fun calculateTimeForDeceleration(dx: Int): Int = 300
                   }
                   s.targetPosition = pos
                   rowRv.layoutManager?.startSmoothScroll(s)
@@ -1029,7 +1196,7 @@ jobs:
               }
 
               private fun focusSpot(pos: Int, tries: Int) {
-                  val rv = spotRv ?: return
+                  val rv = (rowRv.findViewHolderForAdapterPosition(curRow) as? RowVH)?.rv ?: return
                   rv.scrollToPosition(pos)
                   ui.postDelayed({
                       if (inDetail || !isSpotRow()) return@postDelayed
@@ -1051,9 +1218,9 @@ jobs:
                               override fun onVideoSizeChanged(videoSize: VideoSize) {
                                   if (videoSize.width == 0 || videoSize.height == 0) return
                                   val ar = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
-                                  var w = boxW
+                                  var w = curBoxW
                                   var h = (w / ar).toInt()
-                                  if (h < boxH) { h = boxH; w = (h * ar).toInt() }       // cover the marked area
+                                  if (h < curBoxH) { h = curBoxH; w = (h * ar).toInt() }       // cover the marked area
                                   curVideo.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
                               }
                               override fun onRenderedFirstFrame() {
@@ -1097,12 +1264,17 @@ jobs:
               override fun onStop() { super.onStop(); stopTrailer() }
               override fun onRestart() {
                   super.onRestart()
-                  if (inDetail) detailTrailerUrl?.let { schedulePlay(it, false) }
+                  if (inDetail) { if (!epMode) detailTrailerUrl?.let { schedulePlay(it, false) } }
                   else if (tab == 2) hero?.let { scheduleTrailer(it) }
               }
               override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
 
               // ---------------------------------------------------------------- Detail page
+              // spotlight items are not shows: they go straight to the player (hook: wire your playback API here)
+              private fun playItem(item: Item) {
+                  Toast.makeText(this, "Play: " + item.title, Toast.LENGTH_SHORT).show()
+              }
+
               private fun openDetail(item: Item, card: View) {
                   if (item.cid.isBlank()) {
                       Toast.makeText(this, item.title, Toast.LENGTH_SHORT).show(); return
@@ -1111,27 +1283,37 @@ jobs:
                   heroRun?.let { ui.removeCallbacks(it) }
                   heroToken++
                   stopTrailer(false)
-                  inDetail = true
+                  inDetail = true; epMode = false
                   val tok = ++detailToken
                   epToken++
-                  curBox = dBox; curVideo = dVideo; curBg = dBg
+                  curBox = dBox; curVideo = dVideo; curBg = dBg; curBoxW = detBoxW; curBoxH = detBoxH
                   content.visibility = View.GONE
                   status.visibility = View.GONE
+                  side.visibility = View.GONE; brand.visibility = View.GONE
                   detail.visibility = View.VISIBLE
+                  heroLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  epLayer.animate().cancel(); epLayer.visibility = View.GONE; epLayer.translationY = H.toFloat()
 
                   // instant preview from the list item
                   seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
-                  chips.clear(); dSeasonRow.removeAllViews(); dSeasonScroll.visibility = View.GONE
-                  dEpLabel.visibility = View.GONE; dEpRv.visibility = View.GONE
+                  sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
+                  epStatus.visibility = View.GONE
+                  dHint.visibility = View.GONE
                   curSeason = -1; epFrom = 0; epHasMore = true; epLoading = false
-                  detailTrailerUrl = null
+                  detailTrailerUrl = null; latestEp = null
                   dBg.animate().cancel(); dBg.alpha = 1f
+                  dBox.animate().cancel(); dBox.alpha = 0f; dBox.visibility = View.GONE
                   Glide.with(this).clear(dBg)
-                  bgReq(heroUrl(item)).into(dBg)
+                  bgBigReq(img(item.bg ?: item.landscape, 1800)).into(dBg)
                   showDetailLogo(item.logo, item.title)
+                  dTag.visibility = View.GONE
                   dMeta.text = item.meta
                   dDesc.text = item.desc
+                  dWatch.text = "▶  Watch Latest Episode"
                   dStatus.text = "Loading…"; dStatus.visibility = View.VISIBLE
+                  dWatch.requestFocus()
+                  ui.postDelayed({ if (inDetail && !epMode) dWatch.requestFocus() }, 200)
 
                   Thread {
                       val j = Api.get(DETAIL_URL + item.cid)
@@ -1150,6 +1332,12 @@ jobs:
                   }
               }
 
+              private fun setWatchLabel(ep: Ep) {
+                  latestEp = ep
+                  val d = fmtDate(ep.air, false)
+                  dWatch.text = "▶  Watch Latest Episode" + (if (d.isEmpty()) "" else "   $d")
+              }
+
               private fun bindDetail(j: JSONObject?, item: Item) {
                   val show = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
                   if (show == null) {
@@ -1158,69 +1346,92 @@ jobs:
                   }
                   val m = show.optJSONObject("metadata") ?: JSONObject()
                   val e = m.optJSONObject("emfAttributes") ?: JSONObject()
-                  fun s(k: String): String? = e.optString(k, "").ifBlank { null }
 
-                  val title = m.optString("title").ifBlank { item.title }
-                  val desc = m.optString("longDescription").ifBlank { m.optString("shortDescription") }.ifBlank { item.desc }
+                  val title = m.str("title") ?: item.title
+                  val desc = m.str("shortDescription") ?: m.str("longDescription") ?: item.desc
+
+                  // "Hindi • 2026 • U/A 7+ • 16 Episodes • Comedy, Game show"
                   val parts = ArrayList<String>()
-                  m.optString("year").takeIf { it.isNotBlank() }?.let { parts.add(it) }
-                  m.optString("languageLabel").takeIf { it.isNotBlank() }?.let { parts.add(it) }
+                  (m.str("languageLabel") ?: e.str("region_of_origin"))?.let { parts.add(it) }
+                  m.str("year")?.let { parts.add(it) }
+                  m.str("pcVodLabel")?.let { parts.add(it) }
+                  val sn = m.optInt("seasonCount")
+                  if (sn > 1) parts.add("$sn Seasons")
+                  val ec = m.optInt("episodeCount")
+                  if (ec > 0) parts.add("$ec Episodes")
                   m.optJSONArray("genres")?.let { g ->
                       val l = (0 until g.length()).map { k -> g.optString(k) }.filter { it.isNotBlank() }
                       if (l.isNotEmpty()) parts.add(l.joinToString(", "))
                   }
-                  m.optString("pcVodLabel").takeIf { it.isNotBlank() }?.let { parts.add(it) }
-
                   dMeta.text = parts.joinToString(" • ")
                   dDesc.text = desc
+                  val tag = e.str("highlight_text")
+                  if (tag != null) { dTag.text = tag; dTag.visibility = View.VISIBLE } else dTag.visibility = View.GONE
 
-                  // title image (name png): masthead_logo, fallback masthead_logo_v1, fallback list logo, else text
-                  val logoUrl = img(s("masthead_logo") ?: s("masthead_logo_v1"), 900) ?: item.logo
+                  // title image: masthead_logo -> masthead_logo_v1 -> (list item: launcher_logo) -> text
+                  val logoUrl = img(e.str("masthead_logo") ?: e.str("masthead_logo_v1"), 900) ?: item.logo
                   showDetailLogo(logoUrl, title)
 
                   // background image until the trailer starts
-                  val bgUrl = img(s("tv_background_image") ?: s("detail_cover_bg_V2") ?: s("thumbnail"), 1800)
-                  if (bgUrl != null) { Glide.with(this).clear(dBg); bgReq(bgUrl).into(dBg) }
+                  val bgUrl = img(e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail"), 1800)
+                  if (bgUrl != null) { Glide.with(this).clear(dBg); bgBigReq(bgUrl).into(dBg) }
 
-                  // seasons (bundles)
-                  seasons.clear()
+                  // seasons / bundles, newest first
+                  val tmp = ArrayList<Season>()
+                  var latest: Ep? = null
                   val sc = show.optJSONArray("containers")
                   if (sc != null) for (k in 0 until sc.length()) {
                       val c = sc.optJSONObject(k) ?: continue
                       if (c.optString("layout") != "BUNDLE_ITEM") continue
                       val sid = c.optString("id")
                       if (sid.isBlank()) continue
-                      val st = c.optJSONObject("metadata")?.optString("title").orEmpty().ifBlank { "Season " + (seasons.size + 1) }
-                      seasons.add(Season(sid, st, c.optInt("episodeCount")))
+                      val cm = c.optJSONObject("metadata")
+                      val st = cm?.str("title") ?: ("Season " + (tmp.size + 1))
+                      tmp.add(Season(sid, st, c.optInt("episodeCount"), cm?.optInt("season") ?: 0, cm?.optLong("originalAirDate") ?: 0L))
+                      // episodes embedded in the show response give us the latest episode date right away
+                      val inner = c.optJSONArray("containers")
+                      if (inner != null && inner.length() > 0) {
+                          val ep = parseEp(inner.optJSONObject(0))
+                          val cur = latest
+                          if (ep != null && (cur == null || ep.air > cur.air)) latest = ep
+                      }
                   }
+                  seasons.clear()
+                  seasons.addAll(tmp.sortedWith(compareByDescending<Season> { it.num }.thenByDescending { it.air }))
+                  latest?.let { setWatchLabel(it) }
                   dStatus.visibility = View.GONE
 
                   val trailer = trailerFrom(show)
                   detailTrailerUrl = trailer
-                  if (trailer != null) schedulePlay(trailer, false)
+                  if (trailer != null && !epMode) schedulePlay(trailer, false)
 
                   if (seasons.isEmpty()) return
-                  dEpLabel.visibility = View.VISIBLE; dEpRv.visibility = View.VISIBLE
-                  buildChips()
-                  selectSeason(seasons.size - 1)     // latest season first; change to 0 for first season
+                  dHint.visibility = View.VISIBLE
+                  buildSeasonCol()
+                  selectSeason(0, false)      // newest bundle first; list loads in the background
               }
 
-              private fun buildChips() {
-                  chips.clear(); dSeasonRow.removeAllViews()
-                  if (seasons.size <= 1) { dSeasonScroll.visibility = View.GONE; return }
-                  dSeasonScroll.visibility = View.VISIBLE
+              // left column of bundles (only when there is more than one bundle)
+              private fun buildSeasonCol() {
+                  chips.clear(); sCol.removeAllViews()
+                  if (seasons.size <= 1) { sScroll.visibility = View.GONE; return }
+                  sScroll.visibility = View.VISIBLE
                   for (i in seasons.indices) {
                       val c = TextView(this).apply {
                           text = seasons[i].title
-                          gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD
-                          setPadding(u(16), u(6), u(16), u(6))
+                          typeface = Typeface.DEFAULT_BOLD
+                          setTextColor(Color.WHITE)
+                          setPadding(u(18), u(12), u(18), u(12))
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
-                      tx(c, 13f)
-                      c.setOnFocusChangeListener { _, _ -> styleChip(i) }
-                      c.setOnClickListener { selectSeason(i) }
+                      tx(c, 17f)
+                      c.setOnFocusChangeListener { _, has -> styleChip(i); if (has) scheduleSelect(i) }
+                      c.setOnClickListener {
+                          selRun?.let { ui.removeCallbacks(it) }
+                          selectSeason(i, true)
+                      }
                       chips.add(c)
-                      dSeasonRow.addView(c, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
+                      sCol.addView(c, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = u(8) })
                   }
                   for (i in chips.indices) styleChip(i)
               }
@@ -1231,19 +1442,29 @@ jobs:
                   val sel = i == curSeason
                   v.setTextColor(if (f) Color.BLACK else Color.WHITE)
                   v.background = GradientDrawable().apply {
-                      cornerRadius = u(18).toFloat()
-                      setColor(if (f) Color.WHITE else if (sel) Color.argb(110, 255, 255, 255) else Color.argb(40, 255, 255, 255))
+                      cornerRadius = u(10).toFloat()
+                      setColor(if (f) Color.WHITE else if (sel) Color.argb(120, 200, 200, 210) else Color.TRANSPARENT)
                   }
               }
 
-              private fun selectSeason(i: Int) {
+              // focusing a bundle selects it after a short pause (so fast scrolling doesn't spam the API)
+              private fun scheduleSelect(i: Int) {
+                  selRun?.let { ui.removeCallbacks(it) }
+                  if (i == curSeason) return
+                  val r = Runnable { selectSeason(i, false) }
+                  selRun = r
+                  ui.postDelayed(r, 450)
+              }
+
+              private fun selectSeason(i: Int, grab: Boolean) {
                   if (i !in seasons.indices) return
                   curSeason = i
                   epToken++
                   eps.clear(); epAdapter.notifyDataSetChanged()
                   epFrom = 0; epHasMore = true; epLoading = false
+                  wantEpFocus = grab
                   for (k in chips.indices) styleChip(k)
-                  dStatus.text = "Loading episodes…"; dStatus.visibility = View.VISIBLE
+                  epStatus.text = "Loading episodes…"; epStatus.visibility = View.VISIBLE
                   loadEpisodes()
               }
 
@@ -1265,7 +1486,7 @@ jobs:
                           if (tok != epToken) return@post
                           epLoading = false
                           if (j == null) {
-                              if (eps.isEmpty()) dStatus.text = "Could not load episodes\n" + Api.lastError
+                              if (eps.isEmpty()) { epStatus.text = "Could not load episodes\n" + Api.lastError; epStatus.visibility = View.VISIBLE }
                               return@post
                           }
                           epFrom = from + EP_PAGE
@@ -1273,27 +1494,74 @@ jobs:
                           val start = eps.size
                           eps.addAll(list)
                           epAdapter.notifyItemRangeInserted(start, list.size)
-                          if (eps.isEmpty()) dStatus.text = "No episodes" else dStatus.visibility = View.GONE
-                          if (start == 0 && list.isNotEmpty()) focusFirstEp(12)
+                          if (eps.isEmpty()) { epStatus.text = "No episodes"; epStatus.visibility = View.VISIBLE }
+                          else epStatus.visibility = View.GONE
+                          if (start == 0 && list.isNotEmpty()) {
+                              if (curSeason == 0) setWatchLabel(list[0])
+                              if (epMode && wantEpFocus) { wantEpFocus = false; focusFirstEp(12) }
+                          }
                       }
                   }.start()
               }
 
               private fun focusFirstEp(tries: Int) {
                   ui.postDelayed({
-                      if (!inDetail) return@postDelayed
-                      val ok = dEpRv.getChildAt(0)?.requestFocus() ?: false
+                      if (!inDetail || !epMode) return@postDelayed
+                      val v = dEpRv.findViewHolderForAdapterPosition(0)?.itemView ?: dEpRv.getChildAt(0)
+                      val ok = v?.requestFocus() ?: false
                       if (!ok && tries > 0) focusFirstEp(tries - 1)
                   }, 200)
               }
 
+              private fun focusEpDefault() {
+                  wantEpFocus = false
+                  val first = dEpRv.findViewHolderForAdapterPosition(0)?.itemView ?: dEpRv.getChildAt(0)
+                  if (first != null) first.requestFocus()
+                  else if (eps.isEmpty()) { wantEpFocus = true; epTab.requestFocus() }
+                  else focusFirstEp(10)
+              }
+
+              // slide the episodes panel up (trailer view stays underneath, paused)
+              private fun showEpisodes() {
+                  if (epMode || seasons.isEmpty()) return
+                  epMode = true
+                  wantEpFocus = true
+                  stopTrailer(true)
+                  heroLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  epLayer.visibility = View.VISIBLE
+                  epLayer.animate().cancel()
+                  epLayer.translationY = H.toFloat()
+                  epLayer.animate().translationY(0f).setDuration(300).setInterpolator(DecelerateInterpolator()).start()
+                  if (eps.isEmpty()) loadEpisodes()
+                  ui.postDelayed({ if (inDetail && epMode) focusEpDefault() }, 200)
+              }
+
+              private fun hideEpisodes() {
+                  if (!epMode) return
+                  epMode = false
+                  selRun?.let { ui.removeCallbacks(it) }
+                  heroLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  epLayer.animate().cancel()
+                  epLayer.animate().translationY(H.toFloat()).setDuration(260).setInterpolator(DecelerateInterpolator())
+                      .withEndAction { if (!epMode) epLayer.visibility = View.GONE }.start()
+                  dWatch.requestFocus()
+                  detailTrailerUrl?.let { schedulePlay(it, false) }
+              }
+
               private fun closeDetail(refocus: Boolean) {
-                  inDetail = false
+                  inDetail = false; epMode = false
                   detailToken++; epToken++
+                  selRun?.let { ui.removeCallbacks(it) }
                   stopTrailer(false)
                   detail.visibility = View.GONE
+                  epLayer.animate().cancel(); epLayer.visibility = View.GONE; epLayer.translationY = H.toFloat()
+                  heroLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
                   content.visibility = View.VISIBLE
-                  curBox = videoBox; curVideo = videoView; curBg = bg
+                  curBox = videoBox; curVideo = videoView; curBg = bg; curBoxW = homeBoxW; curBoxH = homeBoxH
                   bg.animate().cancel(); bg.alpha = 1f
                   info.animate().cancel(); info.alpha = 1f
                   if (!refocus) return
@@ -1307,8 +1575,11 @@ jobs:
 
               // ---------------------------------------------------------------- Adapters
               inner class RowVH(val root: LinearLayout, val title: TextView, val rv: RecyclerView) : RecyclerView.ViewHolder(root)
-              inner class CardVH(val card: FrameLayout, val iv: ImageView, val border: View) : RecyclerView.ViewHolder(card)
-              inner class EpVH(val card: FrameLayout, val iv: ImageView, val label: TextView, val border: View) : RecyclerView.ViewHolder(card)
+              inner class CardVH(val card: FrameLayout, val iv: ImageView, val border: View, val tv: TextView) : RecyclerView.ViewHolder(card)
+              inner class EpVH(
+                  val row: LinearLayout, val thumb: FrameLayout, val iv: ImageView, val badge: TextView, val border: View,
+                  val t1: TextView, val t2: TextView, val t3: TextView
+              ) : RecyclerView.ViewHolder(row)
 
               inner class RowAdapter : RecyclerView.Adapter<RowVH>() {
                   override fun getItemCount() = rows.size
@@ -1321,8 +1592,9 @@ jobs:
                       val tv = TextView(this@MainActivity).apply {
                           setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
                           gravity = Gravity.CENTER_VERTICAL; setPadding(u(46), 0, 0, 0)
+                          maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                       }
-                      tx(tv, 17f)
+                      tx(tv, 20f)
                       val rv = RecyclerView(this@MainActivity).apply {
                           layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
                           clipChildren = false; clipToPadding = false; itemAnimator = null
@@ -1344,7 +1616,6 @@ jobs:
                       val l = h.rv.layoutParams
                       l.height = (if (r.spotlight) stripH else cardH) + 2 * padV
                       h.rv.layoutParams = l
-                      if (r.spotlight) spotRv = h.rv
                       h.rv.adapter = CardAdapter(r, pos)
                   }
               }
@@ -1364,6 +1635,13 @@ jobs:
                           setBackgroundColor(Color.rgb(26, 28, 42))
                           outlineProvider = roundOutline; clipToOutline = true
                       }
+                      // text-only slide fallback (no image available)
+                      val tvl = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                          maxLines = 4; ellipsize = TextUtils.TruncateAt.END
+                          setPadding(u(8), u(8), u(8), u(8)); visibility = View.GONE
+                      }
+                      tx(tvl, 14f)
                       val border = View(this@MainActivity).apply {
                           background = GradientDrawable().apply {
                               setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
@@ -1371,18 +1649,22 @@ jobs:
                           alpha = 0f
                       }
                       card.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                      card.addView(tvl, FrameLayout.LayoutParams(-1, -1))
                       card.addView(border, FrameLayout.LayoutParams(-1, -1))
                       if (row.spotlight) {
                           val play = TextView(this@MainActivity).apply { text = "▶"; setTextColor(Color.WHITE) }
                           tx(play, 12f)
                           card.addView(play, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply { setMargins(u(8), 0, 0, u(6)) })
                       }
-                      return CardVH(card, iv, border)
+                      return CardVH(card, iv, border, tvl)
                   }
 
                   override fun onBindViewHolder(h: CardVH, pos: Int) {
                       val item = row.items[pos]
-                      cardReq(cardUrl(row.spotlight, item), cw, ch).into(h.iv)
+                      val url = cardUrl(row.spotlight, item)
+                      cardReq(url, cw, ch).into(h.iv)
+                      h.tv.text = item.title
+                      h.tv.visibility = if (url == null) View.VISIBLE else View.GONE
                       h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
                       h.card.setOnFocusChangeListener { v, has ->
                           v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
@@ -1390,59 +1672,84 @@ jobs:
                           v.translationZ = if (has) u(10).toFloat() else 0f
                           if (has) onCardFocus(item, row, pos, rowPos)
                       }
-                      h.card.setOnClickListener { openDetail(item, h.card) }
+                      h.card.setOnClickListener {
+                          if (row.spotlight) playItem(item) else openDetail(item, h.card)
+                      }
                   }
               }
 
+              // vertical episode list: thumbnail left, title / "E16 • 08 Nov 2026 • 1h 14m" / description right
               inner class EpAdapter : RecyclerView.Adapter<EpVH>() {
                   override fun getItemCount() = eps.size
 
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): EpVH {
-                      val card = FrameLayout(this@MainActivity).apply {
-                          layoutParams = RecyclerView.LayoutParams(epW, epH).apply { rightMargin = u(12) }
+                      val row = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                          layoutParams = RecyclerView.LayoutParams(-1, epImgH + u(28))
+                          setPadding(u(8), u(8), u(8), u(8))
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
+                      val thumb = FrameLayout(this@MainActivity)
                       val iv = ImageView(this@MainActivity).apply {
                           scaleType = ImageView.ScaleType.CENTER_CROP
                           setBackgroundColor(Color.rgb(26, 28, 42))
                           outlineProvider = roundOutline; clipToOutline = true
                       }
-                      val label = TextView(this@MainActivity).apply {
-                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                          maxLines = 2; ellipsize = TextUtils.TruncateAt.END
-                          setPadding(u(8), u(14), u(8), u(6))
-                          background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
-                              intArrayOf(Color.argb(230, 0, 0, 0), Color.argb(0, 0, 0, 0)))
+                      val badge = TextView(this@MainActivity).apply {
+                          text = "LATEST"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                          setPadding(u(8), u(3), u(8), u(3)); visibility = View.GONE
+                          background = GradientDrawable().apply { cornerRadius = u(5).toFloat(); setColor(Color.argb(210, 90, 100, 190)) }
                       }
-                      tx(label, 11f)
+                      tx(badge, 11f)
                       val border = View(this@MainActivity).apply {
                           background = GradientDrawable().apply {
                               setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
                           }
                           alpha = 0f
                       }
-                      card.addView(iv, FrameLayout.LayoutParams(-1, -1))
-                      card.addView(label, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
-                      card.addView(border, FrameLayout.LayoutParams(-1, -1))
-                      return EpVH(card, iv, label, border)
+                      thumb.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                      thumb.addView(badge, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, u(8), u(8), 0) })
+                      thumb.addView(border, FrameLayout.LayoutParams(-1, -1))
+
+                      val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                      val t1 = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                          maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+                      }
+                      tx(t1, 19f)
+                      val t2 = TextView(this@MainActivity).apply { setTextColor(Color.parseColor("#C8C8D0")) }
+                      tx(t2, 14f)
+                      val t3 = TextView(this@MainActivity).apply {
+                          setTextColor(Color.parseColor("#E4E4EA")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+                      }
+                      tx(t3, 15f)
+                      texts.addView(t1, LinearLayout.LayoutParams(-1, -2))
+                      texts.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(4) })
+                      texts.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
+
+                      row.addView(thumb, LinearLayout.LayoutParams(epImgW, epImgH))
+                      row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = u(20) })
+                      return EpVH(row, thumb, iv, badge, border, t1, t2, t3)
                   }
 
                   override fun onBindViewHolder(h: EpVH, pos: Int) {
                       val ep = eps[pos]
-                      cardReq(img(ep.thumb, 600), epW, epH).into(h.iv)
-                      val dur = if (ep.dur > 0) "  •  " + (ep.dur / 60) + "m" else ""
-                      h.label.text = (if (ep.num > 0) "E" + ep.num + "  " else "") + ep.title + dur
-                      h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
-                      h.card.setOnFocusChangeListener { v, has ->
-                          v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
+                      cardReq(img(ep.thumb, 600), epImgW, epImgH).into(h.iv)
+                      h.t1.text = ep.title
+                      val bits = ArrayList<String>()
+                      if (ep.num > 0) bits.add("E" + ep.num)
+                      fmtDate(ep.air, true).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
+                      fmtDur(ep.dur).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
+                      h.t2.text = bits.joinToString(" • ")
+                      h.t3.text = ep.desc
+                      h.badge.visibility = if (pos == 0 && curSeason == 0) View.VISIBLE else View.GONE
+                      h.thumb.scaleX = 1f; h.thumb.scaleY = 1f; h.border.alpha = 0f
+                      h.row.setOnFocusChangeListener { _, has ->
+                          h.thumb.animate().scaleX(if (has) 1.05f else 1f).scaleY(if (has) 1.05f else 1f).setDuration(150).start()
                           h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
-                          v.translationZ = if (has) u(10).toFloat() else 0f
-                          if (has) {
-                              dDesc.text = ep.desc.ifBlank { dDesc.text.toString() }
-                              if (pos >= eps.size - 4) loadEpisodes()      // load next 30
-                          }
+                          if (has && pos >= eps.size - 4) loadEpisodes()      // load next 30
                       }
-                      h.card.setOnClickListener {
+                      h.row.setOnClickListener {
                           Toast.makeText(this@MainActivity, ep.title, Toast.LENGTH_SHORT).show()
                       }
                   }
