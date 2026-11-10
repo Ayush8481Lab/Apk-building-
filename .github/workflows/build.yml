@@ -335,7 +335,7 @@ jobs:
           // Description priority: shortDescription -> launcher_short_description -> longDescription
           fun parseItem(o: JSONObject): Item? {
               val low = o.optString("layout").lowercase()
-              if (low.startsWith("ad_") || low.contains("template") || low.contains("promotion")) return null
+              if (low == "ad_template" || low.startsWith("ad_") || low.contains("template") || low.contains("promotion")) return null
               val m = o.optJSONObject("metadata") ?: JSONObject()
               val ed = o.optJSONObject("editorialMetadata") ?: JSONObject()
               val am = o.optJSONObject("assetMetadata") ?: JSONObject()
@@ -415,6 +415,9 @@ jobs:
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
               private var logoW = 0; private var logoH = 0; private var bgW = 1280; private var bgH = 720
+              // title logo sizes: Shows (home) page = 1.8x, detail page = 1.5x
+              private var homeLogoW = 0; private var homeLogoH = 0
+              private var detLogoW = 0; private var detLogoH = 0
 
               // trailer box sizes: home = 1.25x the old size, detail = 1.5x, both stuck to the top-right edge
               private var homeBoxW = 0; private var homeBoxH = 0
@@ -480,7 +483,7 @@ jobs:
               private fun bgBigReq(url: String?) = Glide.with(this).load(url)
                   .override(min(W, 1800), min(W, 1800) * 9 / 16).centerCrop()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
-              private fun logoReq(url: String?) = Glide.with(this).load(url).override(logoW, logoH).fitCenter()
+              private fun logoReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).fitCenter()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
               private val roundOutline = object : ViewOutlineProvider() {
                   override fun getOutline(view: View, outline: Outline) {
@@ -496,12 +499,14 @@ jobs:
                   val dm = resources.displayMetrics
                   W = max(dm.widthPixels, dm.heightPixels)
                   H = min(dm.widthPixels, dm.heightPixels)
-                  cardH = (H * 0.27f).toInt(); cardW = cardH * 2 / 3
+                  cardH = (H * 0.27f * 1.3f).toInt(); cardW = cardH * 2 / 3          // portrait cards 1.3x
                   stripH = (H * 0.155f).toInt(); stripW = stripH * 16 / 9
                   padV = (H * 0.024f).toInt(); titleH = (H * 0.06f).toInt()
                   rowH = titleH + cardH + 2 * padV
-                  rvH = rowH + titleH + padV / 2          // one full row + ONLY the next row's title
+                  rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
+                  homeLogoH = (logoH * 1.8f).toInt(); homeLogoW = homeLogoH * 16 / 9  // Shows page logo 1.8x
+                  detLogoH = (logoH * 1.5f).toInt(); detLogoW = detLogoH * 16 / 9     // detail page logo 1.5x
                   bgW = min(W, 1280); bgH = bgW * 9 / 16
                   homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
                   detBoxW = (W * 0.67f * 1.5f).toInt(); detBoxH = (H * 0.725f * 1.5f).toInt()
@@ -556,7 +561,12 @@ jobs:
                   content.addView(bottom, lp(-1, (H * 0.62).toInt(), Gravity.BOTTOM))
 
                   info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  logo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
+                  // logo box sizes itself to the image (width fixed, height follows aspect, capped) so text sits right under it
+                  logo = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.FIT_START
+                      adjustViewBounds = true
+                      maxHeight = homeLogoH
+                  }
                   titleTv = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
                   }
@@ -567,11 +577,11 @@ jobs:
                       setTextColor(Color.parseColor("#DADAE2")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                   }
                   tx(descTv, 17f)
-                  info.addView(logo, LinearLayout.LayoutParams(logoH * 16 / 9, logoH))
+                  info.addView(logo, LinearLayout.LayoutParams(homeLogoW, -2))
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
-                  content.addView(info, lp((W * 0.42).toInt(), -2).apply { leftMargin = u(125); topMargin = (H * 0.06).toInt() })
+                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW), -2).apply { leftMargin = u(125); topMargin = (H * 0.04).toInt() })
 
                   // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll
                   rowRv = object : RecyclerView(this@MainActivity) {
@@ -687,7 +697,11 @@ jobs:
                   heroLayer.addView(bottom, lp(-1, (H * 0.45).toInt(), Gravity.BOTTOM))
 
                   val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  dLogo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
+                  dLogo = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.FIT_START
+                      adjustViewBounds = true
+                      maxHeight = detLogoH
+                  }
                   dTitle = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
                   }
@@ -712,13 +726,13 @@ jobs:
                   btnRow.addView(dWatch, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(12) })
                   btnRow.addView(dPlus, LinearLayout.LayoutParams(-2, -2))
 
-                  dInfo.addView(dLogo, LinearLayout.LayoutParams(logoH * 16 / 9, logoH))
+                  dInfo.addView(dLogo, LinearLayout.LayoutParams(detLogoW, -2))
                   dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
                   dInfo.addView(dTag, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
                   dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
-                  heroLayer.addView(dInfo, lp((W * 0.5f).toInt(), -2).apply { leftMargin = u(100); topMargin = (H * 0.07f).toInt() })
+                  heroLayer.addView(dInfo, lp(max((W * 0.5f).toInt(), detLogoW), -2).apply { leftMargin = u(100); topMargin = (H * 0.05f).toInt() })
 
                   dHint = TextView(this).apply {
                       text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
@@ -732,8 +746,12 @@ jobs:
                   // ---------- episodes state: tab pill, divider, [bundle column] + vertical episode list
                   epLayer = FrameLayout(this).apply {
                       setBackgroundColor(Color.argb(255, 12, 13, 20)); visibility = View.GONE
+                      clipChildren = false; clipToPadding = false
                   }
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      clipChildren = false; clipToPadding = false
+                  }
                   epTab = TextView(this).apply {
                       text = "Episodes"; typeface = Typeface.DEFAULT_BOLD
                       setPadding(u(22), u(8), u(22), u(8))
@@ -752,25 +770,29 @@ jobs:
                   sCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                   sScroll.addView(sCol, FrameLayout.LayoutParams(-1, -2))
 
+                  // left padding + no clipping => the focused (zoomed) thumbnail and its border are never cut off
                   dEpRv = RecyclerView(this).apply {
                       layoutManager = LinearLayoutManager(this@MainActivity)
-                      clipToPadding = false; itemAnimator = null
+                      clipChildren = false; clipToPadding = false; itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
-                      setPadding(0, padV, 0, padV * 4)
+                      setPadding(u(16), padV, u(8), padV * 4)
                   }
                   epAdapter = EpAdapter()
                   dEpRv.adapter = epAdapter
 
-                  val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  body.addView(sScroll, LinearLayout.LayoutParams(seasonColW, -1).apply { rightMargin = u(24) })
+                  val body = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      clipChildren = false; clipToPadding = false
+                  }
+                  body.addView(sScroll, LinearLayout.LayoutParams(seasonColW, -1).apply { leftMargin = u(16); rightMargin = u(8) })
                   body.addView(dEpRv, LinearLayout.LayoutParams(0, -1, 1f))
 
                   col.addView(epTab, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(96); topMargin = (H * 0.06f).toInt() })
                   col.addView(divider, LinearLayout.LayoutParams(-1, max(1, u(2))).apply {
                       leftMargin = u(96); rightMargin = u(60); topMargin = u(14)
                   })
-                  col.addView(body, LinearLayout.LayoutParams(-1, 0, 1f).apply { leftMargin = u(96); rightMargin = u(40); topMargin = u(10) })
+                  col.addView(body, LinearLayout.LayoutParams(-1, 0, 1f).apply { leftMargin = u(80); rightMargin = u(40); topMargin = u(10) })
                   epLayer.addView(col, lp(-1, -1))
 
                   epStatus = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE }
@@ -923,8 +945,28 @@ jobs:
                   return false
               }
 
+              // is the focus currently on an episode row?
+              private fun inEpList(): Boolean {
+                  val f = currentFocus ?: return false
+                  return f.parent === dEpRv
+              }
+
+              // jump back to the SELECTED season in the left column (not the first one)
+              private fun focusSeasonChip(): Boolean {
+                  if (chips.size <= 1 || curSeason !in chips.indices) return false
+                  chips[curSeason].requestFocus()
+                  return true
+              }
+
+              // episodes list: LEFT goes back to the selected season (when there is a season column)
+              private fun handleHorizontal(dir: Int): Boolean {
+                  if (dir == View.FOCUS_LEFT && inDetail && epMode && inEpList()) return focusSeasonChip()
+                  return false
+              }
+
               private fun move(dir: Int) {
                   if ((dir == View.FOCUS_UP || dir == View.FOCUS_DOWN) && handleVertical(dir)) return
+                  if (dir == View.FOCUS_LEFT && handleHorizontal(dir)) return
                   val f = currentFocus
                   if (f == null) {
                       if (inDetail) {
@@ -938,12 +980,11 @@ jobs:
 
               override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
                   if (ev.action == KeyEvent.ACTION_DOWN) {
-                      val d = when (ev.keyCode) {
-                          KeyEvent.KEYCODE_DPAD_UP -> View.FOCUS_UP
-                          KeyEvent.KEYCODE_DPAD_DOWN -> View.FOCUS_DOWN
-                          else -> 0
+                      when (ev.keyCode) {
+                          KeyEvent.KEYCODE_DPAD_UP -> if (handleVertical(View.FOCUS_UP)) return true
+                          KeyEvent.KEYCODE_DPAD_DOWN -> if (handleVertical(View.FOCUS_DOWN)) return true
+                          KeyEvent.KEYCODE_DPAD_LEFT -> if (handleHorizontal(View.FOCUS_LEFT)) return true
                       }
-                      if (d != 0 && handleVertical(d)) return true
                   }
                   return super.dispatchKeyEvent(ev)
               }
@@ -982,7 +1023,11 @@ jobs:
               @Suppress("DEPRECATION")
               override fun onBackPressed() {
                   if (inDetail) {
-                      if (epMode) hideEpisodes() else closeDetail(true)
+                      if (epMode) {
+                          // from the episode list: first go back to the selected season, next back closes the panel
+                          if (inEpList() && focusSeasonChip()) return
+                          hideEpisodes()
+                      } else closeDetail(true)
                       return
                   }
                   val f = currentFocus
@@ -1006,6 +1051,7 @@ jobs:
                       for (i in 0 until cs.length()) {
                           val c = cs.optJSONObject(i) ?: continue
                           val layout = c.optString("layout")
+                          if (layout == "ad_template") continue                 // never load ad templates
                           val spot = layout == "spotlight_layout"
                           if (!spot && layout != "portrait_layout") continue   // skips ads, cards, landscape, square...
                           if (spot) { if (gotSpot) continue; gotSpot = true }
@@ -1024,6 +1070,7 @@ jobs:
                           val items = ArrayList<Item>()
                           if (arr != null) for (k in 0 until arr.length()) {
                               val c = arr.optJSONObject(k) ?: continue
+                              if (c.optString("layout") == "ad_template") continue
                               parseItem(c)?.let { items.add(it) }
                               if (j.spot) {
                                   val dual = c.optJSONObject("editorialMetadata")?.optJSONArray("dual_spotlight_items")
@@ -1130,7 +1177,7 @@ jobs:
                   if (item.logo != null) {
                       logo.visibility = View.VISIBLE; titleTv.visibility = View.GONE
                       Glide.with(this).clear(logo)
-                      logoReq(item.logo).priority(Priority.IMMEDIATE).listener(listener).into(logo)
+                      logoReq(item.logo, homeLogoW, homeLogoH).priority(Priority.IMMEDIATE).listener(listener).into(logo)
                   } else {
                       logo.setImageDrawable(null); logo.visibility = View.GONE
                       titleTv.text = item.title; titleTv.visibility = View.VISIBLE
@@ -1325,7 +1372,7 @@ jobs:
                   Glide.with(this).clear(dLogo)
                   if (url != null) {
                       dLogo.visibility = View.VISIBLE; dTitle.visibility = View.GONE
-                      logoReq(url).into(dLogo)
+                      logoReq(url, detLogoW, detLogoH).into(dLogo)
                   } else {
                       dLogo.setImageDrawable(null); dLogo.visibility = View.GONE
                       dTitle.text = title; dTitle.visibility = View.VISIBLE
@@ -1687,9 +1734,10 @@ jobs:
                           orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                           layoutParams = RecyclerView.LayoutParams(-1, epImgH + u(28))
                           setPadding(u(8), u(8), u(8), u(8))
+                          clipChildren = false; clipToPadding = false
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
-                      val thumb = FrameLayout(this@MainActivity)
+                      val thumb = FrameLayout(this@MainActivity).apply { clipChildren = false }
                       val iv = ImageView(this@MainActivity).apply {
                           scaleType = ImageView.ScaleType.CENTER_CROP
                           setBackgroundColor(Color.rgb(26, 28, 42))
