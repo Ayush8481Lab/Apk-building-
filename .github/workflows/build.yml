@@ -157,6 +157,7 @@ jobs:
           import android.app.UiModeManager
           import android.content.Context
           import android.content.res.Configuration
+          import android.graphics.Bitmap
           import android.graphics.Color
           import android.graphics.Outline
           import android.graphics.Rect
@@ -186,6 +187,9 @@ jobs:
           import com.bumptech.glide.load.DecodeFormat
           import com.bumptech.glide.load.engine.DiskCacheStrategy
           import com.bumptech.glide.load.engine.GlideException
+          import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
+          import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
+          import com.bumptech.glide.load.resource.bitmap.FitCenter
           import com.bumptech.glide.request.RequestListener
           import com.bumptech.glide.request.target.Target
           import okhttp3.ConnectionPool
@@ -193,6 +197,7 @@ jobs:
           import okhttp3.OkHttpClient
           import okhttp3.Request
           import org.json.JSONObject
+          import java.security.MessageDigest
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
@@ -227,6 +232,38 @@ jobs:
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
           class Season(val id: String, val title: String, val count: Int, val num: Int, val air: Long)
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
+          class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
+
+          // Cuts the transparent border off a title PNG so the visible artwork touches the left edge of the text under it
+          class TrimTransform : BitmapTransformation() {
+              override fun updateDiskCacheKey(messageDigest: MessageDigest) {
+                  messageDigest.update("trim_alpha_v1".toByteArray())
+              }
+              override fun equals(other: Any?) = other is TrimTransform
+              override fun hashCode() = 987654
+              override fun transform(pool: BitmapPool, toTransform: Bitmap, outWidth: Int, outHeight: Int): Bitmap {
+                  if (!toTransform.hasAlpha()) return toTransform
+                  val w = toTransform.width
+                  val h = toTransform.height
+                  val px = IntArray(w * h)
+                  toTransform.getPixels(px, 0, w, 0, 0, w, h)
+                  var minX = w; var minY = h; var maxX = -1; var maxY = -1
+                  for (y in 0 until h) {
+                      val o = y * w
+                      for (x in 0 until w) {
+                          if ((px[o + x] ushr 24) > 20) {
+                              if (x < minX) minX = x
+                              if (x > maxX) maxX = x
+                              if (y < minY) minY = y
+                              if (y > maxY) maxY = y
+                          }
+                      }
+                  }
+                  if (maxX < 0) return toTransform
+                  if (minX == 0 && minY == 0 && maxX == w - 1 && maxY == h - 1) return toTransform
+                  return Bitmap.createBitmap(toTransform, minX, minY, maxX - minX + 1, maxY - minY + 1)
+              }
+          }
 
           object Net {
               val client: OkHttpClient = OkHttpClient.Builder()
@@ -295,7 +332,7 @@ jobs:
               return SimpleDateFormat(if (withYear) "dd MMM yyyy" else "dd MMM", Locale.ENGLISH).format(Date(ms))
           }
 
-          // ONE background thread, downloads to disk only (no bitmaps in RAM), waits while the visible banner loads
+          // ONE background thread, downloads to disk only (no bitmaps in RAM), waits while the visible images load
           object Prefetch {
               lateinit var app: Context
               @Volatile var gate = true
@@ -316,7 +353,7 @@ jobs:
               fun add(url: String?, first: Boolean = false) {
                   if (url == null || !seen.add(url)) return
                   if (first) queue.addFirst(url) else queue.addLast(url)
-                  while (queue.size > 50) queue.pollLast()?.let { seen.remove(it) }
+                  while (queue.size > 80) queue.pollLast()?.let { seen.remove(it) }
               }
           }
 
@@ -390,6 +427,44 @@ jobs:
               return Ep(m.optString("contentId"), title, m.optInt("episodeNumber"), desc, thumb, m.optInt("duration"), m.optLong("originalAirDate"))
           }
 
+          // seasons / bundles (newest first) + the episodes already embedded in the show response
+          fun parseSeasons(show: JSONObject): DetailData {
+              val tmp = ArrayList<Season>()
+              val emb = HashMap<String, List<Ep>>()
+              var latest: Ep? = null
+              val sc = show.optJSONArray("containers")
+              if (sc != null) for (k in 0 until sc.length()) {
+                  val c = sc.optJSONObject(k) ?: continue
+                  if (c.optString("layout") != "BUNDLE_ITEM") continue
+                  val sid = c.optString("id")
+                  if (sid.isBlank()) continue
+                  val cm = c.optJSONObject("metadata")
+                  val st = cm?.str("title") ?: ("Season " + (tmp.size + 1))
+                  tmp.add(Season(sid, st, c.optInt("episodeCount"), cm?.optInt("season") ?: 0, cm?.optLong("originalAirDate") ?: 0L))
+                  val inner = c.optJSONArray("containers")
+                  val list = ArrayList<Ep>()
+                  if (inner != null) for (q in 0 until inner.length()) parseEp(inner.optJSONObject(q))?.let { list.add(it) }
+                  emb[sid] = list
+                  val ep = list.firstOrNull()
+                  val cur = latest
+                  if (ep != null && (cur == null || ep.air > cur.air)) latest = ep
+              }
+              val sorted = tmp.sortedWith(compareByDescending<Season> { it.num }.thenByDescending { it.air })
+              return DetailData(sorted, emb, latest)
+          }
+
+          // detail page image urls (title w=700, background w=1500)
+          fun detLogoUrl(show: JSONObject, item: Item?): String? {
+              val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes")
+              val u = if (e == null) null else img(e.str("masthead_logo") ?: e.str("masthead_logo_v1"), W_LOGO)
+              return u ?: item?.logo
+          }
+
+          fun detBgUrl(show: JSONObject): String? {
+              val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes") ?: return null
+              return img(e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail"), W_BG)
+          }
+
           class MainActivity : Activity() {
               private val ui = Handler(Looper.getMainLooper())
               private var W = 1280
@@ -434,7 +509,6 @@ jobs:
               // title logo sizes: Shows listing page = 1.5x, detail page (after clicking a show) = 1.8x
               private var homeLogoW = 0; private var homeLogoH = 0
               private var detLogoW = 0; private var detLogoH = 0
-              private var logoPad = 0              // right padding so a logo never touches / gets cut at its right edge
 
               // trailer box sizes: home = 1.25x the old size, detail = 1.5x, both stuck to the top-right edge
               private var homeBoxW = 0; private var homeBoxH = 0
@@ -446,6 +520,11 @@ jobs:
               private var curPos = 0
               private var spotLoopOn = false
               private val trailerCache = ConcurrentHashMap<String, String>()
+
+              // show detail json cache (filled in the background when a card gets focus => detail page opens instantly)
+              private val detailCache = object : LinkedHashMap<String, JSONObject>(16, 0.75f, true) {
+                  override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JSONObject>?): Boolean = size > 12
+              }
 
               // surface the trailer is currently drawn on (home or detail)
               private lateinit var curBox: FrameLayout
@@ -481,6 +560,7 @@ jobs:
               private var epMode = false
               private var detailToken = 0
               private var detailTrailerUrl: String? = null
+              private var detGateRun: Runnable? = null
               private var curSeason = -1
               private var epFrom = 0
               private var epLoading = false
@@ -500,11 +580,22 @@ jobs:
               private fun bgBigReq(url: String?) = Glide.with(this).load(url)
                   .override(min(W, 1800), min(W, 1800) * 9 / 16).centerCrop()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
-              private fun logoReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).fitCenter()
+              // title images: transparent border trimmed first, then fitted => artwork touches the left text edge
+              private fun logoReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h)
+                  .transform(TrimTransform(), FitCenter())
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
               private val roundOutline = object : ViewOutlineProvider() {
                   override fun getOutline(view: View, outline: Outline) {
                       outline.setRoundRect(0, 0, view.width, view.height, u(8).toFloat())
+                  }
+              }
+
+              private fun doneListener(cb: () -> Unit) = object : RequestListener<Drawable> {
+                  override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirstResource: Boolean): Boolean {
+                      cb(); return false
+                  }
+                  override fun onResourceReady(resource: Drawable, model: Any, target: Target<Drawable>, dataSource: DataSource, isFirstResource: Boolean): Boolean {
+                      cb(); return false
                   }
               }
 
@@ -522,7 +613,6 @@ jobs:
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
-                  logoPad = u(28)
                   homeLogoH = (logoH * 1.5f).toInt(); homeLogoW = homeLogoH * 16 / 9  // Shows listing page logo 1.5x
                   detLogoH = (logoH * 1.8f).toInt(); detLogoW = detLogoH * 16 / 9     // detail page logo 1.8x
                   bgW = min(W, 1280); bgH = bgW * 9 / 16
@@ -579,12 +669,11 @@ jobs:
                   content.addView(bottom, lp(-1, (H * 0.62).toInt(), Gravity.BOTTOM))
 
                   info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  // logo box sizes itself to the image (width fixed, height follows aspect, capped); right padding keeps the edge clear
+                  // logo is trimmed to its artwork, aligned to the start (left) and the text sits right under it
                   logo = ImageView(this).apply {
                       scaleType = ImageView.ScaleType.FIT_START
                       adjustViewBounds = true
                       maxHeight = homeLogoH
-                      setPadding(0, 0, logoPad, 0)
                   }
                   titleTv = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
@@ -720,7 +809,6 @@ jobs:
                       scaleType = ImageView.ScaleType.FIT_START
                       adjustViewBounds = true
                       maxHeight = detLogoH
-                      setPadding(0, 0, logoPad, 0)
                   }
                   dTitle = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
@@ -1118,6 +1206,29 @@ jobs:
                   }, 300)
               }
 
+              // show detail json: memory cache first, then network (call from a background thread)
+              private fun fetchDetail(cid: String): JSONObject? {
+                  synchronized(detailCache) { detailCache[cid] }?.let { return it }
+                  val j = Api.get(DETAIL_URL + cid)
+                  if (j != null) synchronized(detailCache) { detailCache[cid] = j }
+                  return j
+              }
+
+              // focused show: fetch its detail data + the images the detail page will need, ahead of time (queue front)
+              private fun prefetchDetail(item: Item) {
+                  if (isSpotRow() || item.cid.isBlank()) return
+                  Api.pool.execute {
+                      val j = fetchDetail(item.cid) ?: return@execute
+                      val show = j.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return@execute
+                      Prefetch.add(detBgUrl(show), true)
+                      Prefetch.add(detLogoUrl(show, item), true)
+                      val data = parseSeasons(show)
+                      data.seasons.firstOrNull()?.let { s ->
+                          data.embedded[s.id].orEmpty().take(4).forEach { Prefetch.add(img(it.thumb, 600), true) }
+                      }
+                  }
+              }
+
               // ---------------------------------------------------------------- Hero + trailer (home)
               private fun heroUrl(i: Item) = img(i.bg ?: i.spot ?: i.landscape, W_BG)
               private fun cardUrl(spot: Boolean, i: Item) =
@@ -1126,7 +1237,10 @@ jobs:
                   Prefetch.add(heroUrl(i), first); Prefetch.add(i.logo, first)
               }
               private fun prefetchRow(r: Row, n: Int) {
-                  r.items.take(n).forEach { Prefetch.add(cardUrl(r.spotlight, it)) }
+                  r.items.take(n).forEach {
+                      Prefetch.add(cardUrl(r.spotlight, it))
+                      if (!r.spotlight) Prefetch.add(it.logo)          // small title images: ready before the card is focused
+                  }
                   r.items.firstOrNull()?.let { prefetchHero(it) }
               }
 
@@ -1168,23 +1282,15 @@ jobs:
                   stopTrailer(false)
                   val token = ++heroToken
                   revealed = false
-                  Prefetch.gate = false                      // banner of this screen first; prefetch waits
+                  Prefetch.gate = false                      // banner + title of this screen first; prefetch waits
                   // hide old banner + text immediately => banner and text never mismatch
                   info.animate().cancel(); info.alpha = 0f
                   bg.animate().cancel(); bg.animate().alpha(0f).setDuration(100).start()
                   metaTv.text = item.meta
                   descTv.text = item.desc
                   var pending = 1 + (if (item.logo != null) 1 else 0)
-                  val done: () -> Unit = {
+                  val listener = doneListener {
                       if (token == heroToken) { pending--; if (pending <= 0) reveal(item, token) }
-                  }
-                  val listener = object : RequestListener<Drawable> {
-                      override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirstResource: Boolean): Boolean {
-                          done(); return false
-                      }
-                      override fun onResourceReady(resource: Drawable, model: Any, target: Target<Drawable>, dataSource: DataSource, isFirstResource: Boolean): Boolean {
-                          done(); return false
-                      }
                   }
                   Glide.with(this).clear(bg)
                   bgReq(heroUrl(item)).priority(Priority.IMMEDIATE).listener(listener).into(bg)
@@ -1206,6 +1312,7 @@ jobs:
                   bg.animate().cancel(); bg.animate().alpha(1f).setDuration(300).start()
                   info.animate().cancel(); info.animate().alpha(1f).setDuration(300).start()
                   scheduleTrailer(item)      // trailer only after banner + title are on screen
+                  prefetchDetail(item)       // then get the detail page data/images ready in the background
               }
 
               // trailer for a home item. If the list item has no trailer url, look it up from DETAIL-V2 (cached).
@@ -1222,7 +1329,7 @@ jobs:
                   if (item.cid.isBlank()) { spotAdvanceLater(); return }
                   val token = heroToken
                   Thread {
-                      val j = Api.get(DETAIL_URL + item.cid)
+                      val j = fetchDetail(item.cid)
                       val tu = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)?.let { trailerFrom(it) } ?: ""
                       if (j != null) trailerCache[item.cid] = tu
                       ui.post {
@@ -1347,6 +1454,8 @@ jobs:
                   inDetail = true; epMode = false
                   val tok = ++detailToken
                   epToken++
+                  detGateRun?.let { ui.removeCallbacks(it) }
+                  Prefetch.gate = false                       // this show's images first, everything else waits
                   curBox = dBox; curVideo = dVideo; curBg = dBg; curBoxW = detBoxW; curBoxH = detBoxH
                   content.visibility = View.GONE
                   status.visibility = View.GONE
@@ -1366,7 +1475,7 @@ jobs:
                   dBg.animate().cancel(); dBg.alpha = 1f
                   dBox.animate().cancel(); dBox.alpha = 0f; dBox.visibility = View.GONE
                   Glide.with(this).clear(dBg)
-                  bgBigReq(img(item.bg ?: item.landscape, W_BG)).into(dBg)
+                  bgBigReq(img(item.bg ?: item.landscape, W_BG)).priority(Priority.IMMEDIATE).into(dBg)
                   showDetailLogo(item.logo, item.title)
                   dTag.visibility = View.GONE
                   dMeta.text = item.meta
@@ -1376,20 +1485,58 @@ jobs:
                   dWatch.requestFocus()
                   ui.postDelayed({ if (inDetail && !epMode) dWatch.requestFocus() }, 200)
 
-                  Thread {
-                      val j = Api.get(DETAIL_URL + item.cid)
+                  val cachedJ = synchronized(detailCache) { detailCache[item.cid] }
+                  if (cachedJ != null) bindDetail(cachedJ, item)
+                  else Thread {
+                      val j = fetchDetail(item.cid)
                       ui.post { if (inDetail && tok == detailToken) bindDetail(j, item) }
                   }.start()
               }
 
-              private fun showDetailLogo(url: String?, title: String) {
+              private fun showDetailLogo(url: String?, title: String, l: RequestListener<Drawable>? = null) {
                   Glide.with(this).clear(dLogo)
                   if (url != null) {
                       dLogo.visibility = View.VISIBLE; dTitle.visibility = View.GONE
-                      logoReq(url, detLogoW, detLogoH).into(dLogo)
+                      var r = logoReq(url, detLogoW, detLogoH).priority(Priority.IMMEDIATE)
+                      if (l != null) r = r.listener(l)
+                      r.into(dLogo)
                   } else {
                       dLogo.setImageDrawable(null); dLogo.visibility = View.GONE
                       dTitle.text = title; dTitle.visibility = View.VISIBLE
+                  }
+              }
+
+              // The trailer starts ONLY after the title image, the background and the first episode thumbnails are loaded
+              // (4s safety timeout). While they load, background prefetch is paused so they get all the bandwidth.
+              private fun loadDetailAssets(tok: Int, title: String, logoUrl: String?, bgUrl: String?, thumbs: List<String>, trailer: String?) {
+                  detGateRun?.let { ui.removeCallbacks(it) }
+                  var pending = (if (logoUrl != null) 1 else 0) + (if (bgUrl != null) 1 else 0) + thumbs.size
+                  var fired = false
+                  val fire: () -> Unit = {
+                      if (!fired) {
+                          fired = true
+                          detGateRun?.let { ui.removeCallbacks(it) }
+                          Prefetch.gate = true
+                          if (tok == detailToken && inDetail && trailer != null && !epMode) schedulePlay(trailer, false)
+                      }
+                  }
+                  val l = doneListener {
+                      if (tok == detailToken) { pending--; if (pending <= 0) fire() }
+                  }
+                  Prefetch.gate = false
+                  showDetailLogo(logoUrl, title, l)                          // 1) title image
+                  if (bgUrl != null) {                                       // 2) background
+                      Glide.with(this).clear(dBg)
+                      bgBigReq(bgUrl).priority(Priority.IMMEDIATE).listener(l).into(dBg)
+                  }
+                  thumbs.forEach {                                           // 3) first episode thumbnails (same options as the list => cache hit)
+                      cardReq(it, epImgW, epImgH).priority(Priority.HIGH).listener(l).preload()
+                  }
+                  if (pending <= 0) { fire(); return }
+                  if (!fired) {
+                      val r = Runnable { fire() }
+                      detGateRun = r
+                      ui.postDelayed(r, 4000)
                   }
               }
 
@@ -1402,9 +1549,11 @@ jobs:
               private fun bindDetail(j: JSONObject?, item: Item) {
                   val show = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
                   if (show == null) {
+                      Prefetch.gate = true
                       dStatus.text = "Could not load details\n" + Api.lastError + "\n\nPress back"
                       return
                   }
+                  val tok = detailToken
                   val m = show.optJSONObject("metadata") ?: JSONObject()
                   val e = m.optJSONObject("emfAttributes") ?: JSONObject()
 
@@ -1429,42 +1578,23 @@ jobs:
                   val tag = e.str("highlight_text")
                   if (tag != null) { dTag.text = tag; dTag.visibility = View.VISIBLE } else dTag.visibility = View.GONE
 
-                  // title image: masthead_logo -> masthead_logo_v1 -> (list item: launcher_logo) -> text  (w=700)
-                  val logoUrl = img(e.str("masthead_logo") ?: e.str("masthead_logo_v1"), W_LOGO) ?: item.logo
-                  showDetailLogo(logoUrl, title)
-
-                  // background image until the trailer starts (w=1500)
-                  val bgUrl = img(e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail"), W_BG)
-                  if (bgUrl != null) { Glide.with(this).clear(dBg); bgBigReq(bgUrl).into(dBg) }
-
                   // seasons / bundles, newest first
-                  val tmp = ArrayList<Season>()
-                  var latest: Ep? = null
-                  val sc = show.optJSONArray("containers")
-                  if (sc != null) for (k in 0 until sc.length()) {
-                      val c = sc.optJSONObject(k) ?: continue
-                      if (c.optString("layout") != "BUNDLE_ITEM") continue
-                      val sid = c.optString("id")
-                      if (sid.isBlank()) continue
-                      val cm = c.optJSONObject("metadata")
-                      val st = cm?.str("title") ?: ("Season " + (tmp.size + 1))
-                      tmp.add(Season(sid, st, c.optInt("episodeCount"), cm?.optInt("season") ?: 0, cm?.optLong("originalAirDate") ?: 0L))
-                      // episodes embedded in the show response give us the latest episode date right away
-                      val inner = c.optJSONArray("containers")
-                      if (inner != null && inner.length() > 0) {
-                          val ep = parseEp(inner.optJSONObject(0))
-                          val cur = latest
-                          if (ep != null && (cur == null || ep.air > cur.air)) latest = ep
-                      }
-                  }
+                  val data = parseSeasons(show)
                   seasons.clear()
-                  seasons.addAll(tmp.sortedWith(compareByDescending<Season> { it.num }.thenByDescending { it.air }))
-                  latest?.let { setWatchLabel(it) }
+                  seasons.addAll(data.seasons)
+                  data.latest?.let { setWatchLabel(it) }
                   dStatus.visibility = View.GONE
 
                   val trailer = trailerFrom(show)
                   detailTrailerUrl = trailer
-                  if (trailer != null && !epMode) schedulePlay(trailer, false)
+
+                  // title image (w=700) + background (w=1500) + first episode thumbnails => then the trailer
+                  val logoUrl = detLogoUrl(show, item)
+                  val bgUrl = detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)
+                  val thumbs = data.seasons.firstOrNull()?.let { s ->
+                      data.embedded[s.id].orEmpty().take(4).mapNotNull { img(it.thumb, 600) }
+                  }.orEmpty()
+                  loadDetailAssets(tok, title, logoUrl, bgUrl, thumbs, trailer)
 
                   if (seasons.isEmpty()) return
                   dHint.visibility = View.VISIBLE
@@ -1555,6 +1685,7 @@ jobs:
                           val start = eps.size
                           eps.addAll(list)
                           epAdapter.notifyItemRangeInserted(start, list.size)
+                          if (start == 0) list.take(6).forEach { Prefetch.add(img(it.thumb, 600), true) }   // first thumbnails: queue front
                           if (eps.isEmpty()) { epStatus.text = "No episodes"; epStatus.visibility = View.VISIBLE }
                           else epStatus.visibility = View.GONE
                           if (start == 0 && list.isNotEmpty()) {
@@ -1615,6 +1746,8 @@ jobs:
                   inDetail = false; epMode = false
                   detailToken++; epToken++
                   selRun?.let { ui.removeCallbacks(it) }
+                  detGateRun?.let { ui.removeCallbacks(it) }
+                  Prefetch.gate = true
                   stopTrailer(false)
                   detail.visibility = View.GONE
                   epLayer.animate().cancel(); epLayer.visibility = View.GONE; epLayer.translationY = H.toFloat()
