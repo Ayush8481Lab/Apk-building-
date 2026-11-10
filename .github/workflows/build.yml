@@ -84,6 +84,7 @@ jobs:
               <application
                   android:name=".App"
                   android:label="LIV TV"
+                  android:largeHeap="true"
                   android:theme="@style/AppTheme"
                   android:usesCleartextTraffic="false">
                   <activity
@@ -140,6 +141,7 @@ jobs:
           class App : Application() {
               override fun onCreate() {
                   super.onCreate()
+                  Prefetch.app = this
                   try {
                       // Glide downloads through the shared OkHttp client (HTTP/2, keep-alive, parallel)
                       Glide.get(this).registry.replace(GlideUrl::class.java, InputStream::class.java, OkHttpUrlLoader.Factory(Net.client))
@@ -185,6 +187,9 @@ jobs:
           import com.bumptech.glide.load.engine.GlideException
           import com.bumptech.glide.request.RequestListener
           import com.bumptech.glide.request.target.Target
+          import android.content.Context
+          import androidx.media3.common.VideoSize
+          import java.util.concurrent.LinkedBlockingDeque
           import okhttp3.ConnectionPool
           import okhttp3.Dispatcher
           import okhttp3.OkHttpClient
@@ -203,7 +208,7 @@ jobs:
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
-              val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?
+              val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?, val spot: String?
           )
 
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
@@ -218,7 +223,7 @@ jobs:
           }
 
           object Api {
-              val pool = Executors.newFixedThreadPool(8)
+              val pool = Executors.newFixedThreadPool(3)
               @Volatile var lastError = ""
 
               // Edit headers here if the API asks for more (token, device id, etc.)
@@ -242,6 +247,35 @@ jobs:
               }
           }
 
+          // CDN resizing: small + eco quality = much faster
+          fun img(u: String?, w: Int): String? =
+              if (u.isNullOrBlank()) null else u + (if (u.contains("?")) "&" else "?") + "h=auto&w=" + w + "&q=eco"
+
+          // ONE background thread, downloads to disk only (no bitmaps in RAM), waits while the visible banner loads
+          object Prefetch {
+              lateinit var app: Context
+              @Volatile var gate = true
+              private val queue = LinkedBlockingDeque<String>()
+              private val seen = java.util.Collections.synchronizedSet(HashSet<String>())
+              private val worker = Thread {
+                  while (true) {
+                      try {
+                          val u = queue.takeFirst()
+                          var w = 0
+                          while (!gate && w < 40) { Thread.sleep(100); w++ }
+                          Glide.with(app).downloadOnly().load(u).diskCacheStrategy(DiskCacheStrategy.DATA)
+                              .submit().get(20, TimeUnit.SECONDS)
+                      } catch (e: Exception) { }
+                  }
+              }.apply { isDaemon = true; start() }
+
+              fun add(url: String?, first: Boolean = false) {
+                  if (url == null || !seen.add(url)) return
+                  if (first) queue.addFirst(url) else queue.addLast(url)
+                  while (queue.size > 50) queue.pollLast()?.let { seen.remove(it) }
+              }
+          }
+
           fun parseItem(o: JSONObject): Item? {
               if (o.optString("layout") != "CONTENT_ITEM") return null
               val m = o.optJSONObject("metadata") ?: return null
@@ -258,7 +292,7 @@ jobs:
                   m.optString("contentId"), m.optString("title"),
                   s("portrait_thumb"), s("thumbnail") ?: s("landscape_thumb"),
                   s("tv_background_image"), s("masthead_logo_v1"),
-                  parts.joinToString(" • "), m.optString("shortDescription"), trailer
+                  parts.joinToString(" • "), m.optString("shortDescription"), trailer, s("mweb_spotlight")
               )
           }
 
@@ -293,6 +327,9 @@ jobs:
               private var loaded = false
               private var heroRun: Runnable? = null
               private var trailerRun: Runnable? = null
+              private var revealed = false
+              private var boxW = 0; private var boxH = 0
+              private lateinit var videoBox: FrameLayout
               private var heroToken = 0
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
@@ -305,13 +342,6 @@ jobs:
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
               private fun logoReq(url: String?) = Glide.with(this).load(url).override(logoW, logoH).fitCenter()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
-              private fun preloadHero(i: Item, p: Priority) {
-                  try {
-                      bgReq(i.bg ?: i.landscape).priority(p).preload()
-                      if (i.logo != null) logoReq(i.logo).priority(p).preload()
-                  } catch (e: Exception) { }
-              }
-
               private val roundOutline = object : ViewOutlineProvider() {
                   override fun getOutline(view: View, outline: Outline) {
                       outline.setRoundRect(0, 0, view.width, view.height, u(8).toFloat())
@@ -333,6 +363,7 @@ jobs:
                   rvH = rowH + titleH + padV / 2          // one full row + ONLY the next row's title
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
                   bgW = min(W, 1280); bgH = bgW * 9 / 16
+                  boxW = (W * 0.67f).toInt(); boxH = (H * 0.725f).toInt()   // trailer area
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -362,11 +393,11 @@ jobs:
                   bg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
                   content.addView(bg, lp(-1, -1))
 
-                  var vw = W
-                  var vh = W * 9 / 16
-                  if (vh < H) { vh = H; vw = H * 16 / 9 }
-                  videoView = TextureView(this).apply { alpha = 0f; visibility = View.GONE }
-                  content.addView(videoView, lp(vw, vh, Gravity.CENTER))
+                  // trailer plays ONLY inside this box (right side, above the thumbnail strip)
+                  videoBox = FrameLayout(this).apply { alpha = 0f; visibility = View.GONE }
+                  videoView = TextureView(this)
+                  videoBox.addView(videoView, lp(boxW, boxH, Gravity.CENTER))
+                  content.addView(videoBox, lp(boxW, boxH, Gravity.TOP or Gravity.END))
 
                   val left = View(this).apply {
                       background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
@@ -630,15 +661,8 @@ jobs:
                   rowAdapter.notifyItemInserted(rows.size - 1)
                   if (tab == 2) status.visibility = View.GONE
                   if (rows.size == 1) focusFirst(12)
-                  try {
-                      r.items.take(10).forEach {
-                          cardReq(if (r.spotlight) (it.landscape ?: it.portrait) else (it.portrait ?: it.landscape),
-                              if (r.spotlight) stripW else cardW, if (r.spotlight) stripH else cardH)
-                              .priority(Priority.LOW).preload()
-                      }
-                      if (r.spotlight) r.items.forEachIndexed { i, it -> preloadHero(it, if (i == 0) Priority.HIGH else Priority.NORMAL) }
-                      else r.items.firstOrNull()?.let { preloadHero(it, Priority.LOW) }
-                  } catch (e: Exception) { }
+                  if (r.spotlight) r.items.drop(1).forEach { prefetchHero(it) }
+                  else if (rows.size <= 3) prefetchRow(r, 8)
               }
 
               private fun focusFirst(tries: Int) {
@@ -649,20 +673,32 @@ jobs:
               }
 
               // ---------------------------------------------------------------- Hero + trailer
+              private fun heroUrl(i: Item) = img(i.bg ?: i.spot ?: i.landscape, 1500)
+              private fun cardUrl(spot: Boolean, i: Item) =
+                  if (spot) img(i.spot ?: i.landscape ?: i.portrait, 700) else img(i.portrait ?: i.landscape, 700)
+              private fun prefetchHero(i: Item, first: Boolean = false) {
+                  Prefetch.add(heroUrl(i), first); Prefetch.add(i.logo, first)
+              }
+              private fun prefetchRow(r: Row, n: Int) {
+                  r.items.take(n).forEach { Prefetch.add(cardUrl(r.spotlight, it)) }
+                  r.items.firstOrNull()?.let { prefetchHero(it) }
+              }
+
               private fun onCardFocus(item: Item, row: Row, pos: Int, rowPos: Int) {
                   snapTo(rowPos)
                   heroRun?.let { ui.removeCallbacks(it) }
                   val r = Runnable {
                       showHero(item)
-                      for (d in intArrayOf(-1, 1, 2)) row.items.getOrNull(pos + d)?.let { preloadHero(it, Priority.LOW) }
+                      row.items.getOrNull(pos + 1)?.let { prefetchHero(it) }
                   }
                   heroRun = r
-                  ui.postDelayed(r, 100)
+                  ui.postDelayed(r, 150)
               }
 
               private fun snapTo(pos: Int) {
                   if (pos == lastSnap) return
                   lastSnap = pos
+                  for (d in 1..2) rows.getOrNull(pos + d)?.let { prefetchRow(it, 8) }   // next rows, in order, after banner
                   val s = object : LinearSmoothScroller(this) {
                       override fun getVerticalSnapPreference() = SNAP_TO_START
                       override fun calculateSpeedPerPixel(dm: DisplayMetrics) = 45f / dm.densityDpi
@@ -674,12 +710,18 @@ jobs:
               private fun showHero(item: Item) {
                   if (hero?.id == item.id && hero?.title == item.title) return
                   hero = item
-                  stopTrailer()
+                  stopTrailer(false)
                   val token = ++heroToken
-                  // trailer starts only AFTER banner (+ title png) are on screen
+                  revealed = false
+                  Prefetch.gate = false                      // banner of this screen first; prefetch waits
+                  // hide old banner + text immediately => banner and text never mismatch
+                  info.animate().cancel(); info.alpha = 0f
+                  bg.animate().cancel(); bg.animate().alpha(0f).setDuration(100).start()
+                  metaTv.text = item.meta
+                  descTv.text = item.desc
                   var pending = 1 + (if (item.logo != null) 1 else 0)
                   val done: () -> Unit = {
-                      if (token == heroToken) { pending--; if (pending <= 0) scheduleTrailer(item) }
+                      if (token == heroToken) { pending--; if (pending <= 0) reveal(item, token) }
                   }
                   val listener = object : RequestListener<Drawable> {
                       override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirstResource: Boolean): Boolean {
@@ -689,24 +731,30 @@ jobs:
                           done(); return false
                       }
                   }
-                  var rb = bgReq(item.bg ?: item.landscape).priority(Priority.IMMEDIATE).listener(listener)
-                  val ph = bg.drawable
-                  if (ph != null) rb = rb.placeholder(ph)
-                  rb.transition(DrawableTransitionOptions.withCrossFade(250)).into(bg)
+                  Glide.with(this).clear(bg)
+                  bgReq(heroUrl(item)).priority(Priority.IMMEDIATE).listener(listener).into(bg)
                   if (item.logo != null) {
                       logo.visibility = View.VISIBLE; titleTv.visibility = View.GONE
+                      Glide.with(this).clear(logo)
                       logoReq(item.logo).priority(Priority.IMMEDIATE).listener(listener).into(logo)
                   } else {
                       logo.setImageDrawable(null); logo.visibility = View.GONE
                       titleTv.text = item.title; titleTv.visibility = View.VISIBLE
                   }
-                  metaTv.text = item.meta
-                  descTv.text = item.desc
-                  info.animate().cancel(); info.alpha = 0f; info.animate().alpha(1f).setDuration(250).start()
+                  ui.postDelayed({ reveal(item, token) }, 3000)   // safety if network is slow
+              }
+
+              private fun reveal(item: Item, token: Int) {
+                  if (token != heroToken || revealed) return
+                  revealed = true
+                  Prefetch.gate = true
+                  bg.animate().cancel(); bg.animate().alpha(1f).setDuration(300).start()
+                  info.animate().cancel(); info.animate().alpha(1f).setDuration(300).start()
+                  scheduleTrailer(item)      // trailer only after banner + title are on screen
               }
 
               private fun scheduleTrailer(item: Item) {
-                  stopTrailer()
+                  stopTrailer(false)
                   val t = item.trailer ?: return
                   val r = Runnable { playTrailer(t) }
                   trailerRun = r
@@ -715,17 +763,29 @@ jobs:
 
               private fun playTrailer(url: String) {
                   try {
-                      videoView.visibility = View.VISIBLE
+                      videoBox.animate().cancel(); videoBox.alpha = 0f; videoBox.visibility = View.VISIBLE
                       val p = player ?: ExoPlayer.Builder(this).build().also { pl ->
                           player = pl
                           pl.repeatMode = Player.REPEAT_MODE_ONE
                           if (TRAILER_MUTED) pl.volume = 0f
+                          // cap decode size => stable on weak TV boxes
+                          pl.trackSelectionParameters = pl.trackSelectionParameters.buildUpon().setMaxVideoSize(1280, 720).build()
                           pl.addListener(object : Player.Listener {
+                              override fun onVideoSizeChanged(videoSize: VideoSize) {
+                                  if (videoSize.width == 0 || videoSize.height == 0) return
+                                  val ar = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
+                                  var w = boxW
+                                  var h = (w / ar).toInt()
+                                  if (h < boxH) { h = boxH; w = (h * ar).toInt() }       // cover the marked area
+                                  videoView.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+                              }
                               override fun onRenderedFirstFrame() {
-                                  videoView.animate().cancel(); videoView.animate().alpha(1f).setDuration(500).start()
+                                  videoBox.animate().cancel(); videoBox.animate().alpha(1f).setDuration(450).start()
+                                  bg.animate().cancel(); bg.animate().alpha(0f).setDuration(450).start()   // no thumbnail behind video
                               }
                               override fun onPlayerError(error: PlaybackException) {
-                                  videoView.alpha = 0f; videoView.visibility = View.GONE
+                                  videoBox.alpha = 0f; videoBox.visibility = View.GONE
+                                  bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start()
                               }
                           })
                       }
@@ -734,15 +794,16 @@ jobs:
                       p.prepare()
                       p.playWhenReady = true
                   } catch (e: Exception) {
-                      videoView.visibility = View.GONE
+                      videoBox.visibility = View.GONE
                   }
               }
 
-              private fun stopTrailer() {
+              private fun stopTrailer(restoreBg: Boolean = true) {
                   trailerRun?.let { ui.removeCallbacks(it) }
-                  videoView.animate().cancel()
-                  videoView.alpha = 0f
-                  videoView.visibility = View.GONE
+                  videoBox.animate().cancel()
+                  videoBox.alpha = 0f
+                  videoBox.visibility = View.GONE
+                  if (restoreBg && revealed) { bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start() }
                   player?.let { it.stop(); it.clearMediaItems() }
               }
 
@@ -771,7 +832,7 @@ jobs:
                           clipChildren = false; clipToPadding = false; itemAnimator = null
                           overScrollMode = View.OVER_SCROLL_NEVER
                           isFocusable = false; isFocusableInTouchMode = false
-                          setHasFixedSize(true); setItemViewCacheSize(6)
+                          setHasFixedSize(true); setItemViewCacheSize(3)
                           setPadding(u(46), padV, u(60), padV)
                       }
                       r.addView(tv, LinearLayout.LayoutParams(-1, titleH))
@@ -824,8 +885,7 @@ jobs:
 
                   override fun onBindViewHolder(h: CardVH, pos: Int) {
                       val item = row.items[pos]
-                      val url = if (row.spotlight) item.landscape ?: item.portrait else item.portrait ?: item.landscape
-                      cardReq(url, cw, ch).into(h.iv)
+                      cardReq(cardUrl(row.spotlight, item), cw, ch).into(h.iv)
                       h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
                       h.card.setOnFocusChangeListener { v, has ->
                           v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
