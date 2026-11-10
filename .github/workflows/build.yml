@@ -72,6 +72,8 @@ jobs:
               implementation("com.squareup.okhttp3:okhttp:4.12.0")
               implementation("androidx.media3:media3-exoplayer:1.3.1")
               implementation("androidx.media3:media3-exoplayer-dash:1.3.1")
+              implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
+              implementation("androidx.media3:media3-datasource:1.3.1")
           }
           EOF
 
@@ -129,6 +131,26 @@ jobs:
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z"/></vector>
           EOF
 
+          # ---- player icons
+          cat > app/src/main/res/drawable/ic_back.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z"/></vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_play.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M8,5v14l11,-7z"/></vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_pause.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M6,19h4V5H6v14zM14,5v14h4V5h-4z"/></vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_subs.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M20,4H4c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V6c0,-1.1 -0.9,-2 -2,-2zM4,12h4v2H4v-2zM14,18H4v-2h10v2zM20,18h-4v-2h4v2zM20,14H10v-2h10v2z"/></vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_eps.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M4,6H2v14c0,1.1 0.9,2 2,2h14v-2H4V6zM20,2H8c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h12c1.1,0 2,-0.9 2,-2V4c0,-1.1 -0.9,-2 -2,-2zM12,14.5v-9l6,4.5 -6,4.5z"/></vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_check.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M9,16.17L4.83,12l-1.42,1.41L9,19 21,7l-1.41,-1.41z"/></vector>
+          EOF
+
           cat > app/src/main/java/com/example/livtv/App.kt <<'EOF'
           package com.example.livtv
 
@@ -178,12 +200,15 @@ jobs:
           import android.content.Context
           import android.content.res.Configuration
           import android.graphics.Bitmap
+          import android.graphics.Canvas
           import android.graphics.Color
           import android.graphics.Outline
+          import android.graphics.Paint
           import android.graphics.Rect
           import android.graphics.Typeface
           import android.graphics.drawable.Drawable
           import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
@@ -193,11 +218,18 @@ jobs:
           import android.view.animation.DecelerateInterpolator
           import android.widget.*
           import androidx.media3.common.AudioAttributes
+          import androidx.media3.common.C
+          import androidx.media3.common.Format
           import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
           import androidx.media3.common.PlaybackException
           import androidx.media3.common.Player
+          import androidx.media3.common.TrackSelectionOverride
+          import androidx.media3.common.Tracks
           import androidx.media3.common.VideoSize
+          import androidx.media3.datasource.DefaultHttpDataSource
           import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
           import androidx.recyclerview.widget.LinearLayoutManager
           import androidx.recyclerview.widget.LinearSmoothScroller
           import androidx.recyclerview.widget.RecyclerView
@@ -214,10 +246,13 @@ jobs:
           import com.bumptech.glide.request.target.Target
           import okhttp3.ConnectionPool
           import okhttp3.Dispatcher
+          import okhttp3.MediaType.Companion.toMediaType
           import okhttp3.OkHttpClient
           import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
           import org.json.JSONObject
           import java.security.MessageDigest
+          import java.security.SecureRandom
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
@@ -240,6 +275,26 @@ jobs:
 
           // Only items with this objectSubtype open the show detail page. Everything else (EPISODE, TRAILER, ...) is "under development": click does nothing.
           const val SUB_SHOW = "SHOW"
+
+          // ---- PLAYER / STREAM API (direct calls, no gateway / no proxy) ----
+          const val STREAM_API = "https://apiv2.sonyliv.com/AGL/5.0/A/ENG/MWEB/IN/RJ/CONTENT/VIDEOURL/VOD/"
+          const val STREAM_UA = "Mozilla/5.0 (Linux; Android 14; SM-A556B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36"
+          const val TD_CLIENT_HINTS = """{"os_name":"Android","os_version":"14","device_make":"Samsung","device_model":"SM-A556B","display_res":"360","viewport_res":"360","conn_type":"4g","supp_codec":"H264,H265,AV1,AAC","client_throughput":"16000","td_user_agent":"Mozilla/5.0 (Linux; Android 14; SM-A556B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36","hdr_decoder":"UNKNOWN","audio_decoder":"STEREO","app_version":"3.8.14"}"""
+          // sent with every media / license request (manifest, segments, widevine license)
+          val STREAM_HEADERS: Map<String, String> = mapOf(
+              "Origin" to "https://www.sonyliv.com",
+              "Referer" to "https://www.sonyliv.com/",
+              "x-via-device" to "true"
+          )
+          // same host rewrites the web version did (securetoken -> dish ...). Set false to use the raw videoURL as returned.
+          const val REWRITE_HOSTS = true
+          val HOST_MAP = listOf(
+              "securetoken.sonyliv.com" to "dish.sonyliv.com",
+              "drm.sonyliv.com" to "dishdrm.sonyliv.com",
+              "sonynondrmvod.akamaized.net" to "dish.sonyliv.com",
+              "sonynondrm.akamaized.net" to "dish.sonyliv.com",
+              "dish.slivcdn.com" to "dish.sonyliv.com"
+          )
 
           // ---- LAYOUT KNOBS (units are for a 1280px wide screen, scaled automatically) ----
           // Left edge of title image + tag + meta + description + buttons. SAME value on the Shows page and the detail page.
@@ -265,6 +320,50 @@ jobs:
           class Season(val id: String, val title: String, val count: Int, val num: Int, val air: Long)
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
           class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
+          class SubInfo(val url: String, val lang: String, val label: String)
+          class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>)
+
+          // Player seek bar: white progress, yellow thumb, yellow ad-break markers (like the Sony LIV player)
+          class SeekView(c: Context) : View(c) {
+              var dur = 0L
+              var pos = 0L
+              var buf = 0L
+              var marks: List<Long> = emptyList()
+              private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
+              init { isFocusable = true; isFocusableInTouchMode = true; isClickable = true }
+              override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+                  super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+                  invalidate()
+              }
+              override fun onDraw(c: Canvas) {
+                  val d = resources.displayMetrics.density
+                  val w = width.toFloat()
+                  val cy = height / 2f
+                  val th = (if (isFocused) 5f else 3f) * d
+                  val l = 10f * d
+                  val r = w - 10f * d
+                  val len = r - l
+                  pt.style = Paint.Style.FILL
+                  pt.color = Color.argb(80, 255, 255, 255)
+                  c.drawRoundRect(l, cy - th / 2, r, cy + th / 2, th, th, pt)
+                  if (dur > 0) {
+                      val bx = l + len * (buf.toFloat() / dur).coerceIn(0f, 1f)
+                      pt.color = Color.argb(130, 255, 255, 255)
+                      c.drawRoundRect(l, cy - th / 2, bx, cy + th / 2, th, th, pt)
+                      val px = l + len * (pos.toFloat() / dur).coerceIn(0f, 1f)
+                      pt.color = Color.WHITE
+                      c.drawRoundRect(l, cy - th / 2, px, cy + th / 2, th, th, pt)
+                      pt.color = Color.parseColor("#FFC107")
+                      for (m in marks) {
+                          if (m > 0 && m < dur) c.drawCircle(l + len * (m.toFloat() / dur), cy, 2.6f * d, pt)
+                      }
+                      c.drawCircle(px, cy, (if (isFocused) 9f else 7f) * d, pt)
+                  } else {
+                      pt.color = Color.parseColor("#FFC107")
+                      c.drawCircle(l, cy, 7f * d, pt)
+                  }
+              }
+          }
 
           // Cuts the transparent border off a title PNG so the visible artwork starts exactly at the left edge of the text under it
           // (and the view then hugs the artwork, so there is no empty frame around it).
@@ -333,6 +432,108 @@ jobs:
                       null
                   }
               }
+
+              // stream url request (POST json) - same headers as the web version, direct to sonyliv (no gateway)
+              fun post(url: String, json: String): JSONObject? {
+                  return try {
+                      val req = Request.Builder().url(url)
+                          .post(json.toRequestBody("application/json".toMediaType()))
+                          .header("User-Agent", STREAM_UA)
+                          .header("Accept", "application/json, text/plain, */*")
+                          .header("Origin", "https://www.sonyliv.com")
+                          .header("Referer", "https://www.sonyliv.com/")
+                          .header("x-via-device", "true")
+                          .header("td_client_hints", TD_CLIENT_HINTS)
+                          .build()
+                      Net.client.newCall(req).execute().use { r ->
+                          val body = r.body?.string().orEmpty()
+                          if (r.isSuccessful && body.isNotBlank()) JSONObject(body)
+                          else { lastError = "HTTP " + r.code + " " + body.take(140); null }
+                      }
+                  } catch (e: Exception) {
+                      lastError = e.toString()
+                      null
+                  }
+              }
+          }
+
+          fun randomHex(n: Int): String {
+              val b = ByteArray(n)
+              SecureRandom().nextBytes(b)
+              return b.joinToString("") { "%02x".format(it) }
+          }
+
+          // POST stream url (with /freepreview fallback) => videoURL + DRM license info
+          fun fetchStream(contentId: String): StreamInfo? {
+              val payload = JSONObject().apply {
+                  put("actionType", "play")
+                  put("browser", "chrome")
+                  put("deviceId", randomHex(16) + "-" + System.currentTimeMillis())
+                  put("os", "Android")
+                  put("platform", "mweb")
+                  put("hasLAURLEnabled", true)
+                  put("adsParams", JSONObject().apply {
+                      put("Idtype", "uuid")
+                      put("Is_lat", "0")
+                      put("ppid", randomHex(16))
+                      put("preroll", true)
+                  })
+              }.toString()
+              val base = STREAM_API + contentId
+              for (u in listOf(base, "$base/freepreview")) {
+                  val j = Api.post(u, payload) ?: continue
+                  val ro = (j.optJSONObject("data") ?: j).optJSONObject("resultObj") ?: continue
+                  val v = ro.str("videoURL") ?: continue
+                  val la = ro.optJSONObject("LA_Details")
+                  val subs = ArrayList<SubInfo>()
+                  val sa = ro.optJSONArray("subtitle")
+                  if (sa != null) for (k in 0 until sa.length()) {
+                      val o = sa.optJSONObject(k) ?: continue
+                      val su = o.str("subtitleUrl") ?: o.str("url") ?: o.str("subtitle_url") ?: o.str("file") ?: continue
+                      val lang = o.str("languageCode") ?: o.str("language") ?: o.str("subtitleLanguageName") ?: "und"
+                      val label = o.str("subtitleLanguageName") ?: o.str("label") ?: lang
+                      subs.add(SubInfo(su, lang, label))
+                  }
+                  return StreamInfo(v, ro.optBoolean("isEncrypted"), la?.str("laURL") ?: "", (la?.optString("drm") ?: "").uppercase(), subs)
+              }
+              return null
+          }
+
+          // removes tracking_params and adServer from the url
+          fun stripAdParams(raw: String): String {
+              if (raw.isEmpty()) return raw
+              var frag = ""
+              var work = raw
+              val h = raw.indexOf('#')
+              if (h != -1) { frag = raw.substring(h); work = raw.substring(0, h) }
+              val q = work.indexOf('?')
+              if (q == -1) return work + frag
+              val base = work.substring(0, q)
+              val query = work.substring(q + 1)
+              val kept = query.split("&").filter { it.isNotEmpty() }.filter {
+                  val k = it.substringBefore("=")
+                  k != "tracking_params" && k != "adServer"
+              }
+              return if (kept.isEmpty()) base + frag else base + "?" + kept.joinToString("&") + frag
+          }
+
+          // url actually given to the player (live DAI urls: ad params stripped; VOD: host rewrites like the web version)
+          fun playableUrl(raw: String): String {
+              if (raw.isEmpty()) return raw
+              if (Regex("^https?://(sonymtmnew|sonydaimenew)\\.akamaized\\.net", RegexOption.IGNORE_CASE).containsMatchIn(raw)) {
+                  return stripAdParams(raw)
+              }
+              if (!REWRITE_HOSTS) return raw
+              var r = raw
+              for ((a, b) in HOST_MAP) {
+                  r = r.replace(Regex("^https?://" + Regex.escape(a), RegexOption.IGNORE_CASE), "https://" + b)
+              }
+              return r
+          }
+
+          fun fmtClock(ms: Long): String {
+              val s = (ms / 1000).coerceAtLeast(0L)
+              return "%02d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
           }
 
           // CDN resizing: small + eco quality = much faster  ->  url?h=auto&w=<w>&q=eco
@@ -372,9 +573,11 @@ jobs:
 
           // 3 background threads, download to disk only (no bitmaps in RAM), wait only briefly while the visible images load.
           // Glide has 8 source threads (see App.kt) so these 3 can never starve the images on screen.
+          // While the player is open (paused = true) prefetch stops completely so the video gets all the bandwidth.
           object Prefetch {
               lateinit var app: Context
               @Volatile var gate = true
+              @Volatile var paused = false
               private val queue = LinkedBlockingDeque<String>()
               private val seen = java.util.Collections.synchronizedSet(HashSet<String>())
 
@@ -382,6 +585,7 @@ jobs:
                   while (true) {
                       try {
                           val u = queue.takeFirst()
+                          while (paused) Thread.sleep(250)
                           var w = 0
                           while (!gate && w < 12) { Thread.sleep(100); w++ }
                           Glide.with(app).downloadOnly().load(u).diskCacheStrategy(DiskCacheStrategy.DATA)
@@ -616,6 +820,46 @@ jobs:
               // urls already drawn on the detail page (so we never reload / flicker the same image twice)
               private var shownLogo: String? = null
               private var shownBg: String? = null
+              private var showTitle = ""
+
+              // ---- player
+              private lateinit var playerLayer: FrameLayout
+              private lateinit var pSurface: SurfaceView
+              private lateinit var ctrl: FrameLayout
+              private lateinit var pBack: ImageView
+              private lateinit var pTitle: TextView
+              private lateinit var pSub: TextView
+              private lateinit var pPause: ImageView
+              private lateinit var pSeek: SeekView
+              private lateinit var pTime: TextView
+              private lateinit var pillSub: LinearLayout
+              private lateinit var pillSet: LinearLayout
+              private lateinit var pillEps: LinearLayout
+              private lateinit var pCenter: ImageView
+              private lateinit var pSpin: ProgressBar
+              private lateinit var pStatus: TextView
+              private lateinit var drawer: FrameLayout
+              private lateinit var drawerCol: LinearLayout
+              private var drawerW = 0
+              private var mainPlayer: ExoPlayer? = null
+              private var inPlayer = false
+              private var ctrlVisible = true
+              private var panel = 0                    // 0 = none, 1 = subtitle/audio/quality drawer, 2 = episodes panel
+              private var drawerKind = 0
+              private var playToken = 0
+              private var curPlayEp: Ep? = null
+              private var curPlaySeason = 0
+              private var qualitySel = 0               // 0 = auto, else selected height
+
+              private val hideRun = Runnable {
+                  if (inPlayer && panel == 0 && mainPlayer?.playWhenReady == true) hideControls()
+              }
+              private val tickRun = object : Runnable {
+                  override fun run() {
+                      updateProgress()
+                      if (inPlayer) ui.postDelayed(this, 500)
+                  }
+              }
 
               // identical options for preload + real load => disk/memory cache hit, downsampled decode
               private fun cardReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).centerCrop()
@@ -668,6 +912,7 @@ jobs:
                   curBoxW = homeBoxW; curBoxH = homeBoxH
                   epImgW = (W * 0.24f).toInt(); epImgH = epImgW * 9 / 16             // bigger episode cards
                   seasonColW = (W * 0.2f).toInt()
+                  drawerW = (W * 0.36f).toInt()
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -757,6 +1002,7 @@ jobs:
                   content.addView(rowRv, lp(-1, rvH, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.008f).toInt() })
 
                   buildDetail()
+                  buildPlayer()
 
                   // status / placeholder text
                   status = TextView(this).apply {
@@ -875,7 +1121,7 @@ jobs:
                   }
                   tx(dDesc, 17f)
                   dWatch = heroBtn("▶  Watch Latest Episode") {
-                      Toast.makeText(this, "Play: " + (latestEp?.title ?: "latest episode"), Toast.LENGTH_SHORT).show()
+                      latestEp?.let { openPlayer(it, seasons.firstOrNull()?.num ?: 0) }
                   }
                   dPlus = heroBtn("+") {
                       Toast.makeText(this, "Added to watchlist", Toast.LENGTH_SHORT).show()
@@ -962,6 +1208,149 @@ jobs:
                   root.addView(detail, lp(-1, -1))
               }
 
+              // ---------------------------------------------------------------- Player UI
+              private fun iconBtn(res: Int, onClick: () -> Unit): ImageView {
+                  val v = ImageView(this).apply {
+                      setImageResource(res)
+                      setPadding(u(9), u(9), u(9), u(9))
+                      setColorFilter(Color.WHITE)
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  fun st() {
+                      val f = v.isFocused
+                      v.setColorFilter(if (f) Color.BLACK else Color.WHITE)
+                      v.background = if (f) GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) } else null
+                  }
+                  v.setOnFocusChangeListener { _, _ -> st() }
+                  v.setOnClickListener { onClick() }
+                  return v
+              }
+
+              private fun pill(label: String, icon: Int, onClick: () -> Unit): LinearLayout {
+                  val ll = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(18), u(10), u(22), u(10))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val iv = ImageView(this).apply { setImageResource(icon) }
+                  val tv = TextView(this).apply { text = label; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE) }
+                  tx(tv, 16f)
+                  ll.addView(iv, LinearLayout.LayoutParams(u(22), u(22)).apply { rightMargin = u(10) })
+                  ll.addView(tv, LinearLayout.LayoutParams(-2, -2))
+                  fun st() {
+                      val f = ll.isFocused
+                      tv.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      iv.setColorFilter(if (f) Color.BLACK else Color.WHITE)
+                      ll.background = GradientDrawable().apply {
+                          cornerRadius = u(28).toFloat()
+                          setColor(if (f) Color.WHITE else Color.TRANSPARENT)
+                      }
+                  }
+                  st()
+                  ll.setOnFocusChangeListener { _, _ -> st() }
+                  ll.setOnClickListener { onClick() }
+                  return ll
+              }
+
+              private fun buildPlayer() {
+                  playerLayer = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); visibility = View.GONE }
+                  pSurface = SurfaceView(this)
+                  playerLayer.addView(pSurface, lp(-1, -1))
+
+                  pCenter = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_play); setPadding(u(22), u(22), u(22), u(22))
+                      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(150, 30, 30, 40)) }
+                      visibility = View.GONE
+                  }
+                  playerLayer.addView(pCenter, lp(u(84), u(84), Gravity.CENTER))
+                  pSpin = ProgressBar(this).apply { visibility = View.GONE }
+                  playerLayer.addView(pSpin, lp(u(56), u(56), Gravity.CENTER))
+
+                  // ---- controls layer (fades in / out)
+                  ctrl = FrameLayout(this)
+                  ctrl.addView(View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          intArrayOf(Color.argb(215, 0, 0, 0), Color.argb(0, 0, 0, 0)))
+                  }, lp(-1, (H * 0.30f).toInt(), Gravity.TOP))
+                  ctrl.addView(View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
+                          intArrayOf(Color.argb(235, 0, 0, 0), Color.argb(0, 0, 0, 0)))
+                  }, lp(-1, (H * 0.42f).toInt(), Gravity.BOTTOM))
+
+                  // top bar: back arrow, "S1 E16 • Episode title", show title
+                  val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  pBack = iconBtn(R.drawable.ic_back) { onBackPressed() }
+                  pTitle = TextView(this).apply {
+                      setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                  }
+                  tx(pTitle, 24f)
+                  pSub = TextView(this).apply {
+                      setTextColor(Color.parseColor("#E6E6EA")); typeface = Typeface.DEFAULT_BOLD; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                  }
+                  tx(pSub, 18f)
+                  val tcol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  tcol.addView(pTitle, LinearLayout.LayoutParams(-1, -2))
+                  tcol.addView(pSub, LinearLayout.LayoutParams(-1, -2))
+                  top.addView(pBack, LinearLayout.LayoutParams(u(46), u(46)))
+                  top.addView(tcol, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = u(14) })
+                  ctrl.addView(top, lp(-1, -2, Gravity.TOP).apply { leftMargin = u(56); rightMargin = u(56); topMargin = u(26) })
+
+                  // bottom: [pause] [seek bar] [time]  /  liv  [Subtitle & Audio] [Settings] [Episodes]
+                  val bottomCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  pPause = iconBtn(R.drawable.ic_pause) { togglePause() }
+                  pSeek = SeekView(this).apply { setOnClickListener { togglePause() } }
+                  pTime = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; text = "00:00:00 / 00:00:00" }
+                  tx(pTime, 16f)
+                  row1.addView(pPause, LinearLayout.LayoutParams(u(46), u(46)))
+                  row1.addView(pSeek, LinearLayout.LayoutParams(0, u(46), 1f).apply { leftMargin = u(10) })
+                  row1.addView(pTime, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(14) })
+
+                  val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  val livLogo = TextView(this).apply {
+                      text = "liv"; setTextColor(Color.parseColor("#FFC107")); typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
+                  }
+                  tx(livLogo, 30f)
+                  pillSub = pill("Subtitle & Audio", R.drawable.ic_subs) { openDrawer(1) }
+                  pillSet = pill("Settings", R.drawable.ic_settings) { openDrawer(2) }
+                  pillEps = pill("Episodes", R.drawable.ic_eps) { openPlayerEps() }
+                  row2.addView(livLogo, LinearLayout.LayoutParams(u(74), -2))
+                  row2.addView(pillSub, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
+                  row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
+                  row2.addView(pillEps, LinearLayout.LayoutParams(-2, -2))
+
+                  bottomCol.addView(row1, LinearLayout.LayoutParams(-1, -2))
+                  bottomCol.addView(row2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
+                  ctrl.addView(bottomCol, lp(-1, -2, Gravity.BOTTOM).apply { leftMargin = u(56); rightMargin = u(56); bottomMargin = u(26) })
+                  playerLayer.addView(ctrl, lp(-1, -1))
+
+                  pStatus = TextView(this).apply {
+                      setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE
+                      setPadding(u(60), u(10), u(60), u(10))
+                  }
+                  tx(pStatus, 18f)
+                  playerLayer.addView(pStatus, lp(-1, -2, Gravity.CENTER))
+
+                  // right side drawer (Subtitle & Audio / Settings)
+                  drawer = FrameLayout(this).apply {
+                      setBackgroundColor(Color.argb(244, 14, 14, 16)); visibility = View.GONE
+                      descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                      translationX = drawerW.toFloat()
+                  }
+                  val ds = ScrollView(this).apply {
+                      isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER; isFocusable = false
+                  }
+                  drawerCol = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(u(26), u(40), u(26), u(40))
+                  }
+                  ds.addView(drawerCol, FrameLayout.LayoutParams(-1, -2))
+                  drawer.addView(ds, lp(-1, -1))
+                  playerLayer.addView(drawer, lp(drawerW, -1, Gravity.END))
+
+                  root.addView(playerLayer, lp(-1, -1))
+              }
+
               private fun styleTab(i: Int) {
                   val v = tabViews[i]
                   val f = v.isFocused
@@ -1042,7 +1431,7 @@ jobs:
                   })
                   remote.addView(handle)
                   remote.addView(hrow(spacer(), rbtn("▲") { move(View.FOCUS_UP) }, spacer()))
-                  remote.addView(hrow(rbtn("◀") { move(View.FOCUS_LEFT) }, rbtn("OK") { currentFocus?.performClick() }, rbtn("▶") { move(View.FOCUS_RIGHT) }))
+                  remote.addView(hrow(rbtn("◀") { move(View.FOCUS_LEFT) }, rbtn("OK") { okPress(false) }, rbtn("▶") { move(View.FOCUS_RIGHT) }))
                   remote.addView(hrow(spacer(), rbtn("▼") { move(View.FOCUS_DOWN) }, spacer()))
                   remote.addView(hrow(rbtn("BACK", 80) { onBackPressed() }, rbtn("HIDE", 80) { remote.visibility = View.GONE }))
                   root.addView(remote, lp(-2, -2, Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, u(24), u(24)) })
@@ -1118,6 +1507,17 @@ jobs:
               }
 
               private fun move(dir: Int) {
+                  if (inPlayer) {
+                      val code = when (dir) {
+                          View.FOCUS_UP -> KeyEvent.KEYCODE_DPAD_UP
+                          View.FOCUS_DOWN -> KeyEvent.KEYCODE_DPAD_DOWN
+                          View.FOCUS_LEFT -> KeyEvent.KEYCODE_DPAD_LEFT
+                          else -> KeyEvent.KEYCODE_DPAD_RIGHT
+                      }
+                      if (playerKey(code, 0)) return
+                      currentFocus?.focusSearch(dir)?.requestFocus(dir)
+                      return
+                  }
                   if ((dir == View.FOCUS_UP || dir == View.FOCUS_DOWN) && handleVertical(dir)) return
                   if (dir == View.FOCUS_LEFT && handleHorizontal(dir)) return
                   val f = currentFocus
@@ -1131,7 +1531,21 @@ jobs:
                   f.focusSearch(dir)?.requestFocus(dir)
               }
 
+              // OK button / tap. In the player with hidden controls: key OK = pause/play, touch tap = just show the controls.
+              private fun okPress(touch: Boolean) {
+                  if (inPlayer && panel == 0 && !ctrlVisible) {
+                      if (!touch) togglePause()
+                      showControls()
+                      return
+                  }
+                  currentFocus?.performClick()
+              }
+
               override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+                  if (inPlayer) {
+                      if (ev.action == KeyEvent.ACTION_DOWN && playerKey(ev.keyCode, ev.repeatCount)) return true
+                      return super.dispatchKeyEvent(ev)
+                  }
                   if (ev.action == KeyEvent.ACTION_DOWN) {
                       when (ev.keyCode) {
                           KeyEvent.KEYCODE_DPAD_UP -> if (handleVertical(View.FOCUS_UP)) return true
@@ -1168,13 +1582,25 @@ jobs:
                               move(d); swiped = true; sx = ev.rawX; sy = ev.rawY
                           }
                       }
-                      MotionEvent.ACTION_UP -> if (!swiped) currentFocus?.performClick()
+                      MotionEvent.ACTION_UP -> if (!swiped) okPress(true)
                   }
                   return true
               }
 
               @Suppress("DEPRECATION")
               override fun onBackPressed() {
+                  if (inPlayer) {
+                      when (panel) {
+                          2 -> {
+                              // from the episode list: first go back to the selected season, next back closes the panel
+                              if (inEpList() && focusSeasonChip()) return
+                              closePlayerEps(true)
+                          }
+                          1 -> closeDrawer(true)
+                          else -> closePlayer()
+                      }
+                      return
+                  }
                   if (inDetail) {
                       if (epMode) {
                           // from the episode list: first go back to the selected season, next back closes the panel
@@ -1407,6 +1833,7 @@ jobs:
               }
 
               private fun schedulePlay(url: String, spotLoop: Boolean) {
+                  if (inPlayer) return                         // the real player is open: no trailers
                   stopTrailer(false)
                   val r = Runnable { playTrailer(url, spotLoop) }
                   trailerRun = r
@@ -1495,13 +1922,18 @@ jobs:
                   player?.let { it.stop(); it.clearMediaItems() }
               }
 
-              override fun onStop() { super.onStop(); stopTrailer() }
+              override fun onStop() { super.onStop(); stopTrailer(); mainPlayer?.pause() }
               override fun onRestart() {
                   super.onRestart()
+                  if (inPlayer) return
                   if (inDetail) { if (!epMode) detailTrailerUrl?.let { schedulePlay(it, false) } }
                   else if (tab == 2) hero?.let { scheduleTrailer(it) }
               }
-              override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
+              override fun onDestroy() {
+                  super.onDestroy()
+                  player?.release(); player = null
+                  mainPlayer?.release(); mainPlayer = null
+              }
 
               // ---------------------------------------------------------------- Detail page
               // Only objectSubtype == SHOW opens here. Episodes / trailers / other VOD: under development, click does nothing.
@@ -1526,6 +1958,7 @@ jobs:
                   epLayer.animate().cancel(); epLayer.visibility = View.GONE; epLayer.translationY = H.toFloat()
 
                   // instant preview from the list item
+                  showTitle = item.title
                   seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
                   sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
                   epStatus.visibility = View.GONE
@@ -1546,7 +1979,7 @@ jobs:
                   dWatch.text = "▶  Watch Latest Episode"
                   dStatus.text = "Loading…"; dStatus.visibility = View.VISIBLE
                   dWatch.requestFocus()
-                  ui.postDelayed({ if (inDetail && !epMode) dWatch.requestFocus() }, 200)
+                  ui.postDelayed({ if (inDetail && !epMode && !inPlayer) dWatch.requestFocus() }, 200)
 
                   val cachedJ = synchronized(detailCache) { detailCache[item.cid] }
                   if (cachedJ != null) bindDetail(cachedJ, item)
@@ -1583,7 +2016,7 @@ jobs:
                           fired = true
                           detGateRun?.let { ui.removeCallbacks(it) }
                           Prefetch.gate = true
-                          if (tok == detailToken && inDetail && trailer != null && !epMode) schedulePlay(trailer, false)
+                          if (tok == detailToken && inDetail && trailer != null && !epMode && !inPlayer) schedulePlay(trailer, false)
                       }
                   }
                   val l = doneListener {
@@ -1630,6 +2063,7 @@ jobs:
                   val e = m.optJSONObject("emfAttributes") ?: JSONObject()
 
                   val title = m.str("title") ?: item.title
+                  showTitle = title
                   val desc = m.str("shortDescription") ?: m.str("longDescription") ?: item.desc
 
                   // "Hindi • 2026 • U/A 7+ • 16 Episodes • Comedy, Game show"
@@ -1731,6 +2165,9 @@ jobs:
                   loadEpisodes()
               }
 
+              // is the episode list on screen right now (detail episodes page OR the player's episodes panel)?
+              private fun epActive(): Boolean = if (inPlayer) panel == 2 else (inDetail && epMode)
+
               // bundle api: from=0&to=29, then from=30&to=59 ... while scrolling
               private fun loadEpisodes() {
                   if (epLoading || !epHasMore || curSeason !in seasons.indices) return
@@ -1764,7 +2201,7 @@ jobs:
                           else epStatus.visibility = View.GONE
                           if (start == 0 && list.isNotEmpty()) {
                               if (curSeason == 0) setWatchLabel(list[0])
-                              if (epMode && wantEpFocus) { wantEpFocus = false; focusFirstEp(12) }
+                              if (epActive() && wantEpFocus) { wantEpFocus = false; focusFirstEp(12) }
                           }
                       }
                   }.start()
@@ -1772,7 +2209,7 @@ jobs:
 
               private fun focusFirstEp(tries: Int) {
                   ui.postDelayed({
-                      if (!inDetail || !epMode) return@postDelayed
+                      if (!epActive()) return@postDelayed
                       val v = dEpRv.findViewHolderForAdapterPosition(0)?.itemView ?: dEpRv.getChildAt(0)
                       val ok = v?.requestFocus() ?: false
                       if (!ok && tries > 0) focusFirstEp(tries - 1)
@@ -1785,6 +2222,18 @@ jobs:
                   if (first != null) first.requestFocus()
                   else if (eps.isEmpty()) { wantEpFocus = true; epTab.requestFocus() }
                   else focusFirstEp(10)
+              }
+
+              // focus the episode that is playing (falls back to the first row)
+              private fun focusPlayingEp() {
+                  val id = curPlayEp?.id
+                  val pos = if (id == null) -1 else eps.indexOfFirst { it.id == id }
+                  if (pos < 0) { focusEpDefault(); return }
+                  dEpRv.scrollToPosition(pos)
+                  ui.postDelayed({
+                      val v = dEpRv.findViewHolderForAdapterPosition(pos)?.itemView
+                      if (v != null) v.requestFocus() else focusEpDefault()
+                  }, 120)
               }
 
               // slide the episodes panel up (trailer view stays underneath, paused)
@@ -1800,7 +2249,7 @@ jobs:
                   epLayer.translationY = H.toFloat()
                   epLayer.animate().translationY(0f).setDuration(300).setInterpolator(DecelerateInterpolator()).start()
                   if (eps.isEmpty()) loadEpisodes()
-                  ui.postDelayed({ if (inDetail && epMode) focusEpDefault() }, 200)
+                  ui.postDelayed({ if (inDetail && epMode && !inPlayer) focusEpDefault() }, 200)
               }
 
               private fun hideEpisodes() {
@@ -1839,6 +2288,543 @@ jobs:
                       if (c != null && c.isAttachedToWindow) c.requestFocus() else focusFirst(12)
                       hero?.let { scheduleTrailer(it) }
                   }, 100)
+              }
+
+              // ---------------------------------------------------------------- Player logic
+              private fun playEpisode(ep: Ep) {
+                  val sn = if (curSeason in seasons.indices) seasons[curSeason].num else 0
+                  openPlayer(ep, sn)
+              }
+
+              private fun setPlayerTitles() {
+                  val ep = curPlayEp ?: return
+                  val pre = ((if (curPlaySeason > 0) "S$curPlaySeason " else "") + (if (ep.num > 0) "E${ep.num}" else "")).trim()
+                  val name = if (ep.title.isNotBlank()) ep.title else showTitle
+                  pTitle.text = if (pre.isNotEmpty()) "$pre • $name" else name
+                  pSub.text = showTitle
+              }
+
+              // opens the player for an episode (from the detail page, or switching episode inside the player)
+              private fun openPlayer(ep: Ep, seasonNum: Int) {
+                  if (ep.id.isBlank()) return
+                  val tok = ++playToken
+                  curPlayEp = ep; curPlaySeason = seasonNum
+                  if (!inPlayer) {
+                      inPlayer = true
+                      heroRun?.let { ui.removeCallbacks(it) }
+                      detGateRun?.let { ui.removeCallbacks(it) }
+                      stopTrailer(false)
+                      Prefetch.paused = true                 // all bandwidth for the video
+                      detail.visibility = View.GONE
+                      playerLayer.visibility = View.VISIBLE
+                  } else {
+                      mainPlayer?.let { it.stop(); it.clearMediaItems() }
+                      if (panel == 1) closeDrawer(false)
+                      if (panel == 2) closePlayerEps(false)
+                  }
+                  panel = 0
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  pStatus.visibility = View.GONE
+                  pCenter.visibility = View.GONE
+                  pSpin.visibility = View.VISIBLE
+                  pPause.setImageResource(R.drawable.ic_pause)
+                  pSeek.pos = 0L; pSeek.buf = 0L; pSeek.dur = ep.dur * 1000L; pSeek.marks = emptyList(); pSeek.invalidate()
+                  pTime.text = "00:00:00 / " + fmtClock(ep.dur * 1000L)
+                  setPlayerTitles()
+                  epAdapter.notifyDataSetChanged()           // "Now Playing" badge
+                  showControls()
+                  ui.removeCallbacks(tickRun); ui.postDelayed(tickRun, 500)
+
+                  // stream url + license
+                  Thread {
+                      val s = fetchStream(ep.id)
+                      ui.post {
+                          if (tok != playToken || !inPlayer) return@post
+                          if (s == null) {
+                              pSpin.visibility = View.GONE
+                              pStatus.text = "Stream unavailable for this content.\n" + Api.lastError
+                              pStatus.visibility = View.VISIBLE
+                          } else startPlayback(s)
+                      }
+                  }.start()
+
+                  // ad-break markers + exact episode title from the episode DETAIL-V2 (best effort)
+                  Thread {
+                      val j = fetchDetail(ep.id)
+                      val m = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)?.optJSONObject("metadata")
+                      val marks = ArrayList<Long>()
+                      val cps = m?.optJSONArray("advertisingInfoList")?.optJSONObject(0)?.optJSONArray("cuePointList")
+                      if (cps != null) for (k in 0 until cps.length()) {
+                          val c = cps.optJSONObject(k) ?: continue
+                          if (c.optString("timePositionClass") == "MIDROLL") marks.add(c.optLong("contentTimePosition") * 1000L)
+                      }
+                      val sn = m?.optInt("season") ?: 0
+                      val en = m?.optInt("episodeNumber") ?: 0
+                      val et = m?.str("episodeTitle")
+                      ui.post {
+                          if (tok != playToken || !inPlayer) return@post
+                          pSeek.marks = marks; pSeek.invalidate()
+                          if (en > 0) {
+                              curPlayEp = Ep(ep.id, et ?: ep.title, en, ep.desc, ep.thumb, ep.dur, ep.air)
+                              if (sn > 0) curPlaySeason = sn
+                              setPlayerTitles()
+                          }
+                      }
+                  }.start()
+              }
+
+              private val mainListener = object : Player.Listener {
+                  override fun onPlaybackStateChanged(playbackState: Int) {
+                      refreshPlayUi()
+                      if (playbackState == Player.STATE_ENDED) playNextOrExit()
+                  }
+                  override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { refreshPlayUi() }
+                  override fun onIsPlayingChanged(isPlaying: Boolean) { if (isPlaying) pStatus.visibility = View.GONE }
+                  override fun onPlayerError(error: PlaybackException) {
+                      pSpin.visibility = View.GONE
+                      pCenter.visibility = View.GONE
+                      pStatus.text = "Playback error\n" + error.errorCodeName + (error.cause?.message?.let { "\n" + it } ?: "")
+                      pStatus.visibility = View.VISIBLE
+                      showControls()
+                  }
+              }
+
+              private fun ensureMainPlayer(): ExoPlayer {
+                  mainPlayer?.let { return it }
+                  // every manifest / segment request carries the same headers as the web player (Origin + Referer sonyliv.com)
+                  val dsf = DefaultHttpDataSource.Factory()
+                      .setUserAgent(STREAM_UA)
+                      .setAllowCrossProtocolRedirects(true)
+                      .setConnectTimeoutMs(15000)
+                      .setReadTimeoutMs(20000)
+                      .setDefaultRequestProperties(STREAM_HEADERS)
+                  val p = ExoPlayer.Builder(this)
+                      .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dsf))
+                      .build()
+                  p.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true)
+                  p.addListener(mainListener)
+                  mainPlayer = p
+                  return p
+              }
+
+              private fun startPlayback(s: StreamInfo) {
+                  val p = ensureMainPlayer()
+                  p.setVideoSurfaceView(pSurface)
+                  // subtitles OFF by default, quality AUTO
+                  p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                      .clearOverrides().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                  qualitySel = 0
+
+                  val url = playableUrl(s.url)
+                  val lower = url.lowercase()
+                  val mime = when {
+                      lower.contains(".m3u8") -> MimeTypes.APPLICATION_M3U8
+                      lower.contains(".mpd") -> MimeTypes.APPLICATION_MPD
+                      else -> null
+                  }
+                  val mb = MediaItem.Builder().setUri(url)
+                  if (mime != null) mb.setMimeType(mime)
+                  if (s.enc && s.laUrl.isNotBlank() && s.drm == "WIDEVINE") {
+                      mb.setDrmConfiguration(
+                          MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+                              .setLicenseUri(s.laUrl)
+                              .setLicenseRequestHeaders(STREAM_HEADERS)
+                              .build()
+                      )
+                  }
+                  // external subtitle files (only well known text formats)
+                  val subs = ArrayList<MediaItem.SubtitleConfiguration>()
+                  for (si in s.subs) {
+                      val ul = si.url.lowercase().substringBefore("?")
+                      val sm = when {
+                          ul.endsWith(".vtt") -> MimeTypes.TEXT_VTT
+                          ul.endsWith(".srt") -> MimeTypes.APPLICATION_SUBRIP
+                          ul.endsWith(".ttml") || ul.endsWith(".xml") || ul.endsWith(".dfxp") -> MimeTypes.APPLICATION_TTML
+                          else -> null
+                      } ?: continue
+                      subs.add(MediaItem.SubtitleConfiguration.Builder(Uri.parse(si.url))
+                          .setMimeType(sm).setLanguage(si.lang).setLabel(si.label).setSelectionFlags(0).build())
+                  }
+                  if (subs.isNotEmpty()) mb.setSubtitleConfigurations(subs)
+
+                  p.setMediaItem(mb.build())
+                  p.prepare()
+                  p.playWhenReady = true
+                  pStatus.visibility = View.GONE
+                  refreshPlayUi()
+              }
+
+              private fun refreshPlayUi() {
+                  val p = mainPlayer ?: return
+                  pPause.setImageResource(if (p.playWhenReady) R.drawable.ic_pause else R.drawable.ic_play)
+                  val st = p.playbackState
+                  pSpin.visibility = if (st == Player.STATE_BUFFERING && p.playWhenReady) View.VISIBLE else View.GONE
+                  pCenter.visibility = if (!p.playWhenReady && st != Player.STATE_ENDED && pStatus.visibility != View.VISIBLE) View.VISIBLE else View.GONE
+                  if (!p.playWhenReady) {
+                      ui.removeCallbacks(hideRun)
+                      if (panel == 0 && inPlayer) showControls()
+                  } else schedHide()
+              }
+
+              private fun playNextOrExit() {
+                  val cur = curPlayEp ?: run { closePlayer(); return }
+                  val i = eps.indexOfFirst { it.id == cur.id }
+                  if (i > 0) openPlayer(eps[i - 1], curPlaySeason) else closePlayer()
+              }
+
+              private fun updateProgress() {
+                  val p = mainPlayer
+                  val dur = if (p != null && p.duration > 0) p.duration else (curPlayEp?.dur ?: 0) * 1000L
+                  val pos = p?.currentPosition ?: 0L
+                  pSeek.dur = dur
+                  pSeek.pos = pos
+                  pSeek.buf = p?.bufferedPosition ?: 0L
+                  pSeek.invalidate()
+                  pTime.text = fmtClock(pos) + " / " + fmtClock(dur)
+              }
+
+              private fun togglePause() {
+                  val p = mainPlayer ?: return
+                  if (p.playbackState == Player.STATE_ENDED) { p.seekTo(0); p.play(); return }
+                  if (p.playWhenReady) p.pause() else p.play()
+              }
+
+              private fun seekBy(deltaMs: Long) {
+                  val p = mainPlayer ?: return
+                  val dur = if (p.duration > 0) p.duration else (curPlayEp?.dur ?: 0) * 1000L
+                  var t = p.currentPosition + deltaMs
+                  if (t < 0L) t = 0L
+                  if (dur > 0 && t > dur - 1000L) t = max(0L, dur - 1000L)
+                  p.seekTo(t)
+                  pSeek.pos = t
+                  pSeek.invalidate()
+                  pTime.text = fmtClock(t) + " / " + fmtClock(dur)
+              }
+
+              private fun showControls() {
+                  if (!inPlayer || panel != 0) return
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = true
+                  ctrl.animate().cancel()
+                  ctrl.visibility = View.VISIBLE
+                  ctrl.animate().alpha(1f).setDuration(150).start()
+                  if (ctrl.findFocus() == null) pSeek.requestFocus()
+                  schedHide()
+              }
+
+              private fun schedHide() {
+                  ui.removeCallbacks(hideRun)
+                  if (inPlayer && panel == 0 && mainPlayer?.playWhenReady == true) ui.postDelayed(hideRun, 5000)
+              }
+
+              private fun hideControls() {
+                  ctrlVisible = false
+                  ctrl.animate().cancel()
+                  ctrl.animate().alpha(0f).setDuration(200).withEndAction { if (!ctrlVisible) ctrl.visibility = View.INVISIBLE }.start()
+              }
+
+              // all player key handling. returns true when the key was consumed.
+              private fun playerKey(code: Int, repeat: Int): Boolean {
+                  if (panel == 1) {                                  // drawer: up / down / OK handled by normal focus
+                      return when (code) {
+                          KeyEvent.KEYCODE_DPAD_LEFT -> { closeDrawer(true); true }
+                          KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                          else -> false
+                      }
+                  }
+                  if (panel == 2) {                                  // episodes panel (same behaviour as the detail episodes page)
+                      when (code) {
+                          KeyEvent.KEYCODE_DPAD_UP -> if (currentFocus === epTab) { closePlayerEps(true); return true }
+                          KeyEvent.KEYCODE_DPAD_LEFT -> if (inEpList()) return focusSeasonChip()
+                      }
+                      return false
+                  }
+                  when (code) {
+                      KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePause(); showControls(); return true }
+                      KeyEvent.KEYCODE_MEDIA_PLAY -> { mainPlayer?.play(); return true }
+                      KeyEvent.KEYCODE_MEDIA_PAUSE -> { mainPlayer?.pause(); return true }
+                      KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(30000L); showControls(); return true }
+                      KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-30000L); showControls(); return true }
+                  }
+                  val step = if (repeat > 3) 30000L else 10000L
+                  if (!ctrlVisible) {                                // controls hidden: arrows seek, OK = pause / play
+                      when (code) {
+                          KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-step); showControls(); return true }
+                          KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(step); showControls(); return true }
+                          KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> { togglePause(); showControls(); return true }
+                          KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> { showControls(); return true }
+                      }
+                      return false
+                  }
+                  schedHide()
+                  val f = currentFocus
+                  val onPill = f === pillSub || f === pillSet || f === pillEps
+                  when (code) {
+                      KeyEvent.KEYCODE_DPAD_LEFT -> {
+                          if (f === pSeek) { seekBy(-step); return true }
+                          if (f === pillSub || f === pPause || f === pBack) return true
+                      }
+                      KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                          if (f === pSeek) { seekBy(step); return true }
+                          if (f === pPause) { pSeek.requestFocus(); return true }
+                          if (f === pillEps || f === pBack) return true
+                      }
+                      KeyEvent.KEYCODE_DPAD_UP -> {
+                          if (f === pSeek) pPause.requestFocus()
+                          else if (f === pPause) pBack.requestFocus()
+                          else if (onPill) pSeek.requestFocus()
+                          return true
+                      }
+                      KeyEvent.KEYCODE_DPAD_DOWN -> {
+                          if (f === pBack) pPause.requestFocus()
+                          else if (f === pSeek || f === pPause) pillSub.requestFocus()
+                          return true
+                      }
+                  }
+                  return false
+              }
+
+              // ---- drawer: Subtitle & Audio (kind 1) / Settings = video quality (kind 2)
+              private fun trackLabel(f: Format, i: Int): String {
+                  f.label?.takeIf { it.isNotBlank() }?.let { return it }
+                  val lang = f.language
+                  if (!lang.isNullOrBlank() && lang != "und") {
+                      val n = Locale.forLanguageTag(lang).getDisplayLanguage(Locale.ENGLISH)
+                      return if (n.isNotBlank()) n else lang
+                  }
+                  return "Track " + (i + 1)
+              }
+
+              private fun drawerHeader(t: String): TextView {
+                  val h = TextView(this).apply {
+                      text = t; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                      setPadding(u(8), u(16), u(8), u(10))
+                  }
+                  tx(h, 20f)
+                  return h
+              }
+
+              private fun drawerRow(label: String, selected: Boolean, onClick: () -> Unit): LinearLayout {
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(16), u(14), u(16), u(14))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val ck = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_check)
+                      visibility = if (selected) View.VISIBLE else View.INVISIBLE
+                  }
+                  val tv = TextView(this).apply { text = label; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+                  tx(tv, 18f)
+                  row.addView(ck, LinearLayout.LayoutParams(u(24), u(24)).apply { rightMargin = u(16) })
+                  row.addView(tv, LinearLayout.LayoutParams(0, -2, 1f))
+                  fun st() {
+                      val f = row.isFocused
+                      tv.setTextColor(if (f) Color.parseColor("#222222") else Color.WHITE)
+                      tv.typeface = if (f || selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                      ck.setColorFilter(if (f) Color.parseColor("#777777") else Color.parseColor("#FFC107"))
+                      row.background = if (f) GradientDrawable().apply { cornerRadius = u(8).toFloat(); setColor(Color.WHITE) } else null
+                  }
+                  st()
+                  row.setOnFocusChangeListener { _, _ -> st() }
+                  row.setOnClickListener { onClick() }
+                  return row
+              }
+
+              private class QOpt(val h: Int, val g: Tracks.Group, val idx: Int, val br: Int)
+
+              private fun qualityOptions(): List<QOpt> {
+                  val p = mainPlayer ?: return emptyList()
+                  val best = HashMap<Int, QOpt>()
+                  for (g in p.currentTracks.groups) {
+                      if (g.type != C.TRACK_TYPE_VIDEO) continue
+                      for (i in 0 until g.length) {
+                          if (!g.isTrackSupported(i)) continue
+                          val f = g.getTrackFormat(i)
+                          if (f.height <= 0) continue
+                          val cur = best[f.height]
+                          if (cur == null || f.bitrate > cur.br) best[f.height] = QOpt(f.height, g, i, f.bitrate)
+                      }
+                  }
+                  return best.values.sortedByDescending { it.h }
+              }
+
+              private fun selectText(g: Tracks.Group?, idx: Int) {
+                  val p = mainPlayer ?: return
+                  val b = p.trackSelectionParameters.buildUpon()
+                  if (g == null) b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                  else {
+                      b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                      b.setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, idx))
+                  }
+                  p.trackSelectionParameters = b.build()
+              }
+
+              private fun selectAudio(g: Tracks.Group, idx: Int) {
+                  val p = mainPlayer ?: return
+                  p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                      .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, idx)).build()
+              }
+
+              private fun selectQuality(o: QOpt?) {
+                  val p = mainPlayer ?: return
+                  val b = p.trackSelectionParameters.buildUpon()
+                  if (o == null) { b.clearOverridesOfType(C.TRACK_TYPE_VIDEO); qualitySel = 0 }
+                  else { b.setOverrideForType(TrackSelectionOverride(o.g.mediaTrackGroup, o.idx)); qualitySel = o.h }
+                  p.trackSelectionParameters = b.build()
+              }
+
+              private fun openDrawer(kind: Int) {
+                  val p = mainPlayer ?: return
+                  if (panel != 0) return
+                  drawerKind = kind
+                  drawerCol.removeAllViews()
+                  var focusV: View? = null
+                  fun add(v: LinearLayout, sel: Boolean) {
+                      drawerCol.addView(v, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = u(6) })
+                      if (sel && focusV == null) focusV = v
+                  }
+                  val tracks = p.currentTracks
+                  if (kind == 1) {
+                      drawerCol.addView(drawerHeader("Subtitles"))
+                      val off = p.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+                      class TR(val g: Tracks.Group, val i: Int, val label: String, val sel: Boolean)
+                      val tl = ArrayList<TR>()
+                      for (g in tracks.groups) if (g.type == C.TRACK_TYPE_TEXT) for (i in 0 until g.length) {
+                          if (g.isTrackSupported(i)) tl.add(TR(g, i, trackLabel(g.getTrackFormat(i), tl.size), !off && g.isTrackSelected(i)))
+                      }
+                      add(drawerRow("OFF", off || tl.none { it.sel }) { selectText(null, 0); closeDrawer(true) }, off || tl.none { it.sel })
+                      for (t in tl) add(drawerRow(t.label, t.sel) { selectText(t.g, t.i); closeDrawer(true) }, t.sel)
+
+                      drawerCol.addView(drawerHeader("Audio"))
+                      var anyAudio = false
+                      for (g in tracks.groups) if (g.type == C.TRACK_TYPE_AUDIO) for (i in 0 until g.length) {
+                          if (!g.isTrackSupported(i)) continue
+                          anyAudio = true
+                          val sel = g.isTrackSelected(i)
+                          add(drawerRow(trackLabel(g.getTrackFormat(i), i), sel) { selectAudio(g, i); closeDrawer(true) }, sel)
+                      }
+                      if (!anyAudio) add(drawerRow("Default", true) { closeDrawer(true) }, true)
+                  } else {
+                      drawerCol.addView(drawerHeader("Video Quality"))
+                      add(drawerRow("Auto", qualitySel == 0) { selectQuality(null); closeDrawer(true) }, qualitySel == 0)
+                      for (o in qualityOptions()) {
+                          add(drawerRow(o.h.toString() + "p", qualitySel == o.h) { selectQuality(o); closeDrawer(true) }, qualitySel == o.h)
+                      }
+                  }
+                  panel = 1
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  drawer.animate().cancel()
+                  drawer.visibility = View.VISIBLE
+                  drawer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  drawer.translationX = drawerW.toFloat()
+                  drawer.animate().translationX(0f).setDuration(220).setInterpolator(DecelerateInterpolator()).start()
+                  ui.postDelayed({
+                      if (inPlayer && panel == 1) (focusV ?: drawerCol.getChildAt(1))?.requestFocus()
+                  }, 100)
+              }
+
+              private fun closeDrawer(refocus: Boolean) {
+                  if (panel != 1) return
+                  panel = 0
+                  drawer.animate().cancel()
+                  drawer.animate().translationX(drawerW.toFloat()).setDuration(200)
+                      .withEndAction {
+                          if (panel != 1) { drawer.visibility = View.GONE; drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS }
+                      }.start()
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  if (refocus) {
+                      showControls()
+                      (if (drawerKind == 1) pillSub else pillSet).requestFocus()
+                  }
+              }
+
+              // ---- episodes panel inside the player = the SAME episodes page (same list, same seasons), just see-through
+              private fun moveEpLayerToPlayer() {
+                  if (epLayer.parent === playerLayer) return
+                  (epLayer.parent as? ViewGroup)?.removeView(epLayer)
+                  playerLayer.addView(epLayer, lp(-1, -1))
+              }
+
+              private fun moveEpLayerToDetail() {
+                  if (epLayer.parent !== detail) {
+                      (epLayer.parent as? ViewGroup)?.removeView(epLayer)
+                      detail.addView(epLayer, 1, lp(-1, -1))
+                  }
+                  epLayer.setBackgroundColor(Color.argb(255, 12, 13, 20))
+                  epLayer.animate().cancel()
+                  if (epMode) {
+                      epLayer.visibility = View.VISIBLE; epLayer.translationY = 0f
+                      epLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  } else {
+                      epLayer.visibility = View.GONE; epLayer.translationY = H.toFloat()
+                      epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  }
+              }
+
+              private fun openPlayerEps() {
+                  if (panel != 0 || seasons.isEmpty()) return
+                  panel = 2
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  moveEpLayerToPlayer()
+                  epLayer.setBackgroundColor(Color.argb(205, 8, 9, 14))      // a little transparent: video is still visible behind
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  epLayer.visibility = View.VISIBLE
+                  epLayer.animate().cancel()
+                  epLayer.translationY = H.toFloat()
+                  epLayer.animate().translationY(0f).setDuration(300).setInterpolator(DecelerateInterpolator()).start()
+                  epAdapter.notifyDataSetChanged()
+                  if (eps.isEmpty()) loadEpisodes()
+                  ui.postDelayed({ if (inPlayer && panel == 2) focusPlayingEp() }, 220)
+              }
+
+              private fun closePlayerEps(refocus: Boolean) {
+                  if (panel != 2) return
+                  panel = 0
+                  selRun?.let { ui.removeCallbacks(it) }
+                  epLayer.animate().cancel()
+                  epLayer.animate().translationY(H.toFloat()).setDuration(260).setInterpolator(DecelerateInterpolator())
+                      .withEndAction {
+                          if (panel != 2) { epLayer.visibility = View.GONE; epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS }
+                      }.start()
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  if (refocus) {
+                      showControls()
+                      pillEps.requestFocus()
+                  }
+              }
+
+              private fun closePlayer() {
+                  playToken++
+                  inPlayer = false
+                  panel = 0
+                  ui.removeCallbacks(hideRun); ui.removeCallbacks(tickRun)
+                  mainPlayer?.let { it.stop(); it.clearVideoSurface(); it.release() }
+                  mainPlayer = null
+                  drawer.animate().cancel(); drawer.visibility = View.GONE; drawer.translationX = drawerW.toFloat()
+                  drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  ctrl.animate().cancel(); ctrl.alpha = 1f; ctrl.visibility = View.VISIBLE; ctrlVisible = true
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  playerLayer.visibility = View.GONE
+                  moveEpLayerToDetail()
+                  Prefetch.paused = false
+                  Prefetch.gate = true
+                  detail.visibility = View.VISIBLE
+                  epAdapter.notifyDataSetChanged()
+                  if (epMode) {
+                      heroLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                      ui.postDelayed({ if (inDetail && epMode && !inPlayer) focusPlayingEp() }, 150)
+                  } else {
+                      heroLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                      dWatch.requestFocus()
+                      detailTrailerUrl?.let { schedulePlay(it, false) }
+                  }
               }
 
               // ---------------------------------------------------------------- Adapters
@@ -2029,7 +3015,9 @@ jobs:
                       fmtDur(ep.dur).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
                       h.t2.text = bits.joinToString(" • ")
                       h.t3.text = ep.desc
-                      h.badge.visibility = if (pos == 0 && curSeason == 0) View.VISIBLE else View.GONE
+                      if (inPlayer && curPlayEp?.id == ep.id) { h.badge.text = "Now Playing"; h.badge.visibility = View.VISIBLE }
+                      else if (pos == 0 && curSeason == 0) { h.badge.text = "LATEST"; h.badge.visibility = View.VISIBLE }
+                      else h.badge.visibility = View.GONE
                       h.thumb.scaleX = 1f; h.thumb.scaleY = 1f; h.border.alpha = 0f
                       h.row.setOnFocusChangeListener { _, has ->
                           h.thumb.animate().scaleX(if (has) 1.05f else 1f).scaleY(if (has) 1.05f else 1f).setDuration(150).start()
@@ -2043,9 +3031,8 @@ jobs:
                               if (pos >= eps.size - 8) loadEpisodes()      // load next 30 early
                           }
                       }
-                      h.row.setOnClickListener {
-                          Toast.makeText(this@MainActivity, ep.title, Toast.LENGTH_SHORT).show()
-                      }
+                      // click an episode => player (from the detail page) or switch episode (inside the player)
+                      h.row.setOnClickListener { playEpisode(ep) }
                   }
               }
           }
