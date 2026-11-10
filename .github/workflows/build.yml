@@ -682,10 +682,10 @@ jobs:
                       if (token == heroToken) { pending--; if (pending <= 0) scheduleTrailer(item) }
                   }
                   val listener = object : RequestListener<Drawable> {
-                      override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>?, isFirstResource: Boolean): Boolean {
+                      override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>, isFirstResource: Boolean): Boolean {
                           done(); return false
                       }
-                      override fun onResourceReady(resource: Drawable?, model: Any?, target: Target<Drawable>?, dataSource: DataSource?, isFirstResource: Boolean): Boolean {
+                      override fun onResourceReady(resource: Drawable, model: Any, target: Target<Drawable>, dataSource: DataSource, isFirstResource: Boolean): Boolean {
                           done(); return false
                       }
                   }
