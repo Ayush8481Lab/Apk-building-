@@ -245,12 +245,12 @@ jobs:
           // Left edge of title image + tag + meta + description + buttons. SAME value on the Shows page and the detail page.
           // 126 = exactly where the row titles / first card start on the Shows page.
           const val CONTENT_LEFT = 126
-          // Extra push of the title PNG to the right (0 = flush with the text under it, try 20, 40 ... to move it more right)
+          // Extra push of the title PNG to the right (0 = artwork flush with the text under it, try 20, 40 ... to move it more right)
           const val LOGO_SHIFT_X = 0
 
           // ---- IMAGE WIDTHS (CDN params: ?h=auto&w=<n>&q=eco). Smaller = much faster download + decode. ----
-          const val W_LOGO = 900               // title image = masthead_logo_rectangualar ONLY, ?h=auto&w=900&q=eco
-          const val W_BG = 1500                // all background banners
+          const val W_LOGO = 700               // title image = masthead_logo_rectangualar ONLY, ?h=auto&w=700&q=eco
+          const val W_BG = 1200                // all background banners
           const val W_PORTRAIT = 500           // portrait cards (shown ~170-260px wide, 500 is already 2x sharp)
           const val W_SPOT = 600               // spotlight strips
           const val W_EP = 480                 // episode thumbnails (shown ~310-460px wide)
@@ -266,17 +266,18 @@ jobs:
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
           class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
 
-          // Cuts the transparent border off a title PNG so the visible artwork starts exactly at the left edge of the text under it.
-          // Robust version: faint glow / compression noise is ignored (alpha > 48 and at least 2 pixels per column / row).
-          // Fast version: scans ONE row at a time (no giant pixel array).
+          // Cuts the transparent border off a title PNG so the visible artwork starts exactly at the left edge of the text under it
+          // (and the view then hugs the artwork, so there is no empty frame around it).
+          // Faint glow / compression noise is ignored (alpha > 24 and at least 2 pixels per column / row).
+          // Scans ONE row at a time (no giant pixel array).
           class TrimTransform : BitmapTransformation() {
               override fun updateDiskCacheKey(messageDigest: MessageDigest) {
-                  messageDigest.update("trim_alpha_v2".toByteArray())
+                  messageDigest.update("trim_alpha_v3".toByteArray())
               }
               override fun equals(other: Any?) = other is TrimTransform
-              override fun hashCode() = 987655
+              override fun hashCode() = 987656
               override fun transform(pool: BitmapPool, toTransform: Bitmap, outWidth: Int, outHeight: Int): Bitmap {
-                  if (!toTransform.hasAlpha()) return toTransform
+                  if (toTransform.config != Bitmap.Config.ARGB_8888) return toTransform
                   val w = toTransform.width
                   val h = toTransform.height
                   val line = IntArray(w)
@@ -286,7 +287,7 @@ jobs:
                       toTransform.getPixels(line, 0, w, 0, y, w, 1)
                       var c = 0
                       for (x in 0 until w) {
-                          if ((line[x] ushr 24) > 48) { cols[x]++; c++ }
+                          if ((line[x] ushr 24) > 24) { cols[x]++; c++ }
                       }
                       rws[y] = c
                   }
@@ -425,7 +426,7 @@ jobs:
 
           // Lenient parser: CONTENT_ITEM and any other slide type that has an image.
           // Ads (LAUNCHER_ITEM ad slides) and image-less (text-only) slides are dropped.
-          // Title image: ONLY masthead_logo_rectangualar (always ?h=auto&w=900&q=eco), no fallbacks.
+          // Title image: ONLY masthead_logo_rectangualar (always ?h=auto&w=700&q=eco), no fallbacks.
           // Description priority: shortDescription -> launcher_short_description -> longDescription
           fun parseItem(o: JSONObject): Item? {
               val low = o.optString("layout").lowercase()
@@ -495,7 +496,7 @@ jobs:
               return DetailData(sorted, emb, latest)
           }
 
-          // detail page image urls: title = masthead_logo_rectangualar only (w=900), background w=1500
+          // detail page image urls: title = masthead_logo_rectangualar only (w=700), background w=1200
           fun detLogoUrl(show: JSONObject): String? {
               val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes") ?: return null
               return img(e.str("masthead_logo_rectangualar"), W_LOGO)
@@ -546,7 +547,7 @@ jobs:
               private var heroToken = 0
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
-              private var logoW = 0; private var logoH = 0; private var bgW = 1280; private var bgH = 720
+              private var logoW = 0; private var logoH = 0; private var bgW = 1200; private var bgH = 675
               // title logo sizes: Shows listing page = 1.5x, detail page (after clicking a show) = 1.8x
               private var homeLogoW = 0; private var homeLogoH = 0
               private var detLogoW = 0; private var detLogoH = 0
@@ -622,10 +623,12 @@ jobs:
               private fun bgReq(url: String?) = Glide.with(this).load(url).override(bgW, bgH).centerCrop()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
               private fun bgBigReq(url: String?) = Glide.with(this).load(url)
-                  .override(min(W, 1800), min(W, 1800) * 9 / 16).centerCrop()
+                  .override(min(W, 1200), min(W, 1200) * 9 / 16).centerCrop()
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
-              // title images: transparent border trimmed first, then fitted => artwork touches the left text edge
+              // title images: forced ARGB_8888 (keeps transparency), transparent border trimmed first, then fitted
+              // => the artwork itself touches the left text edge, no empty frame around it
               private fun logoReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h)
+                  .format(DecodeFormat.PREFER_ARGB_8888)
                   .transform(TrimTransform(), FitCenter())
                   .diskCacheStrategy(DiskCacheStrategy.ALL)
               private val roundOutline = object : ViewOutlineProvider() {
@@ -657,9 +660,9 @@ jobs:
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
-                  homeLogoH = (logoH * 1.5f).toInt(); homeLogoW = homeLogoH * 16 / 9  // Shows listing page logo 1.5x
-                  detLogoH = (logoH * 1.8f).toInt(); detLogoW = detLogoH * 16 / 9     // detail page logo 1.8x
-                  bgW = min(W, 1280); bgH = bgW * 9 / 16
+                  homeLogoH = (logoH * 1.5f).toInt(); homeLogoW = homeLogoH * 16 / 9  // Shows listing page logo 1.5x (max box)
+                  detLogoH = (logoH * 1.8f).toInt(); detLogoW = detLogoH * 16 / 9     // detail page logo 1.8x (max box)
+                  bgW = min(W, 1200); bgH = bgW * 9 / 16
                   homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
                   detBoxW = (W * 0.67f * 1.5f).toInt(); detBoxH = (H * 0.725f * 1.5f).toInt()
                   curBoxW = homeBoxW; curBoxH = homeBoxH
@@ -713,10 +716,11 @@ jobs:
                   content.addView(bottom, lp(-1, (H * 0.62).toInt(), Gravity.BOTTOM))
 
                   info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  // logo is trimmed to its artwork, aligned to the start (left) and the text sits right under it
+                  // logo view HUGS the trimmed artwork (wrap_content): its left edge is exactly the left edge of the text under it
                   logo = ImageView(this).apply {
                       scaleType = ImageView.ScaleType.FIT_START
                       adjustViewBounds = true
+                      maxWidth = homeLogoW
                       maxHeight = homeLogoH
                   }
                   titleTv = TextView(this).apply {
@@ -729,7 +733,7 @@ jobs:
                       setTextColor(Color.parseColor("#DADAE2")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                   }
                   tx(descTv, 17f)
-                  info.addView(logo, LinearLayout.LayoutParams(homeLogoW, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
+                  info.addView(logo, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
@@ -849,9 +853,11 @@ jobs:
                   heroLayer.addView(bottom, lp(-1, (H * 0.45).toInt(), Gravity.BOTTOM))
 
                   val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  // logo view HUGS the trimmed artwork (wrap_content): its left edge is exactly the left edge of the text under it
                   dLogo = ImageView(this).apply {
                       scaleType = ImageView.ScaleType.FIT_START
                       adjustViewBounds = true
+                      maxWidth = detLogoW
                       maxHeight = detLogoH
                   }
                   dTitle = TextView(this).apply {
@@ -878,7 +884,7 @@ jobs:
                   btnRow.addView(dWatch, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(12) })
                   btnRow.addView(dPlus, LinearLayout.LayoutParams(-2, -2))
 
-                  dInfo.addView(dLogo, LinearLayout.LayoutParams(detLogoW, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
+                  dInfo.addView(dLogo, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
                   dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
                   dInfo.addView(dTag, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
@@ -1654,7 +1660,7 @@ jobs:
                   val trailer = trailerFrom(show)
                   detailTrailerUrl = trailer
 
-                  // title image (masthead_logo_rectangualar, w=900) + background (w=1500) + first episode thumbnails => then the trailer
+                  // title image (masthead_logo_rectangualar, w=700) + background (w=1200) + first episode thumbnails => then the trailer
                   val logoUrl = detLogoUrl(show) ?: item.logo
                   val bgUrl = detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)
                   val thumbs = data.seasons.firstOrNull()?.let { s ->
@@ -1952,7 +1958,9 @@ jobs:
                   }
               }
 
-              // vertical episode list: thumbnail left, title / "E16 • 08 Nov 2026 • 1h 14m" / description right
+              // vertical episode list: thumbnail left, title / "E16 • 08 Nov 2026 • 1h 14m" / description right.
+              // The text block is EXACTLY as tall as the thumbnail and spread out (title top, info middle, description fills
+              // the rest) => no empty space above / below the text.
               inner class EpAdapter : RecyclerView.Adapter<EpVH>() {
                   override fun getItemCount() = eps.size
 
@@ -1986,25 +1994,28 @@ jobs:
                       thumb.addView(badge, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, u(8), u(8), 0) })
                       thumb.addView(border, FrameLayout.LayoutParams(-1, -1))
 
-                      // bigger text, vertically centred next to the (bigger) card
-                      val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
+                      // text block = same height as the thumbnail card, content spread across it
+                      val texts = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL
+                          clipChildren = true
+                      }
                       val t1 = TextView(this@MainActivity).apply {
                           setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                          maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+                          maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                       }
                       tx(t1, 26f)
                       val t2 = TextView(this@MainActivity).apply { setTextColor(Color.parseColor("#C8C8D0")) }
                       tx(t2, 18f)
                       val t3 = TextView(this@MainActivity).apply {
-                          setTextColor(Color.parseColor("#E4E4EA")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+                          setTextColor(Color.parseColor("#E4E4EA")); maxLines = 4; ellipsize = TextUtils.TruncateAt.END
                       }
                       tx(t3, 19f)
                       texts.addView(t1, LinearLayout.LayoutParams(-1, -2))
-                      texts.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(4) })
-                      texts.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
+                      texts.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(10) })
+                      texts.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(12) })
 
                       row.addView(thumb, LinearLayout.LayoutParams(epImgW, epImgH))
-                      row.addView(texts, LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin = u(22) })
+                      row.addView(texts, LinearLayout.LayoutParams(0, epImgH, 1f).apply { leftMargin = u(22) })
                       return EpVH(row, thumb, iv, badge, border, t1, t2, t3)
                   }
 
