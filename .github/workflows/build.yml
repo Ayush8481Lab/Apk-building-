@@ -68,6 +68,8 @@ jobs:
           dependencies {
               implementation("androidx.recyclerview:recyclerview:1.3.2")
               implementation("com.github.bumptech.glide:glide:4.16.0")
+              implementation("com.github.bumptech.glide:okhttp3-integration:4.16.0")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
               implementation("androidx.media3:media3-exoplayer:1.3.1")
               implementation("androidx.media3:media3-exoplayer-dash:1.3.1")
           }
@@ -80,6 +82,7 @@ jobs:
               <uses-feature android:name="android.software.leanback" android:required="false" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
               <application
+                  android:name=".App"
                   android:label="LIV TV"
                   android:theme="@style/AppTheme"
                   android:usesCleartextTraffic="false">
@@ -125,6 +128,26 @@ jobs:
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z"/></vector>
           EOF
 
+          cat > app/src/main/java/com/example/livtv/App.kt <<'EOF'
+          package com.example.livtv
+
+          import android.app.Application
+          import com.bumptech.glide.Glide
+          import com.bumptech.glide.integration.okhttp3.OkHttpUrlLoader
+          import com.bumptech.glide.load.model.GlideUrl
+          import java.io.InputStream
+
+          class App : Application() {
+              override fun onCreate() {
+                  super.onCreate()
+                  try {
+                      // Glide downloads through the shared OkHttp client (HTTP/2, keep-alive, parallel)
+                      Glide.get(this).registry.replace(GlideUrl::class.java, InputStream::class.java, OkHttpUrlLoader.Factory(Net.client))
+                  } catch (e: Exception) { }
+              }
+          }
+          EOF
+
           cat > app/src/main/java/com/example/livtv/MainActivity.kt <<'EOF'
           package com.example.livtv
 
@@ -154,8 +177,19 @@ jobs:
           import com.bumptech.glide.Glide
           import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
           import org.json.JSONObject
-          import java.net.HttpURLConnection
-          import java.net.URL
+          import android.graphics.drawable.Drawable
+          import com.bumptech.glide.Priority
+          import com.bumptech.glide.load.DataSource
+          import com.bumptech.glide.load.DecodeFormat
+          import com.bumptech.glide.load.engine.DiskCacheStrategy
+          import com.bumptech.glide.load.engine.GlideException
+          import com.bumptech.glide.request.RequestListener
+          import com.bumptech.glide.request.target.Target
+          import okhttp3.ConnectionPool
+          import okhttp3.Dispatcher
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import java.util.concurrent.TimeUnit
           import java.util.concurrent.Callable
           import java.util.concurrent.Executors
           import java.util.concurrent.Future
@@ -174,26 +208,32 @@ jobs:
 
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
 
+          object Net {
+              val client: OkHttpClient = OkHttpClient.Builder()
+                  .dispatcher(Dispatcher().apply { maxRequests = 64; maxRequestsPerHost = 24 })
+                  .connectionPool(ConnectionPool(12, 5, TimeUnit.MINUTES))
+                  .connectTimeout(12, TimeUnit.SECONDS)
+                  .readTimeout(20, TimeUnit.SECONDS)
+                  .build()
+          }
+
           object Api {
-              val pool = Executors.newFixedThreadPool(6)
+              val pool = Executors.newFixedThreadPool(8)
               @Volatile var lastError = ""
 
               // Edit headers here if the API asks for more (token, device id, etc.)
               fun get(url: String): JSONObject? {
                   return try {
-                      val c = URL(url).openConnection() as HttpURLConnection
-                      c.connectTimeout = 15000
-                      c.readTimeout = 20000
-                      c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 12; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-                      c.setRequestProperty("Accept", "application/json, text/plain, */*")
-                      c.setRequestProperty("Origin", "https://www.sonyliv.com")
-                      c.setRequestProperty("Referer", "https://www.sonyliv.com/")
-                      c.setRequestProperty("x-via-device", "true")
-                      if (c.responseCode in 200..299) {
-                          JSONObject(c.inputStream.bufferedReader().use { it.readText() })
-                      } else {
-                          lastError = "HTTP " + c.responseCode + " for " + url.take(90)
-                          null
+                      val req = Request.Builder().url(url)
+                          .header("User-Agent", "Mozilla/5.0 (Linux; Android 12; TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+                          .header("Accept", "application/json, text/plain, */*")
+                          .header("Origin", "https://www.sonyliv.com")
+                          .header("Referer", "https://www.sonyliv.com/")
+                          .header("x-via-device", "true")
+                          .build()
+                      Net.client.newCall(req).execute().use { r ->
+                          if (r.isSuccessful) JSONObject(r.body!!.string())
+                          else { lastError = "HTTP " + r.code + " for " + url.take(90); null }
                       }
                   } catch (e: Exception) {
                       lastError = e.toString()
@@ -253,6 +293,24 @@ jobs:
               private var loaded = false
               private var heroRun: Runnable? = null
               private var trailerRun: Runnable? = null
+              private var heroToken = 0
+              private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
+              private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
+              private var logoW = 0; private var logoH = 0; private var bgW = 1280; private var bgH = 720
+
+              // identical options for preload + real load => disk/memory cache hit, downsampled decode
+              private fun cardReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).centerCrop()
+                  .format(DecodeFormat.PREFER_RGB_565).diskCacheStrategy(DiskCacheStrategy.ALL)
+              private fun bgReq(url: String?) = Glide.with(this).load(url).override(bgW, bgH).centerCrop()
+                  .diskCacheStrategy(DiskCacheStrategy.ALL)
+              private fun logoReq(url: String?) = Glide.with(this).load(url).override(logoW, logoH).fitCenter()
+                  .diskCacheStrategy(DiskCacheStrategy.ALL)
+              private fun preloadHero(i: Item, p: Priority) {
+                  try {
+                      bgReq(i.bg ?: i.landscape).priority(p).preload()
+                      if (i.logo != null) logoReq(i.logo).priority(p).preload()
+                  } catch (e: Exception) { }
+              }
 
               private val roundOutline = object : ViewOutlineProvider() {
                   override fun getOutline(view: View, outline: Outline) {
@@ -268,6 +326,13 @@ jobs:
                   val dm = resources.displayMetrics
                   W = max(dm.widthPixels, dm.heightPixels)
                   H = min(dm.widthPixels, dm.heightPixels)
+                  cardH = (H * 0.27f).toInt(); cardW = cardH * 2 / 3
+                  stripH = (H * 0.155f).toInt(); stripW = stripH * 16 / 9
+                  padV = (H * 0.024f).toInt(); titleH = (H * 0.06f).toInt()
+                  rowH = titleH + cardH + 2 * padV
+                  rvH = rowH + titleH + padV / 2          // one full row + ONLY the next row's title
+                  logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
+                  bgW = min(W, 1280); bgH = bgW * 9 / 16
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -326,12 +391,11 @@ jobs:
                       setTextColor(Color.parseColor("#D0D0D8")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                   }
                   tx(descTv, 14f)
-                  val logoH = (H * 0.22).toInt()
                   info.addView(logo, LinearLayout.LayoutParams(logoH * 16 / 9, logoH))
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
-                  content.addView(info, lp((W * 0.42).toInt(), -2).apply { leftMargin = u(125); topMargin = (H * 0.07).toInt() })
+                  content.addView(info, lp((W * 0.42).toInt(), -2).apply { leftMargin = u(125); topMargin = (H * 0.06).toInt() })
 
                   rowRv = RecyclerView(this).apply {
                       layoutManager = LinearLayoutManager(this@MainActivity)
@@ -339,11 +403,11 @@ jobs:
                       itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
-                      setPadding(0, 0, 0, (H * 0.5).toInt())
+                      setPadding(0, 0, 0, rvH - rowH)
                   }
                   rowAdapter = RowAdapter()
                   rowRv.adapter = rowAdapter
-                  content.addView(rowRv, lp(-1, -1).apply { topMargin = (H * 0.45).toInt(); leftMargin = u(80) })
+                  content.addView(rowRv, lp(-1, rvH, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.008f).toInt() })
 
                   // status / placeholder text
                   status = TextView(this).apply {
@@ -566,6 +630,15 @@ jobs:
                   rowAdapter.notifyItemInserted(rows.size - 1)
                   if (tab == 2) status.visibility = View.GONE
                   if (rows.size == 1) focusFirst(12)
+                  try {
+                      r.items.take(10).forEach {
+                          cardReq(if (r.spotlight) (it.landscape ?: it.portrait) else (it.portrait ?: it.landscape),
+                              if (r.spotlight) stripW else cardW, if (r.spotlight) stripH else cardH)
+                              .priority(Priority.LOW).preload()
+                      }
+                      if (r.spotlight) r.items.forEachIndexed { i, it -> preloadHero(it, if (i == 0) Priority.HIGH else Priority.NORMAL) }
+                      else r.items.firstOrNull()?.let { preloadHero(it, Priority.LOW) }
+                  } catch (e: Exception) { }
               }
 
               private fun focusFirst(tries: Int) {
@@ -576,12 +649,15 @@ jobs:
               }
 
               // ---------------------------------------------------------------- Hero + trailer
-              private fun onCardFocus(item: Item, rowPos: Int) {
+              private fun onCardFocus(item: Item, row: Row, pos: Int, rowPos: Int) {
                   snapTo(rowPos)
                   heroRun?.let { ui.removeCallbacks(it) }
-                  val r = Runnable { showHero(item) }
+                  val r = Runnable {
+                      showHero(item)
+                      for (d in intArrayOf(-1, 1, 2)) row.items.getOrNull(pos + d)?.let { preloadHero(it, Priority.LOW) }
+                  }
                   heroRun = r
-                  ui.postDelayed(r, 120)
+                  ui.postDelayed(r, 100)
               }
 
               private fun snapTo(pos: Int) {
@@ -589,7 +665,7 @@ jobs:
                   lastSnap = pos
                   val s = object : LinearSmoothScroller(this) {
                       override fun getVerticalSnapPreference() = SNAP_TO_START
-                      override fun calculateSpeedPerPixel(dm: DisplayMetrics) = 60f / dm.densityDpi
+                      override fun calculateSpeedPerPixel(dm: DisplayMetrics) = 45f / dm.densityDpi
                   }
                   s.targetPosition = pos
                   rowRv.layoutManager?.startSmoothScroll(s)
@@ -598,22 +674,35 @@ jobs:
               private fun showHero(item: Item) {
                   if (hero?.id == item.id && hero?.title == item.title) return
                   hero = item
-                  val url = item.bg ?: item.landscape
-                  var rb = Glide.with(this).load(url)
+                  stopTrailer()
+                  val token = ++heroToken
+                  // trailer starts only AFTER banner (+ title png) are on screen
+                  var pending = 1 + (if (item.logo != null) 1 else 0)
+                  val done: () -> Unit = {
+                      if (token == heroToken) { pending--; if (pending <= 0) scheduleTrailer(item) }
+                  }
+                  val listener = object : RequestListener<Drawable> {
+                      override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<Drawable>?, isFirstResource: Boolean): Boolean {
+                          done(); return false
+                      }
+                      override fun onResourceReady(resource: Drawable?, model: Any?, target: Target<Drawable>?, dataSource: DataSource?, isFirstResource: Boolean): Boolean {
+                          done(); return false
+                      }
+                  }
+                  var rb = bgReq(item.bg ?: item.landscape).priority(Priority.IMMEDIATE).listener(listener)
                   val ph = bg.drawable
                   if (ph != null) rb = rb.placeholder(ph)
-                  rb.transition(DrawableTransitionOptions.withCrossFade(350)).into(bg)
+                  rb.transition(DrawableTransitionOptions.withCrossFade(250)).into(bg)
                   if (item.logo != null) {
                       logo.visibility = View.VISIBLE; titleTv.visibility = View.GONE
-                      Glide.with(this).load(item.logo).fitCenter().into(logo)
+                      logoReq(item.logo).priority(Priority.IMMEDIATE).listener(listener).into(logo)
                   } else {
                       logo.setImageDrawable(null); logo.visibility = View.GONE
                       titleTv.text = item.title; titleTv.visibility = View.VISIBLE
                   }
                   metaTv.text = item.meta
                   descTv.text = item.desc
-                  info.animate().cancel(); info.alpha = 0f; info.animate().alpha(1f).setDuration(300).start()
-                  scheduleTrailer(item)
+                  info.animate().cancel(); info.alpha = 0f; info.animate().alpha(1f).setDuration(250).start()
               }
 
               private fun scheduleTrailer(item: Item) {
@@ -621,7 +710,7 @@ jobs:
                   val t = item.trailer ?: return
                   val r = Runnable { playTrailer(t) }
                   trailerRun = r
-                  ui.postDelayed(r, 1500)
+                  ui.postDelayed(r, 700)
               }
 
               private fun playTrailer(url: String) {
@@ -668,12 +757,13 @@ jobs:
                   override fun getItemCount() = rows.size
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): RowVH {
                       val r = LinearLayout(this@MainActivity).apply {
-                          orientation = LinearLayout.VERTICAL; clipChildren = false; clipToPadding = false
-                          layoutParams = RecyclerView.LayoutParams(-1, -2)
+                          orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM
+                          clipChildren = false; clipToPadding = false
+                          layoutParams = RecyclerView.LayoutParams(-1, rowH)       // fixed row height => exact snapping
                       }
                       val tv = TextView(this@MainActivity).apply {
                           setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                          setPadding(u(46), u(6), 0, 0)
+                          gravity = Gravity.CENTER_VERTICAL; setPadding(u(46), 0, 0, 0)
                       }
                       tx(tv, 17f)
                       val rv = RecyclerView(this@MainActivity).apply {
@@ -681,30 +771,34 @@ jobs:
                           clipChildren = false; clipToPadding = false; itemAnimator = null
                           overScrollMode = View.OVER_SCROLL_NEVER
                           isFocusable = false; isFocusableInTouchMode = false
-                          setPadding(u(46), u(14), u(60), u(14))
+                          setHasFixedSize(true); setItemViewCacheSize(6)
+                          setPadding(u(46), padV, u(60), padV)
                       }
-                      r.addView(tv, LinearLayout.LayoutParams(-1, -2))
-                      r.addView(rv, LinearLayout.LayoutParams(-1, -2))
+                      r.addView(tv, LinearLayout.LayoutParams(-1, titleH))
+                      r.addView(rv, LinearLayout.LayoutParams(-1, cardH + 2 * padV))
                       return RowVH(r, tv, rv)
                   }
 
                   override fun onBindViewHolder(h: RowVH, pos: Int) {
                       val r = rows[pos]
                       h.title.text = r.title
+                      // spotlight: strip sits at the bottom of its row, title hidden
                       h.title.visibility = if (r.spotlight) View.GONE else View.VISIBLE
-                      h.root.setPadding(0, if (r.spotlight) (H * 0.13).toInt() else 0, 0, u(4))
+                      val l = h.rv.layoutParams
+                      l.height = (if (r.spotlight) stripH else cardH) + 2 * padV
+                      h.rv.layoutParams = l
                       h.rv.adapter = CardAdapter(r, pos)
                   }
               }
 
               inner class CardAdapter(private val row: Row, private val rowPos: Int) : RecyclerView.Adapter<CardVH>() {
+                  private val cw = if (row.spotlight) stripW else cardW
+                  private val ch = if (row.spotlight) stripH else cardH
                   override fun getItemCount() = row.items.size
 
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): CardVH {
-                      val w = if (row.spotlight) u(152) else u(140)
-                      val h = if (row.spotlight) u(86) else u(210)
                       val card = FrameLayout(this@MainActivity).apply {
-                          layoutParams = RecyclerView.LayoutParams(w, h).apply { rightMargin = u(12) }
+                          layoutParams = RecyclerView.LayoutParams(cw, ch).apply { rightMargin = u(12) }
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
                       val iv = ImageView(this@MainActivity).apply {
@@ -731,13 +825,13 @@ jobs:
                   override fun onBindViewHolder(h: CardVH, pos: Int) {
                       val item = row.items[pos]
                       val url = if (row.spotlight) item.landscape ?: item.portrait else item.portrait ?: item.landscape
-                      Glide.with(this@MainActivity).load(url).centerCrop().into(h.iv)
+                      cardReq(url, cw, ch).into(h.iv)
                       h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
                       h.card.setOnFocusChangeListener { v, has ->
-                          v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(160).start()
-                          h.border.animate().alpha(if (has) 1f else 0f).setDuration(160).start()
+                          v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
+                          h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
                           v.translationZ = if (has) u(10).toFloat() else 0f
-                          if (has) onCardFocus(item, rowPos)
+                          if (has) onCardFocus(item, row, pos, rowPos)
                       }
                       h.card.setOnClickListener {
                           Toast.makeText(this@MainActivity, item.title, Toast.LENGTH_SHORT).show()
