@@ -221,6 +221,9 @@ jobs:
           const val EP_PAGE = 30
           const val TRAILER_MUTED = false      // false = trailers play WITH sound
 
+          // Only items with this objectSubtype open the show detail page. Everything else (EPISODE, TRAILER, ...) is "under development": click does nothing.
+          const val SUB_SHOW = "SHOW"
+
           // ---- LAYOUT KNOBS (units are for a 1280px wide screen, scaled automatically) ----
           // Left edge of title image + tag + meta + description + buttons. SAME value on the Shows page and the detail page.
           // 126 = exactly where the row titles / first card start on the Shows page.
@@ -229,14 +232,14 @@ jobs:
           const val LOGO_SHIFT_X = 0
 
           // image widths (CDN params: ?h=auto&w=<n>&q=eco)
-          const val W_LOGO = 700               // all title images
+          const val W_LOGO = 900               // title image = masthead_logo_rectangualar, ?h=auto&w=900&q=eco
           const val W_BG = 1500                // all background banners
           const val W_PORTRAIT = 1000          // portrait cards
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
               val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?, val spot: String?,
-              val cid: String
+              val cid: String, val sub: String
           )
 
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
@@ -321,14 +324,16 @@ jobs:
               return if (v.isBlank() || v == "null") null else v
           }
 
-          // ad containers / ad slides must never show up as rows or cards (ad_template, ad_unit, "AD Above Spotlight ...")
+          // Ad containers / ad slides (LAUNCHER_ITEM "TEST ... AD Spotlight ...", ad_template, ad_unit ...) never show up as rows or cards.
           fun isAd(o: JSONObject): Boolean {
               val layout = o.optString("layout").lowercase()
               if (layout == "ad_template" || layout.startsWith("ad_")) return true
+              val ed = o.optJSONObject("editorialMetadata")
+              if (ed != null && (ed.str("ad_unit") != null || ed.str("ad_unit_v1") != null || ed.str("ad_type") != null)) return true
               val m = o.optJSONObject("metadata") ?: return false
               if (m.str("ad_unit") != null || m.str("ad_unit_mweb") != null) return true
               val t = m.str("title") ?: m.str("label") ?: o.optString("title")
-              return t.startsWith("AD ") || t.startsWith("Ad ") || t.contains("Above Spotlight", true)
+              return t.startsWith("AD ") || t.startsWith("Ad ") || t.contains("Above Spotlight", true) || t.contains("AD Spotlight", true)
           }
 
           fun fmtDur(sec: Int): String {
@@ -396,9 +401,9 @@ jobs:
               } catch (e: Exception) { null }
           }
 
-          // Lenient parser: CONTENT_ITEM, LAUNCHER_ITEM and any other slide type that has an image.
-          // Ads and image-less (text-only) slides are dropped.
-          // Title image priority: masthead_logo -> masthead_logo_v1 -> launcher_logo (always ?h=auto&w=700&q=eco)
+          // Lenient parser: CONTENT_ITEM and any other slide type that has an image.
+          // Ads (LAUNCHER_ITEM ad slides) and image-less (text-only) slides are dropped.
+          // Title image: ONLY masthead_logo_rectangualar (always ?h=auto&w=900&q=eco), no fallbacks.
           // Description priority: shortDescription -> launcher_short_description -> longDescription
           fun parseItem(o: JSONObject): Item? {
               val low = o.optString("layout").lowercase()
@@ -420,6 +425,7 @@ jobs:
 
               val cid = am.str("contentId") ?: m.str("contentId") ?: o.optString("id")
               val id = m.str("contentId") ?: o.optString("id")
+              val sub = (m.str("objectSubtype") ?: am.str("objectSubtype") ?: "").uppercase()
 
               val parts = ArrayList<String>()
               s("IMDB")?.let { parts.add("IMDb $it") }
@@ -427,8 +433,8 @@ jobs:
               m.optJSONArray("genres")?.optString(0)?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
 
               val desc = m.str("shortDescription") ?: ev("launcher_short_description") ?: m.str("longDescription") ?: ""
-              val logoU = img(s("masthead_logo") ?: s("masthead_logo_v1") ?: ev("launcher_logo"), W_LOGO)
-              return Item(id, title, portrait, landscape, bgU, logoU, parts.joinToString(" • "), desc, trailerFrom(o), spotU, cid)
+              val logoU = img(s("masthead_logo_rectangualar"), W_LOGO)
+              return Item(id, title, portrait, landscape, bgU, logoU, parts.joinToString(" • "), desc, trailerFrom(o), spotU, cid, sub)
           }
 
           fun parseEp(o: JSONObject?): Ep? {
@@ -467,11 +473,10 @@ jobs:
               return DetailData(sorted, emb, latest)
           }
 
-          // detail page image urls (title w=700, background w=1500)
-          fun detLogoUrl(show: JSONObject, item: Item?): String? {
-              val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes")
-              val u = if (e == null) null else img(e.str("masthead_logo") ?: e.str("masthead_logo_v1"), W_LOGO)
-              return u ?: item?.logo
+          // detail page image urls: title = masthead_logo_rectangualar only (w=900), background w=1500
+          fun detLogoUrl(show: JSONObject): String? {
+              val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes") ?: return null
+              return img(e.str("masthead_logo_rectangualar"), W_LOGO)
           }
 
           fun detBgUrl(show: JSONObject): String? {
@@ -1187,7 +1192,7 @@ jobs:
                           val items = ArrayList<Item>()
                           if (arr != null) for (k in 0 until arr.length()) {
                               val c = arr.optJSONObject(k) ?: continue
-                              if (isAd(c)) continue
+                              if (isAd(c)) continue                             // LAUNCHER_ITEM ad slides are skipped
                               parseItem(c)?.let { items.add(it) }
                               if (j.spot) {
                                   val dual = c.optJSONObject("editorialMetadata")?.optJSONArray("dual_spotlight_items")
@@ -1229,14 +1234,15 @@ jobs:
                   return j
               }
 
-              // focused show: fetch its detail data + the images the detail page will need, ahead of time (queue front)
+              // focused SHOW: fetch its detail data + the images the detail page will need, ahead of time (queue front)
+              // (episodes / trailers / other VOD have no detail page yet, so nothing to prefetch)
               private fun prefetchDetail(item: Item) {
-                  if (item.cid.isBlank()) return
+                  if (item.sub != SUB_SHOW || item.cid.isBlank()) return
                   Api.pool.execute {
                       val j = fetchDetail(item.cid) ?: return@execute
                       val show = j.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return@execute
                       Prefetch.add(detBgUrl(show), true)
-                      Prefetch.add(detLogoUrl(show, item), true)
+                      Prefetch.add(detLogoUrl(show), true)
                       val data = parseSeasons(show)
                       data.seasons.firstOrNull()?.let { s ->
                           data.embedded[s.id].orEmpty().take(6).forEach { Prefetch.add(img(it.thumb, 600), true) }
@@ -1254,7 +1260,7 @@ jobs:
               private fun prefetchRow(r: Row, n: Int) {
                   r.items.take(n).forEach {
                       Prefetch.add(cardUrl(r.spotlight, it))
-                      if (!r.spotlight) Prefetch.add(it.logo)          // small title images: ready before the card is focused
+                      if (!r.spotlight) Prefetch.add(it.logo)          // title images: ready before the card is focused
                   }
                   r.items.take(3).forEach { prefetchHero(it) }
               }
@@ -1331,7 +1337,7 @@ jobs:
                   bg.animate().cancel(); bg.animate().alpha(1f).setDuration(300).start()
                   info.animate().cancel(); info.animate().alpha(1f).setDuration(300).start()
                   scheduleTrailer(item)      // trailer only after banner + title are on screen
-                  prefetchDetail(item)       // then get the detail page data/images ready in the background
+                  prefetchDetail(item)       // then get the detail page data/images ready in the background (SHOW only)
               }
 
               // trailer for a home item. If the list item has no trailer url, look it up from DETAIL-V2 (cached).
@@ -1457,15 +1463,9 @@ jobs:
               override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
 
               // ---------------------------------------------------------------- Detail page
-              // spotlight items are not shows: they go straight to the player (hook: wire your playback API here)
-              private fun playItem(item: Item) {
-                  Toast.makeText(this, "Play: " + item.title, Toast.LENGTH_SHORT).show()
-              }
-
+              // Only objectSubtype == SHOW opens here. Episodes / trailers / other VOD: under development, click does nothing.
               private fun openDetail(item: Item, card: View) {
-                  if (item.cid.isBlank()) {
-                      Toast.makeText(this, item.title, Toast.LENGTH_SHORT).show(); return
-                  }
+                  if (item.sub != SUB_SHOW || item.cid.isBlank()) return
                   lastCard = card
                   heroRun?.let { ui.removeCallbacks(it) }
                   heroToken++
@@ -1607,8 +1607,8 @@ jobs:
                   val trailer = trailerFrom(show)
                   detailTrailerUrl = trailer
 
-                  // title image (w=700) + background (w=1500) + first episode thumbnails => then the trailer
-                  val logoUrl = detLogoUrl(show, item)
+                  // title image (masthead_logo_rectangualar, w=900) + background (w=1500) + first episode thumbnails => then the trailer
+                  val logoUrl = detLogoUrl(show)
                   val bgUrl = detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)
                   val thumbs = data.seasons.firstOrNull()?.let { s ->
                       data.embedded[s.id].orEmpty().take(4).mapNotNull { img(it.thumb, 600) }
@@ -1898,8 +1898,9 @@ jobs:
                           v.translationZ = if (has) u(10).toFloat() else 0f
                           if (has) { warm(pos); onCardFocus(item, row, pos, rowPos) }
                       }
+                      // SHOW (listing rows AND spotlight) -> show detail page. Any other VOD (episode, trailer...) -> nothing yet.
                       h.card.setOnClickListener {
-                          if (row.spotlight) playItem(item) else openDetail(item, h.card)
+                          if (item.sub == SUB_SHOW) openDetail(item, h.card)
                       }
                   }
               }
