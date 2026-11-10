@@ -134,6 +134,7 @@ jobs:
 
           import android.app.Application
           import com.bumptech.glide.Glide
+          import com.bumptech.glide.MemoryCategory
           import com.bumptech.glide.integration.okhttp3.OkHttpUrlLoader
           import com.bumptech.glide.load.model.GlideUrl
           import java.io.InputStream
@@ -145,6 +146,8 @@ jobs:
                   try {
                       // Glide downloads through the shared OkHttp client (HTTP/2, keep-alive, parallel)
                       Glide.get(this).registry.replace(GlideUrl::class.java, InputStream::class.java, OkHttpUrlLoader.Factory(Net.client))
+                      // bigger memory cache => images already seen / warmed show instantly
+                      Glide.get(this).setMemoryCategory(MemoryCategory.HIGH)
                   } catch (e: Exception) { }
               }
           }
@@ -218,6 +221,13 @@ jobs:
           const val EP_PAGE = 30
           const val TRAILER_MUTED = false      // false = trailers play WITH sound
 
+          // ---- LAYOUT KNOBS (units are for a 1280px wide screen, scaled automatically) ----
+          // Left edge of title image + tag + meta + description + buttons. SAME value on the Shows page and the detail page.
+          // 126 = exactly where the row titles / first card start on the Shows page.
+          const val CONTENT_LEFT = 126
+          // Extra push of the title PNG to the right (0 = flush with the text under it, try 20, 40 ... to move it more right)
+          const val LOGO_SHIFT_X = 0
+
           // image widths (CDN params: ?h=auto&w=<n>&q=eco)
           const val W_LOGO = 700               // all title images
           const val W_BG = 1500                // all background banners
@@ -234,32 +244,33 @@ jobs:
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
           class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
 
-          // Cuts the transparent border off a title PNG so the visible artwork touches the left edge of the text under it
+          // Cuts the transparent border off a title PNG so the visible artwork starts exactly at the left edge of the text under it.
+          // Robust version: faint glow / compression noise is ignored (alpha > 48 and at least 2 pixels per column / row).
           class TrimTransform : BitmapTransformation() {
               override fun updateDiskCacheKey(messageDigest: MessageDigest) {
-                  messageDigest.update("trim_alpha_v1".toByteArray())
+                  messageDigest.update("trim_alpha_v2".toByteArray())
               }
               override fun equals(other: Any?) = other is TrimTransform
-              override fun hashCode() = 987654
+              override fun hashCode() = 987655
               override fun transform(pool: BitmapPool, toTransform: Bitmap, outWidth: Int, outHeight: Int): Bitmap {
                   if (!toTransform.hasAlpha()) return toTransform
                   val w = toTransform.width
                   val h = toTransform.height
                   val px = IntArray(w * h)
                   toTransform.getPixels(px, 0, w, 0, 0, w, h)
-                  var minX = w; var minY = h; var maxX = -1; var maxY = -1
+                  val cols = IntArray(w)
+                  val rws = IntArray(h)
                   for (y in 0 until h) {
                       val o = y * w
                       for (x in 0 until w) {
-                          if ((px[o + x] ushr 24) > 20) {
-                              if (x < minX) minX = x
-                              if (x > maxX) maxX = x
-                              if (y < minY) minY = y
-                              if (y > maxY) maxY = y
-                          }
+                          if ((px[o + x] ushr 24) > 48) { cols[x]++; rws[y]++ }
                       }
                   }
-                  if (maxX < 0) return toTransform
+                  var minX = 0; while (minX < w && cols[minX] < 2) minX++
+                  var maxX = w - 1; while (maxX >= 0 && cols[maxX] < 2) maxX--
+                  var minY = 0; while (minY < h && rws[minY] < 2) minY++
+                  var maxY = h - 1; while (maxY >= 0 && rws[maxY] < 2) maxY--
+                  if (maxX < minX || maxY < minY) return toTransform
                   if (minX == 0 && minY == 0 && maxX == w - 1 && maxY == h - 1) return toTransform
                   return Bitmap.createBitmap(toTransform, minX, minY, maxX - minX + 1, maxY - minY + 1)
               }
@@ -267,15 +278,15 @@ jobs:
 
           object Net {
               val client: OkHttpClient = OkHttpClient.Builder()
-                  .dispatcher(Dispatcher().apply { maxRequests = 64; maxRequestsPerHost = 24 })
-                  .connectionPool(ConnectionPool(12, 5, TimeUnit.MINUTES))
+                  .dispatcher(Dispatcher().apply { maxRequests = 96; maxRequestsPerHost = 32 })
+                  .connectionPool(ConnectionPool(16, 5, TimeUnit.MINUTES))
                   .connectTimeout(12, TimeUnit.SECONDS)
                   .readTimeout(20, TimeUnit.SECONDS)
                   .build()
           }
 
           object Api {
-              val pool = Executors.newFixedThreadPool(3)
+              val pool = Executors.newFixedThreadPool(6)
               @Volatile var lastError = ""
 
               // Edit headers here if the API asks for more (token, device id, etc.)
@@ -332,28 +343,31 @@ jobs:
               return SimpleDateFormat(if (withYear) "dd MMM yyyy" else "dd MMM", Locale.ENGLISH).format(Date(ms))
           }
 
-          // ONE background thread, downloads to disk only (no bitmaps in RAM), waits while the visible images load
+          // 4 background threads, download to disk only (no bitmaps in RAM), wait only briefly while the visible images load
           object Prefetch {
               lateinit var app: Context
               @Volatile var gate = true
               private val queue = LinkedBlockingDeque<String>()
               private val seen = java.util.Collections.synchronizedSet(HashSet<String>())
-              private val worker = Thread {
+
+              private fun loop() {
                   while (true) {
                       try {
                           val u = queue.takeFirst()
                           var w = 0
-                          while (!gate && w < 40) { Thread.sleep(100); w++ }
+                          while (!gate && w < 12) { Thread.sleep(100); w++ }
                           Glide.with(app).downloadOnly().load(u).diskCacheStrategy(DiskCacheStrategy.DATA)
                               .submit().get(20, TimeUnit.SECONDS)
                       } catch (e: Exception) { }
                   }
-              }.apply { isDaemon = true; start() }
+              }
+
+              private val workers = List(4) { Thread { loop() }.apply { isDaemon = true; start() } }
 
               fun add(url: String?, first: Boolean = false) {
                   if (url == null || !seen.add(url)) return
                   if (first) queue.addFirst(url) else queue.addLast(url)
-                  while (queue.size > 80) queue.pollLast()?.let { seen.remove(it) }
+                  while (queue.size > 300) queue.pollLast()?.let { seen.remove(it) }
               }
           }
 
@@ -523,7 +537,7 @@ jobs:
 
               // show detail json cache (filled in the background when a card gets focus => detail page opens instantly)
               private val detailCache = object : LinkedHashMap<String, JSONObject>(16, 0.75f, true) {
-                  override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JSONObject>?): Boolean = size > 12
+                  override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JSONObject>?): Boolean = size > 16
               }
 
               // surface the trailer is currently drawn on (home or detail)
@@ -619,7 +633,7 @@ jobs:
                   homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
                   detBoxW = (W * 0.67f * 1.5f).toInt(); detBoxH = (H * 0.725f * 1.5f).toInt()
                   curBoxW = homeBoxW; curBoxH = homeBoxH
-                  epImgW = (W * 0.2f).toInt(); epImgH = epImgW * 9 / 16
+                  epImgW = (W * 0.24f).toInt(); epImgH = epImgW * 9 / 16             // bigger episode cards
                   seasonColW = (W * 0.2f).toInt()
                   buildUi()
                   setContentView(root)
@@ -685,11 +699,11 @@ jobs:
                       setTextColor(Color.parseColor("#DADAE2")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                   }
                   tx(descTv, 17f)
-                  info.addView(logo, LinearLayout.LayoutParams(homeLogoW, -2))
+                  info.addView(logo, LinearLayout.LayoutParams(homeLogoW, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
-                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW + u(20)), -2).apply { leftMargin = u(125); topMargin = (H * 0.04).toInt() })
+                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04).toInt() })
 
                   // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll
                   rowRv = object : RecyclerView(this@MainActivity) {
@@ -701,7 +715,7 @@ jobs:
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
                       setHasFixedSize(true)
-                      setItemViewCacheSize(4)
+                      setItemViewCacheSize(6)
                       setPadding(0, 0, 0, rvH - rowH)
                   }
                   rowAdapter = RowAdapter()
@@ -834,20 +848,20 @@ jobs:
                   btnRow.addView(dWatch, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(12) })
                   btnRow.addView(dPlus, LinearLayout.LayoutParams(-2, -2))
 
-                  dInfo.addView(dLogo, LinearLayout.LayoutParams(detLogoW, -2))
+                  dInfo.addView(dLogo, LinearLayout.LayoutParams(detLogoW, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
                   dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
                   dInfo.addView(dTag, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
                   dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
-                  heroLayer.addView(dInfo, lp(max((W * 0.5f).toInt(), detLogoW + u(20)), -2).apply { leftMargin = u(100); topMargin = (H * 0.04f).toInt() })
+                  heroLayer.addView(dInfo, lp(max((W * 0.5f).toInt(), detLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
 
                   dHint = TextView(this).apply {
                       text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
                   }
                   tx(dHint, 17f)
                   heroLayer.addView(dHint, lp(-2, -2, Gravity.BOTTOM or Gravity.START).apply {
-                      leftMargin = u(100); bottomMargin = (H * 0.05f).toInt()
+                      leftMargin = u(CONTENT_LEFT); bottomMargin = (H * 0.05f).toInt()
                   })
                   detail.addView(heroLayer, lp(-1, -1))
 
@@ -861,7 +875,7 @@ jobs:
                       setPadding(u(22), u(8), u(22), u(8))
                       isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                   }
-                  tx(epTab, 18f)
+                  tx(epTab, 20f)
                   styleEpTab()
                   epTab.setOnFocusChangeListener { _, _ -> styleEpTab() }
 
@@ -881,6 +895,7 @@ jobs:
                       clipChildren = true; clipToPadding = false; itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
+                      setItemViewCacheSize(8)
                       setPadding(u(16), padV, u(8), padV * 4)
                   }
                   epAdapter = EpAdapter()
@@ -1195,8 +1210,8 @@ jobs:
                   rowAdapter.notifyItemInserted(rows.size - 1)
                   if (tab == 2 && !inDetail) status.visibility = View.GONE
                   if (rows.size == 1) focusFirst(12)
-                  if (r.spotlight) r.items.drop(1).forEach { prefetchHero(it) }
-                  else if (rows.size <= 3) prefetchRow(r, 8)
+                  if (r.spotlight) r.items.forEach { prefetchHero(it) }
+                  else if (rows.size <= 6) prefetchRow(r, 12)
               }
 
               private fun focusFirst(tries: Int) {
@@ -1216,7 +1231,7 @@ jobs:
 
               // focused show: fetch its detail data + the images the detail page will need, ahead of time (queue front)
               private fun prefetchDetail(item: Item) {
-                  if (isSpotRow() || item.cid.isBlank()) return
+                  if (item.cid.isBlank()) return
                   Api.pool.execute {
                       val j = fetchDetail(item.cid) ?: return@execute
                       val show = j.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return@execute
@@ -1224,7 +1239,7 @@ jobs:
                       Prefetch.add(detLogoUrl(show, item), true)
                       val data = parseSeasons(show)
                       data.seasons.firstOrNull()?.let { s ->
-                          data.embedded[s.id].orEmpty().take(4).forEach { Prefetch.add(img(it.thumb, 600), true) }
+                          data.embedded[s.id].orEmpty().take(6).forEach { Prefetch.add(img(it.thumb, 600), true) }
                       }
                   }
               }
@@ -1241,7 +1256,7 @@ jobs:
                       Prefetch.add(cardUrl(r.spotlight, it))
                       if (!r.spotlight) Prefetch.add(it.logo)          // small title images: ready before the card is focused
                   }
-                  r.items.firstOrNull()?.let { prefetchHero(it) }
+                  r.items.take(3).forEach { prefetchHero(it) }
               }
 
               private fun isSpotRow() = rows.getOrNull(curRow)?.spotlight == true
@@ -1253,16 +1268,20 @@ jobs:
                   heroRun?.let { ui.removeCallbacks(it) }
                   val r = Runnable {
                       showHero(item)
-                      row.items.getOrNull(pos + 1)?.let { prefetchHero(it) }
+                      // aggressive look-ahead: banners + titles of the next cards, detail data of the neighbours
+                      row.items.getOrNull(pos + 1)?.let { prefetchHero(it, true) }
+                      row.items.getOrNull(pos + 2)?.let { prefetchHero(it, true) }
+                      row.items.getOrNull(pos - 1)?.let { prefetchHero(it) }
+                      if (!row.spotlight) row.items.getOrNull(pos + 1)?.let { prefetchDetail(it) }
                   }
                   heroRun = r
-                  ui.postDelayed(r, 150)
+                  ui.postDelayed(r, 120)
               }
 
               private fun snapTo(pos: Int) {
                   if (pos == lastSnap) return
                   lastSnap = pos
-                  for (d in 1..2) rows.getOrNull(pos + d)?.let { prefetchRow(it, 8) }   // next rows, in order, after banner
+                  for (d in 1..3) rows.getOrNull(pos + d)?.let { prefetchRow(it, 12) }   // next rows, in order, after banner
                   smoothVertical(pos)
               }
 
@@ -1302,7 +1321,7 @@ jobs:
                       logo.setImageDrawable(null); logo.visibility = View.GONE
                       titleTv.text = item.title; titleTv.visibility = View.VISIBLE
                   }
-                  ui.postDelayed({ reveal(item, token) }, 3000)   // safety if network is slow
+                  ui.postDelayed({ reveal(item, token) }, 2500)   // safety if network is slow
               }
 
               private fun reveal(item: Item, token: Int) {
@@ -1507,7 +1526,7 @@ jobs:
               }
 
               // The trailer starts ONLY after the title image, the background and the first episode thumbnails are loaded
-              // (4s safety timeout). While they load, background prefetch is paused so they get all the bandwidth.
+              // (3s safety timeout). While they load, background prefetch is paused so they get all the bandwidth.
               private fun loadDetailAssets(tok: Int, title: String, logoUrl: String?, bgUrl: String?, thumbs: List<String>, trailer: String?) {
                   detGateRun?.let { ui.removeCallbacks(it) }
                   var pending = (if (logoUrl != null) 1 else 0) + (if (bgUrl != null) 1 else 0) + thumbs.size
@@ -1536,7 +1555,7 @@ jobs:
                   if (!fired) {
                       val r = Runnable { fire() }
                       detGateRun = r
-                      ui.postDelayed(r, 4000)
+                      ui.postDelayed(r, 3000)
                   }
               }
 
@@ -1615,7 +1634,7 @@ jobs:
                           setPadding(u(18), u(12), u(18), u(12))
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
-                      tx(c, 17f)
+                      tx(c, 18f)
                       c.setOnFocusChangeListener { _, has -> styleChip(i); if (has) scheduleSelect(i) }
                       c.setOnClickListener {
                           selRun?.let { ui.removeCallbacks(it) }
@@ -1644,7 +1663,7 @@ jobs:
                   if (i == curSeason) return
                   val r = Runnable { selectSeason(i, false) }
                   selRun = r
-                  ui.postDelayed(r, 450)
+                  ui.postDelayed(r, 350)
               }
 
               private fun selectSeason(i: Int, grab: Boolean) {
@@ -1685,7 +1704,9 @@ jobs:
                           val start = eps.size
                           eps.addAll(list)
                           epAdapter.notifyItemRangeInserted(start, list.size)
-                          if (start == 0) list.take(6).forEach { Prefetch.add(img(it.thumb, 600), true) }   // first thumbnails: queue front
+                          // thumbnails of this whole page: queue front (first 4 decoded into memory right away)
+                          list.take(14).forEach { Prefetch.add(img(it.thumb, 600), true) }
+                          list.take(4).forEach { cardReq(img(it.thumb, 600), epImgW, epImgH).priority(Priority.HIGH).preload() }
                           if (eps.isEmpty()) { epStatus.text = "No episodes"; epStatus.visibility = View.VISIBLE }
                           else epStatus.visibility = View.GONE
                           if (start == 0 && list.isNotEmpty()) {
@@ -1794,7 +1815,7 @@ jobs:
                           clipChildren = false; clipToPadding = false; itemAnimator = null
                           overScrollMode = View.OVER_SCROLL_NEVER
                           isFocusable = false; isFocusableInTouchMode = false
-                          setHasFixedSize(true); setItemViewCacheSize(3)
+                          setHasFixedSize(true); setItemViewCacheSize(6)
                           setPadding(u(46), padV, u(60), padV)
                       }
                       r.addView(tv, LinearLayout.LayoutParams(-1, titleH))
@@ -1818,6 +1839,16 @@ jobs:
                   private val cw = if (row.spotlight) stripW else cardW
                   private val ch = if (row.spotlight) stripH else cardH
                   override fun getItemCount() = row.items.size
+
+                  // decode the next cards into memory + download their title images ahead of the focus
+                  private fun warm(pos: Int) {
+                      for (k in 1..7) {
+                          val it = row.items.getOrNull(pos + k) ?: break
+                          cardReq(cardUrl(row.spotlight, it), cw, ch).priority(Priority.LOW).preload()
+                          if (!row.spotlight) Prefetch.add(it.logo)
+                      }
+                      row.items.getOrNull(pos - 1)?.let { cardReq(cardUrl(row.spotlight, it), cw, ch).priority(Priority.LOW).preload() }
+                  }
 
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): CardVH {
                       val card = FrameLayout(this@MainActivity).apply {
@@ -1856,7 +1887,8 @@ jobs:
                   override fun onBindViewHolder(h: CardVH, pos: Int) {
                       val item = row.items[pos]
                       val url = cardUrl(row.spotlight, item)
-                      cardReq(url, cw, ch).into(h.iv)
+                      cardReq(url, cw, ch).priority(Priority.HIGH).into(h.iv)
+                      if (pos == 0) warm(0)
                       h.tv.text = item.title
                       h.tv.visibility = if (url == null) View.VISIBLE else View.GONE
                       h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
@@ -1864,7 +1896,7 @@ jobs:
                           v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
                           h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
                           v.translationZ = if (has) u(10).toFloat() else 0f
-                          if (has) onCardFocus(item, row, pos, rowPos)
+                          if (has) { warm(pos); onCardFocus(item, row, pos, rowPos) }
                       }
                       h.card.setOnClickListener {
                           if (row.spotlight) playItem(item) else openDetail(item, h.card)
@@ -1879,7 +1911,7 @@ jobs:
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): EpVH {
                       val row = LinearLayout(this@MainActivity).apply {
                           orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                          layoutParams = RecyclerView.LayoutParams(-1, epImgH + u(28))
+                          layoutParams = RecyclerView.LayoutParams(-1, epImgH + u(40))
                           setPadding(u(8), u(8), u(8), u(8))
                           clipChildren = false; clipToPadding = false
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
@@ -1895,7 +1927,7 @@ jobs:
                           setPadding(u(8), u(3), u(8), u(3)); visibility = View.GONE
                           background = GradientDrawable().apply { cornerRadius = u(5).toFloat(); setColor(Color.argb(210, 90, 100, 190)) }
                       }
-                      tx(badge, 11f)
+                      tx(badge, 12f)
                       val border = View(this@MainActivity).apply {
                           background = GradientDrawable().apply {
                               setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
@@ -1906,30 +1938,31 @@ jobs:
                       thumb.addView(badge, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, u(8), u(8), 0) })
                       thumb.addView(border, FrameLayout.LayoutParams(-1, -1))
 
-                      val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                      // bigger text, vertically centred next to the (bigger) card
+                      val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
                       val t1 = TextView(this@MainActivity).apply {
                           setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
                           maxLines = 2; ellipsize = TextUtils.TruncateAt.END
                       }
-                      tx(t1, 19f)
+                      tx(t1, 26f)
                       val t2 = TextView(this@MainActivity).apply { setTextColor(Color.parseColor("#C8C8D0")) }
-                      tx(t2, 14f)
+                      tx(t2, 18f)
                       val t3 = TextView(this@MainActivity).apply {
                           setTextColor(Color.parseColor("#E4E4EA")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
                       }
-                      tx(t3, 15f)
+                      tx(t3, 19f)
                       texts.addView(t1, LinearLayout.LayoutParams(-1, -2))
                       texts.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(4) })
                       texts.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
 
                       row.addView(thumb, LinearLayout.LayoutParams(epImgW, epImgH))
-                      row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = u(20) })
+                      row.addView(texts, LinearLayout.LayoutParams(0, -1, 1f).apply { leftMargin = u(22) })
                       return EpVH(row, thumb, iv, badge, border, t1, t2, t3)
                   }
 
                   override fun onBindViewHolder(h: EpVH, pos: Int) {
                       val ep = eps[pos]
-                      cardReq(img(ep.thumb, 600), epImgW, epImgH).into(h.iv)
+                      cardReq(img(ep.thumb, 600), epImgW, epImgH).priority(Priority.HIGH).into(h.iv)
                       h.t1.text = ep.title
                       val bits = ArrayList<String>()
                       if (ep.num > 0) bits.add("E" + ep.num)
@@ -1942,7 +1975,14 @@ jobs:
                       h.row.setOnFocusChangeListener { _, has ->
                           h.thumb.animate().scaleX(if (has) 1.05f else 1f).scaleY(if (has) 1.05f else 1f).setDuration(150).start()
                           h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
-                          if (has && pos >= eps.size - 4) loadEpisodes()      // load next 30
+                          if (has) {
+                              // look-ahead: decode the next episode thumbnails into memory, download further ones
+                              for (k in 1..6) eps.getOrNull(pos + k)?.let {
+                                  cardReq(img(it.thumb, 600), epImgW, epImgH).priority(Priority.LOW).preload()
+                              }
+                              for (k in 7..14) eps.getOrNull(pos + k)?.let { Prefetch.add(img(it.thumb, 600)) }
+                              if (pos >= eps.size - 8) loadEpisodes()      // load next 30 early
+                          }
                       }
                       h.row.setOnClickListener {
                           Toast.makeText(this@MainActivity, ep.title, Toast.LENGTH_SHORT).show()
