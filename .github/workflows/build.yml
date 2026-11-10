@@ -213,6 +213,11 @@ jobs:
           const val EP_PAGE = 30
           const val TRAILER_MUTED = false      // false = trailers play WITH sound
 
+          // image widths (CDN params: ?h=auto&w=<n>&q=eco)
+          const val W_LOGO = 700               // all title images
+          const val W_BG = 1500                // all background banners
+          const val W_PORTRAIT = 1000          // portrait cards
+
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
               val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?, val spot: String?,
@@ -257,7 +262,7 @@ jobs:
               }
           }
 
-          // CDN resizing: small + eco quality = much faster
+          // CDN resizing: small + eco quality = much faster  ->  url?h=auto&w=<w>&q=eco
           fun img(u: String?, w: Int): String? =
               if (u.isNullOrBlank()) null else u + (if (u.contains("?")) "&" else "?") + "h=auto&w=" + w + "&q=eco"
 
@@ -266,6 +271,16 @@ jobs:
               if (!has(k) || isNull(k)) return null
               val v = optString(k, "")
               return if (v.isBlank() || v == "null") null else v
+          }
+
+          // ad containers / ad slides must never show up as rows or cards (ad_template, ad_unit, "AD Above Spotlight ...")
+          fun isAd(o: JSONObject): Boolean {
+              val layout = o.optString("layout").lowercase()
+              if (layout == "ad_template" || layout.startsWith("ad_")) return true
+              val m = o.optJSONObject("metadata") ?: return false
+              if (m.str("ad_unit") != null || m.str("ad_unit_mweb") != null) return true
+              val t = m.str("title") ?: m.str("label") ?: o.optString("title")
+              return t.startsWith("AD ") || t.startsWith("Ad ") || t.contains("Above Spotlight", true)
           }
 
           fun fmtDur(sec: Int): String {
@@ -330,12 +345,13 @@ jobs:
               } catch (e: Exception) { null }
           }
 
-          // Lenient parser: CONTENT_ITEM, LAUNCHER_ITEM and any other slide type that has a title or image.
-          // Title image priority: masthead_logo -> masthead_logo_v1 -> launcher_logo
+          // Lenient parser: CONTENT_ITEM, LAUNCHER_ITEM and any other slide type that has an image.
+          // Ads and image-less (text-only) slides are dropped.
+          // Title image priority: masthead_logo -> masthead_logo_v1 -> launcher_logo (always ?h=auto&w=700&q=eco)
           // Description priority: shortDescription -> launcher_short_description -> longDescription
           fun parseItem(o: JSONObject): Item? {
               val low = o.optString("layout").lowercase()
-              if (low == "ad_template" || low.startsWith("ad_") || low.contains("template") || low.contains("promotion")) return null
+              if (isAd(o) || low.contains("template") || low.contains("promotion")) return null
               val m = o.optJSONObject("metadata") ?: JSONObject()
               val ed = o.optJSONObject("editorialMetadata") ?: JSONObject()
               val am = o.optJSONObject("assetMetadata") ?: JSONObject()
@@ -349,7 +365,7 @@ jobs:
               val portrait = s("portrait_thumb") ?: ev("poster") ?: ev("mweb_poster")
               val bgU = s("tv_background_image") ?: bgFromJson(ev("poster_background")) ?: s("detail_cover_bg_V2")
               val spotU = s("mweb_spotlight")
-              if (title.isBlank() && landscape == null && portrait == null && bgU == null && spotU == null) return null
+              if (landscape == null && portrait == null && bgU == null && spotU == null) return null   // no text-only slides
 
               val cid = am.str("contentId") ?: m.str("contentId") ?: o.optString("id")
               val id = m.str("contentId") ?: o.optString("id")
@@ -360,7 +376,7 @@ jobs:
               m.optJSONArray("genres")?.optString(0)?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
 
               val desc = m.str("shortDescription") ?: ev("launcher_short_description") ?: m.str("longDescription") ?: ""
-              val logoU = s("masthead_logo") ?: s("masthead_logo_v1") ?: ev("launcher_logo")
+              val logoU = img(s("masthead_logo") ?: s("masthead_logo_v1") ?: ev("launcher_logo"), W_LOGO)
               return Item(id, title, portrait, landscape, bgU, logoU, parts.joinToString(" • "), desc, trailerFrom(o), spotU, cid)
           }
 
@@ -415,9 +431,10 @@ jobs:
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
               private var logoW = 0; private var logoH = 0; private var bgW = 1280; private var bgH = 720
-              // title logo sizes: Shows (home) page = 1.8x, detail page = 1.5x
+              // title logo sizes: Shows listing page = 1.5x, detail page (after clicking a show) = 1.8x
               private var homeLogoW = 0; private var homeLogoH = 0
               private var detLogoW = 0; private var detLogoH = 0
+              private var logoPad = 0              // right padding so a logo never touches / gets cut at its right edge
 
               // trailer box sizes: home = 1.25x the old size, detail = 1.5x, both stuck to the top-right edge
               private var homeBoxW = 0; private var homeBoxH = 0
@@ -505,8 +522,9 @@ jobs:
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
-                  homeLogoH = (logoH * 1.8f).toInt(); homeLogoW = homeLogoH * 16 / 9  // Shows page logo 1.8x
-                  detLogoH = (logoH * 1.5f).toInt(); detLogoW = detLogoH * 16 / 9     // detail page logo 1.5x
+                  logoPad = u(28)
+                  homeLogoH = (logoH * 1.5f).toInt(); homeLogoW = homeLogoH * 16 / 9  // Shows listing page logo 1.5x
+                  detLogoH = (logoH * 1.8f).toInt(); detLogoW = detLogoH * 16 / 9     // detail page logo 1.8x
                   bgW = min(W, 1280); bgH = bgW * 9 / 16
                   homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
                   detBoxW = (W * 0.67f * 1.5f).toInt(); detBoxH = (H * 0.725f * 1.5f).toInt()
@@ -561,11 +579,12 @@ jobs:
                   content.addView(bottom, lp(-1, (H * 0.62).toInt(), Gravity.BOTTOM))
 
                   info = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  // logo box sizes itself to the image (width fixed, height follows aspect, capped) so text sits right under it
+                  // logo box sizes itself to the image (width fixed, height follows aspect, capped); right padding keeps the edge clear
                   logo = ImageView(this).apply {
                       scaleType = ImageView.ScaleType.FIT_START
                       adjustViewBounds = true
                       maxHeight = homeLogoH
+                      setPadding(0, 0, logoPad, 0)
                   }
                   titleTv = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
@@ -581,7 +600,7 @@ jobs:
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
-                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW), -2).apply { leftMargin = u(125); topMargin = (H * 0.04).toInt() })
+                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW + u(20)), -2).apply { leftMargin = u(125); topMargin = (H * 0.04).toInt() })
 
                   // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll
                   rowRv = object : RecyclerView(this@MainActivity) {
@@ -701,6 +720,7 @@ jobs:
                       scaleType = ImageView.ScaleType.FIT_START
                       adjustViewBounds = true
                       maxHeight = detLogoH
+                      setPadding(0, 0, logoPad, 0)
                   }
                   dTitle = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
@@ -732,7 +752,7 @@ jobs:
                   dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
                   dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
-                  heroLayer.addView(dInfo, lp(max((W * 0.5f).toInt(), detLogoW), -2).apply { leftMargin = u(100); topMargin = (H * 0.05f).toInt() })
+                  heroLayer.addView(dInfo, lp(max((W * 0.5f).toInt(), detLogoW + u(20)), -2).apply { leftMargin = u(100); topMargin = (H * 0.04f).toInt() })
 
                   dHint = TextView(this).apply {
                       text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
@@ -746,12 +766,8 @@ jobs:
                   // ---------- episodes state: tab pill, divider, [bundle column] + vertical episode list
                   epLayer = FrameLayout(this).apply {
                       setBackgroundColor(Color.argb(255, 12, 13, 20)); visibility = View.GONE
-                      clipChildren = false; clipToPadding = false
                   }
-                  val col = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      clipChildren = false; clipToPadding = false
-                  }
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                   epTab = TextView(this).apply {
                       text = "Episodes"; typeface = Typeface.DEFAULT_BOLD
                       setPadding(u(22), u(8), u(22), u(8))
@@ -770,10 +786,11 @@ jobs:
                   sCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                   sScroll.addView(sCol, FrameLayout.LayoutParams(-1, -2))
 
-                  // left padding + no clipping => the focused (zoomed) thumbnail and its border are never cut off
+                  // The list CLIPS to its own bounds (rows never draw over the divider / Episodes pill while scrolling).
+                  // Side + top padding stay drawable (clipToPadding=false) so the zoomed focused thumbnail + border are never cut.
                   dEpRv = RecyclerView(this).apply {
                       layoutManager = LinearLayoutManager(this@MainActivity)
-                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      clipChildren = true; clipToPadding = false; itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
                       setPadding(u(16), padV, u(8), padV * 4)
@@ -781,10 +798,7 @@ jobs:
                   epAdapter = EpAdapter()
                   dEpRv.adapter = epAdapter
 
-                  val body = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      clipChildren = false; clipToPadding = false
-                  }
+                  val body = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
                   body.addView(sScroll, LinearLayout.LayoutParams(seasonColW, -1).apply { leftMargin = u(16); rightMargin = u(8) })
                   body.addView(dEpRv, LinearLayout.LayoutParams(0, -1, 1f))
 
@@ -1050,8 +1064,8 @@ jobs:
                       var gotSpot = false
                       for (i in 0 until cs.length()) {
                           val c = cs.optJSONObject(i) ?: continue
+                          if (isAd(c)) continue                                 // never load ad templates / ad spotlight
                           val layout = c.optString("layout")
-                          if (layout == "ad_template") continue                 // never load ad templates
                           val spot = layout == "spotlight_layout"
                           if (!spot && layout != "portrait_layout") continue   // skips ads, cards, landscape, square...
                           if (spot) { if (gotSpot) continue; gotSpot = true }
@@ -1070,7 +1084,7 @@ jobs:
                           val items = ArrayList<Item>()
                           if (arr != null) for (k in 0 until arr.length()) {
                               val c = arr.optJSONObject(k) ?: continue
-                              if (c.optString("layout") == "ad_template") continue
+                              if (isAd(c)) continue
                               parseItem(c)?.let { items.add(it) }
                               if (j.spot) {
                                   val dual = c.optJSONObject("editorialMetadata")?.optJSONArray("dual_spotlight_items")
@@ -1105,9 +1119,9 @@ jobs:
               }
 
               // ---------------------------------------------------------------- Hero + trailer (home)
-              private fun heroUrl(i: Item) = img(i.bg ?: i.spot ?: i.landscape, 1500)
+              private fun heroUrl(i: Item) = img(i.bg ?: i.spot ?: i.landscape, W_BG)
               private fun cardUrl(spot: Boolean, i: Item) =
-                  if (spot) img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, 700) else img(i.portrait ?: i.landscape ?: i.bg, 700)
+                  if (spot) img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, 700) else img(i.portrait ?: i.landscape ?: i.bg, W_PORTRAIT)
               private fun prefetchHero(i: Item, first: Boolean = false) {
                   Prefetch.add(heroUrl(i), first); Prefetch.add(i.logo, first)
               }
@@ -1352,7 +1366,7 @@ jobs:
                   dBg.animate().cancel(); dBg.alpha = 1f
                   dBox.animate().cancel(); dBox.alpha = 0f; dBox.visibility = View.GONE
                   Glide.with(this).clear(dBg)
-                  bgBigReq(img(item.bg ?: item.landscape, 1800)).into(dBg)
+                  bgBigReq(img(item.bg ?: item.landscape, W_BG)).into(dBg)
                   showDetailLogo(item.logo, item.title)
                   dTag.visibility = View.GONE
                   dMeta.text = item.meta
@@ -1415,12 +1429,12 @@ jobs:
                   val tag = e.str("highlight_text")
                   if (tag != null) { dTag.text = tag; dTag.visibility = View.VISIBLE } else dTag.visibility = View.GONE
 
-                  // title image: masthead_logo -> masthead_logo_v1 -> (list item: launcher_logo) -> text
-                  val logoUrl = img(e.str("masthead_logo") ?: e.str("masthead_logo_v1"), 900) ?: item.logo
+                  // title image: masthead_logo -> masthead_logo_v1 -> (list item: launcher_logo) -> text  (w=700)
+                  val logoUrl = img(e.str("masthead_logo") ?: e.str("masthead_logo_v1"), W_LOGO) ?: item.logo
                   showDetailLogo(logoUrl, title)
 
-                  // background image until the trailer starts
-                  val bgUrl = img(e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail"), 1800)
+                  // background image until the trailer starts (w=1500)
+                  val bgUrl = img(e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail"), W_BG)
                   if (bgUrl != null) { Glide.with(this).clear(dBg); bgBigReq(bgUrl).into(dBg) }
 
                   // seasons / bundles, newest first
