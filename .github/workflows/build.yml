@@ -134,9 +134,13 @@ jobs:
 
           import android.app.Application
           import com.bumptech.glide.Glide
+          import com.bumptech.glide.GlideBuilder
           import com.bumptech.glide.MemoryCategory
           import com.bumptech.glide.integration.okhttp3.OkHttpUrlLoader
+          import com.bumptech.glide.load.engine.cache.InternalCacheDiskCacheFactory
+          import com.bumptech.glide.load.engine.executor.GlideExecutor
           import com.bumptech.glide.load.model.GlideUrl
+          import okhttp3.Request
           import java.io.InputStream
 
           class App : Application() {
@@ -144,11 +148,24 @@ jobs:
                   super.onCreate()
                   Prefetch.app = this
                   try {
+                      // 8 download/decode threads (default is ~4). Background prefetch only uses 3 of them,
+                      // so the banner / title image you are looking at never waits behind prefetch downloads.
+                      Glide.init(this, GlideBuilder()
+                          .setSourceExecutor(GlideExecutor.newSourceBuilder().setThreadCount(8).setName("liv-source").build())
+                          .setDiskCache(InternalCacheDiskCacheFactory(this, 400L * 1024 * 1024)))
+                  } catch (e: Exception) { }
+                  try {
                       // Glide downloads through the shared OkHttp client (HTTP/2, keep-alive, parallel)
                       Glide.get(this).registry.replace(GlideUrl::class.java, InputStream::class.java, OkHttpUrlLoader.Factory(Net.client))
                       // bigger memory cache => images already seen / warmed show instantly
                       Glide.get(this).setMemoryCategory(MemoryCategory.HIGH)
                   } catch (e: Exception) { }
+                  // open DNS + TLS + HTTP/2 connection to the image CDN and API now, so the first images don't pay for it
+                  Thread {
+                      for (u in listOf("https://origin-staticv2.sonyliv.com/", "https://apiv3.sonyliv.com/")) {
+                          try { Net.client.newCall(Request.Builder().url(u).head().build()).execute().close() } catch (e: Exception) { }
+                      }
+                  }.apply { isDaemon = true; start() }
               }
           }
           EOF
@@ -231,10 +248,12 @@ jobs:
           // Extra push of the title PNG to the right (0 = flush with the text under it, try 20, 40 ... to move it more right)
           const val LOGO_SHIFT_X = 0
 
-          // image widths (CDN params: ?h=auto&w=<n>&q=eco)
-          const val W_LOGO = 900               // title image = masthead_logo_rectangualar, ?h=auto&w=900&q=eco
+          // ---- IMAGE WIDTHS (CDN params: ?h=auto&w=<n>&q=eco). Smaller = much faster download + decode. ----
+          const val W_LOGO = 900               // title image = masthead_logo_rectangualar ONLY, ?h=auto&w=900&q=eco
           const val W_BG = 1500                // all background banners
-          const val W_PORTRAIT = 1000          // portrait cards
+          const val W_PORTRAIT = 500           // portrait cards (shown ~170-260px wide, 500 is already 2x sharp)
+          const val W_SPOT = 600               // spotlight strips
+          const val W_EP = 480                 // episode thumbnails (shown ~310-460px wide)
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
@@ -249,6 +268,7 @@ jobs:
 
           // Cuts the transparent border off a title PNG so the visible artwork starts exactly at the left edge of the text under it.
           // Robust version: faint glow / compression noise is ignored (alpha > 48 and at least 2 pixels per column / row).
+          // Fast version: scans ONE row at a time (no giant pixel array).
           class TrimTransform : BitmapTransformation() {
               override fun updateDiskCacheKey(messageDigest: MessageDigest) {
                   messageDigest.update("trim_alpha_v2".toByteArray())
@@ -259,15 +279,16 @@ jobs:
                   if (!toTransform.hasAlpha()) return toTransform
                   val w = toTransform.width
                   val h = toTransform.height
-                  val px = IntArray(w * h)
-                  toTransform.getPixels(px, 0, w, 0, 0, w, h)
+                  val line = IntArray(w)
                   val cols = IntArray(w)
                   val rws = IntArray(h)
                   for (y in 0 until h) {
-                      val o = y * w
+                      toTransform.getPixels(line, 0, w, 0, y, w, 1)
+                      var c = 0
                       for (x in 0 until w) {
-                          if ((px[o + x] ushr 24) > 48) { cols[x]++; rws[y]++ }
+                          if ((line[x] ushr 24) > 48) { cols[x]++; c++ }
                       }
+                      rws[y] = c
                   }
                   var minX = 0; while (minX < w && cols[minX] < 2) minX++
                   var maxX = w - 1; while (maxX >= 0 && cols[maxX] < 2) maxX--
@@ -348,7 +369,8 @@ jobs:
               return SimpleDateFormat(if (withYear) "dd MMM yyyy" else "dd MMM", Locale.ENGLISH).format(Date(ms))
           }
 
-          // 4 background threads, download to disk only (no bitmaps in RAM), wait only briefly while the visible images load
+          // 3 background threads, download to disk only (no bitmaps in RAM), wait only briefly while the visible images load.
+          // Glide has 8 source threads (see App.kt) so these 3 can never starve the images on screen.
           object Prefetch {
               lateinit var app: Context
               @Volatile var gate = true
@@ -367,7 +389,7 @@ jobs:
                   }
               }
 
-              private val workers = List(4) { Thread { loop() }.apply { isDaemon = true; start() } }
+              private val workers = List(3) { Thread { loop() }.apply { isDaemon = true; start() } }
 
               fun add(url: String?, first: Boolean = false) {
                   if (url == null || !seen.add(url)) return
@@ -590,6 +612,9 @@ jobs:
               private var selRun: Runnable? = null
               private var lastCard: View? = null
               private var epImgW = 0; private var epImgH = 0; private var seasonColW = 0
+              // urls already drawn on the detail page (so we never reload / flicker the same image twice)
+              private var shownLogo: String? = null
+              private var shownBg: String? = null
 
               // identical options for preload + real load => disk/memory cache hit, downsampled decode
               private fun cardReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).centerCrop()
@@ -1234,10 +1259,15 @@ jobs:
                   return j
               }
 
-              // focused SHOW: fetch its detail data + the images the detail page will need, ahead of time (queue front)
+              // focused SHOW: warm everything the detail page needs, ahead of time.
+              //  1) (main thread, instant) decode the DETAIL-size title image + banner into Glide's memory cache,
+              //     so opening the show draws them with zero wait
+              //  2) (background) fetch the detail json + download its banner / title / first episode thumbnails
               // (episodes / trailers / other VOD have no detail page yet, so nothing to prefetch)
               private fun prefetchDetail(item: Item) {
                   if (item.sub != SUB_SHOW || item.cid.isBlank()) return
+                  if (item.logo != null) logoReq(item.logo, detLogoW, detLogoH).priority(Priority.NORMAL).preload()
+                  img(item.bg ?: item.landscape, W_BG)?.let { bgBigReq(it).priority(Priority.LOW).preload() }
                   Api.pool.execute {
                       val j = fetchDetail(item.cid) ?: return@execute
                       val show = j.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return@execute
@@ -1245,7 +1275,7 @@ jobs:
                       Prefetch.add(detLogoUrl(show), true)
                       val data = parseSeasons(show)
                       data.seasons.firstOrNull()?.let { s ->
-                          data.embedded[s.id].orEmpty().take(6).forEach { Prefetch.add(img(it.thumb, 600), true) }
+                          data.embedded[s.id].orEmpty().take(6).forEach { Prefetch.add(img(it.thumb, W_EP), true) }
                       }
                   }
               }
@@ -1253,9 +1283,14 @@ jobs:
               // ---------------------------------------------------------------- Hero + trailer (home)
               private fun heroUrl(i: Item) = img(i.bg ?: i.spot ?: i.landscape, W_BG)
               private fun cardUrl(spot: Boolean, i: Item) =
-                  if (spot) img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, 700) else img(i.portrait ?: i.landscape ?: i.bg, W_PORTRAIT)
+                  if (spot) img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, W_SPOT) else img(i.portrait ?: i.landscape ?: i.bg, W_PORTRAIT)
               private fun prefetchHero(i: Item, first: Boolean = false) {
                   Prefetch.add(heroUrl(i), first); Prefetch.add(i.logo, first)
+              }
+              // decode banner + title image of a card into memory BEFORE it gets focus => hero swap is instant
+              private fun warmHero(i: Item) {
+                  heroUrl(i)?.let { bgReq(it).priority(Priority.NORMAL).preload() }
+                  if (i.logo != null) logoReq(i.logo, homeLogoW, homeLogoH).priority(Priority.NORMAL).preload()
               }
               private fun prefetchRow(r: Row, n: Int) {
                   r.items.take(n).forEach {
@@ -1274,14 +1309,14 @@ jobs:
                   heroRun?.let { ui.removeCallbacks(it) }
                   val r = Runnable {
                       showHero(item)
-                      // aggressive look-ahead: banners + titles of the next cards, detail data of the neighbours
-                      row.items.getOrNull(pos + 1)?.let { prefetchHero(it, true) }
-                      row.items.getOrNull(pos + 2)?.let { prefetchHero(it, true) }
-                      row.items.getOrNull(pos - 1)?.let { prefetchHero(it) }
+                      // aggressive look-ahead: banners + titles of the next cards (downloaded AND decoded), detail data of the neighbours
+                      row.items.getOrNull(pos + 1)?.let { prefetchHero(it, true); warmHero(it) }
+                      row.items.getOrNull(pos + 2)?.let { prefetchHero(it, true); warmHero(it) }
+                      row.items.getOrNull(pos - 1)?.let { prefetchHero(it); warmHero(it) }
                       if (!row.spotlight) row.items.getOrNull(pos + 1)?.let { prefetchDetail(it) }
                   }
                   heroRun = r
-                  ui.postDelayed(r, 120)
+                  ui.postDelayed(r, 90)
               }
 
               private fun snapTo(pos: Int) {
@@ -1327,15 +1362,15 @@ jobs:
                       logo.setImageDrawable(null); logo.visibility = View.GONE
                       titleTv.text = item.title; titleTv.visibility = View.VISIBLE
                   }
-                  ui.postDelayed({ reveal(item, token) }, 2500)   // safety if network is slow
+                  ui.postDelayed({ reveal(item, token) }, 1800)   // safety if network is slow
               }
 
               private fun reveal(item: Item, token: Int) {
                   if (token != heroToken || revealed) return
                   revealed = true
                   Prefetch.gate = true
-                  bg.animate().cancel(); bg.animate().alpha(1f).setDuration(300).start()
-                  info.animate().cancel(); info.animate().alpha(1f).setDuration(300).start()
+                  bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start()
+                  info.animate().cancel(); info.animate().alpha(1f).setDuration(250).start()
                   scheduleTrailer(item)      // trailer only after banner + title are on screen
                   prefetchDetail(item)       // then get the detail page data/images ready in the background (SHOW only)
               }
@@ -1494,7 +1529,10 @@ jobs:
                   dBg.animate().cancel(); dBg.alpha = 1f
                   dBox.animate().cancel(); dBox.alpha = 0f; dBox.visibility = View.GONE
                   Glide.with(this).clear(dBg)
-                  bgBigReq(img(item.bg ?: item.landscape, W_BG)).priority(Priority.IMMEDIATE).into(dBg)
+                  val previewBg = img(item.bg ?: item.landscape, W_BG)
+                  shownBg = previewBg
+                  bgBigReq(previewBg).priority(Priority.IMMEDIATE).into(dBg)
+                  shownLogo = item.logo
                   showDetailLogo(item.logo, item.title)
                   dTag.visibility = View.GONE
                   dMeta.text = item.meta
@@ -1527,9 +1565,12 @@ jobs:
 
               // The trailer starts ONLY after the title image, the background and the first episode thumbnails are loaded
               // (3s safety timeout). While they load, background prefetch is paused so they get all the bandwidth.
+              // Title image / banner that are ALREADY on screen (same url as the instant preview) are not reloaded.
               private fun loadDetailAssets(tok: Int, title: String, logoUrl: String?, bgUrl: String?, thumbs: List<String>, trailer: String?) {
                   detGateRun?.let { ui.removeCallbacks(it) }
-                  var pending = (if (logoUrl != null) 1 else 0) + (if (bgUrl != null) 1 else 0) + thumbs.size
+                  val needLogo = logoUrl != null && logoUrl != shownLogo
+                  val needBg = bgUrl != null && bgUrl != shownBg
+                  var pending = (if (needLogo) 1 else 0) + (if (needBg) 1 else 0) + thumbs.size
                   var fired = false
                   val fire: () -> Unit = {
                       if (!fired) {
@@ -1543,8 +1584,14 @@ jobs:
                       if (tok == detailToken) { pending--; if (pending <= 0) fire() }
                   }
                   Prefetch.gate = false
-                  showDetailLogo(logoUrl, title, l)                          // 1) title image
-                  if (bgUrl != null) {                                       // 2) background
+                  if (needLogo) {                                            // 1) title image (rectangular masthead logo only)
+                      shownLogo = logoUrl
+                      showDetailLogo(logoUrl, title, l)
+                  } else if (logoUrl == null && shownLogo == null) {
+                      showDetailLogo(null, title)                            // no logo at all => plain title text
+                  }
+                  if (needBg) {                                              // 2) background
+                      shownBg = bgUrl
                       Glide.with(this).clear(dBg)
                       bgBigReq(bgUrl).priority(Priority.IMMEDIATE).listener(l).into(dBg)
                   }
@@ -1608,10 +1655,10 @@ jobs:
                   detailTrailerUrl = trailer
 
                   // title image (masthead_logo_rectangualar, w=900) + background (w=1500) + first episode thumbnails => then the trailer
-                  val logoUrl = detLogoUrl(show)
+                  val logoUrl = detLogoUrl(show) ?: item.logo
                   val bgUrl = detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)
                   val thumbs = data.seasons.firstOrNull()?.let { s ->
-                      data.embedded[s.id].orEmpty().take(4).mapNotNull { img(it.thumb, 600) }
+                      data.embedded[s.id].orEmpty().take(4).mapNotNull { img(it.thumb, W_EP) }
                   }.orEmpty()
                   loadDetailAssets(tok, title, logoUrl, bgUrl, thumbs, trailer)
 
@@ -1705,8 +1752,8 @@ jobs:
                           eps.addAll(list)
                           epAdapter.notifyItemRangeInserted(start, list.size)
                           // thumbnails of this whole page: queue front (first 4 decoded into memory right away)
-                          list.take(14).forEach { Prefetch.add(img(it.thumb, 600), true) }
-                          list.take(4).forEach { cardReq(img(it.thumb, 600), epImgW, epImgH).priority(Priority.HIGH).preload() }
+                          list.take(14).forEach { Prefetch.add(img(it.thumb, W_EP), true) }
+                          list.take(4).forEach { cardReq(img(it.thumb, W_EP), epImgW, epImgH).priority(Priority.HIGH).preload() }
                           if (eps.isEmpty()) { epStatus.text = "No episodes"; epStatus.visibility = View.VISIBLE }
                           else epStatus.visibility = View.GONE
                           if (start == 0 && list.isNotEmpty()) {
@@ -1963,7 +2010,7 @@ jobs:
 
                   override fun onBindViewHolder(h: EpVH, pos: Int) {
                       val ep = eps[pos]
-                      cardReq(img(ep.thumb, 600), epImgW, epImgH).priority(Priority.HIGH).into(h.iv)
+                      cardReq(img(ep.thumb, W_EP), epImgW, epImgH).priority(Priority.HIGH).into(h.iv)
                       h.t1.text = ep.title
                       val bits = ArrayList<String>()
                       if (ep.num > 0) bits.add("E" + ep.num)
@@ -1979,9 +2026,9 @@ jobs:
                           if (has) {
                               // look-ahead: decode the next episode thumbnails into memory, download further ones
                               for (k in 1..6) eps.getOrNull(pos + k)?.let {
-                                  cardReq(img(it.thumb, 600), epImgW, epImgH).priority(Priority.LOW).preload()
+                                  cardReq(img(it.thumb, W_EP), epImgW, epImgH).priority(Priority.LOW).preload()
                               }
-                              for (k in 7..14) eps.getOrNull(pos + k)?.let { Prefetch.add(img(it.thumb, 600)) }
+                              for (k in 7..14) eps.getOrNull(pos + k)?.let { Prefetch.add(img(it.thumb, W_EP)) }
                               if (pos >= eps.size - 8) loadEpisodes()      // load next 30 early
                           }
                       }
