@@ -169,6 +169,7 @@ jobs:
           import android.util.TypedValue
           import android.view.*
           import android.widget.*
+          import androidx.media3.common.AudioAttributes
           import androidx.media3.common.MediaItem
           import androidx.media3.common.PlaybackException
           import androidx.media3.common.Player
@@ -177,7 +178,6 @@ jobs:
           import androidx.recyclerview.widget.LinearSmoothScroller
           import androidx.recyclerview.widget.RecyclerView
           import com.bumptech.glide.Glide
-          import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
           import org.json.JSONObject
           import android.graphics.drawable.Drawable
           import com.bumptech.glide.Priority
@@ -190,6 +190,7 @@ jobs:
           import android.content.Context
           import androidx.media3.common.VideoSize
           import java.util.concurrent.LinkedBlockingDeque
+          import java.util.concurrent.ConcurrentHashMap
           import okhttp3.ConnectionPool
           import okhttp3.Dispatcher
           import okhttp3.OkHttpClient
@@ -204,14 +205,20 @@ jobs:
 
           const val BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP"
           const val SHOWS_URL = "$BASE/PAGE-V2/2240?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
-          const val TRAILER_MUTED = true
+          const val DETAIL_URL = "https://apiv3.sonyliv.com/AGL/4.8/R/ENG/WEB/IN/UP/DETAIL-V2/"
+          const val EP_URL = "https://apiv3.sonyliv.com/AGL/2.6/R/ENG/WEB/IN/UP/CONTENT/DETAIL/BUNDLE/"
+          const val EP_PAGE = 30
+          const val TRAILER_MUTED = false      // false = trailers play WITH sound
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
-              val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?, val spot: String?
+              val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?, val spot: String?,
+              val cid: String
           )
 
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
+          class Season(val id: String, val title: String, val count: Int)
+          class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int)
 
           object Net {
               val client: OkHttpClient = OkHttpClient.Builder()
@@ -276,24 +283,74 @@ jobs:
               }
           }
 
+          // trailer url from any platformVariant (not only the first one)
+          fun trailerFrom(o: JSONObject): String? {
+              val arr = o.optJSONArray("platformVariants")
+              if (arr != null) for (i in 0 until arr.length()) {
+                  val pv = arr.optJSONObject(i) ?: continue
+                  val u = pv.optString("trailerUrl")
+                  if (u.startsWith("http") && pv.optBoolean("trailerAutoPlayEligibility", true)) return u
+              }
+              val e = o.optJSONObject("metadata")?.optJSONObject("emfAttributes")
+              val u2 = e?.optString("trailer_url").orEmpty()
+              return if (u2.startsWith("http")) u2 else null
+          }
+
+          // editorialMetadata.poster_background is a JSON string: {"SONY_ANDROID_TV":"url", ...}
+          fun bgFromJson(js: String?): String? {
+              if (js.isNullOrBlank()) return null
+              return try {
+                  val j = JSONObject(js)
+                  var u = j.optString("SONY_ANDROID_TV")
+                  if (u.isBlank()) u = j.optString("JIO_ANDROID_TV")
+                  if (u.isBlank()) { val k = j.keys(); if (k.hasNext()) u = j.optString(k.next()) }
+                  if (u.isBlank()) null else u
+              } catch (e: Exception) { null }
+          }
+
+          // handles CONTENT_ITEM and LAUNCHER_ITEM (name-png + description fallback from editorialMetadata)
           fun parseItem(o: JSONObject): Item? {
-              if (o.optString("layout") != "CONTENT_ITEM") return null
-              val m = o.optJSONObject("metadata") ?: return null
+              val layout = o.optString("layout")
+              if (layout != "CONTENT_ITEM" && layout != "LAUNCHER_ITEM") return null
+              val m = o.optJSONObject("metadata") ?: JSONObject()
+              val ed = o.optJSONObject("editorialMetadata") ?: JSONObject()
+              val am = o.optJSONObject("assetMetadata") ?: JSONObject()
               val e = m.optJSONObject("emfAttributes") ?: JSONObject()
-              val pv = o.optJSONArray("platformVariants")?.optJSONObject(0)
-              fun s(k: String): String? = e.optString(k, "").ifBlank { null }
+              val ae = am.optJSONObject("emfAttributes") ?: JSONObject()
+              fun s(k: String): String? = e.optString(k, "").ifBlank { ae.optString(k, "") }.ifBlank { null }
+              fun ev(k: String): String? = ed.optString(k, "").ifBlank { null }
+
+              var title = m.optString("title")
+              if (title.isBlank()) title = am.optString("title")
+              if (title.isBlank()) title = ed.optString("card_name")
+
+              val cid = if (am.has("contentId")) am.optString("contentId") else m.optString("contentId")
+              val id = m.optString("contentId").ifBlank { o.optString("id") }
+
+              val pv = trailerFrom(o)
               val parts = ArrayList<String>()
               s("IMDB")?.let { parts.add("IMDb $it") }
               (s("region_of_origin") ?: m.optString("language")).takeIf { it.isNotBlank() }?.let { parts.add(it) }
               m.optJSONArray("genres")?.optString(0)?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
-              val trailer = if (pv != null && pv.optBoolean("hasTrailer") && pv.optBoolean("trailerAutoPlayEligibility", true))
-                  pv.optString("trailerUrl").takeIf { it.startsWith("http") } else null
+
+              val desc = m.optString("shortDescription").ifBlank { ev("launcher_short_description") ?: "" }
               return Item(
-                  m.optString("contentId"), m.optString("title"),
-                  s("portrait_thumb"), s("thumbnail") ?: s("landscape_thumb"),
-                  s("tv_background_image"), s("masthead_logo_v1"),
-                  parts.joinToString(" • "), m.optString("shortDescription"), trailer, s("mweb_spotlight")
+                  id, title,
+                  s("portrait_thumb") ?: ev("poster") ?: ev("mweb_poster"),
+                  s("thumbnail") ?: s("landscape_thumb") ?: ev("landscape_image"),
+                  s("tv_background_image") ?: bgFromJson(ev("poster_background")),
+                  s("masthead_logo_v1") ?: s("masthead_logo") ?: ev("launcher_logo"),
+                  parts.joinToString(" • "), desc, pv, s("mweb_spotlight"), cid
               )
+          }
+
+          fun parseEp(o: JSONObject?): Ep? {
+              if (o == null) return null
+              val m = o.optJSONObject("metadata") ?: return null
+              val e = m.optJSONObject("emfAttributes") ?: JSONObject()
+              val thumb = e.optString("thumbnail", "").ifBlank { e.optString("landscape_thumb", "") }.ifBlank { null }
+              val title = m.optString("episodeTitle").ifBlank { m.optString("title") }
+              return Ep(m.optString("contentId"), title, m.optInt("episodeNumber"), m.optString("shortDescription"), thumb, m.optInt("duration"))
           }
 
           class MainActivity : Activity() {
@@ -327,6 +384,7 @@ jobs:
               private var loaded = false
               private var heroRun: Runnable? = null
               private var trailerRun: Runnable? = null
+              private var advanceRun: Runnable? = null
               private var revealed = false
               private var boxW = 0; private var boxH = 0
               private lateinit var videoBox: FrameLayout
@@ -334,6 +392,47 @@ jobs:
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
               private var logoW = 0; private var logoH = 0; private var bgW = 1280; private var bgH = 720
+              private var epW = 0; private var epH = 0
+
+              // spotlight loop / row focus tracking
+              private var curRow = -1
+              private var curPos = 0
+              private var spotRv: RecyclerView? = null
+              private var spotLoopOn = false
+              private val trailerCache = ConcurrentHashMap<String, String>()
+
+              // which surface the trailer is currently drawn on (home or detail)
+              private lateinit var curBox: FrameLayout
+              private lateinit var curVideo: TextureView
+              private lateinit var curBg: ImageView
+
+              // detail page
+              private lateinit var detail: FrameLayout
+              private lateinit var dBg: ImageView
+              private lateinit var dBox: FrameLayout
+              private lateinit var dVideo: TextureView
+              private lateinit var dLogo: ImageView
+              private lateinit var dTitle: TextView
+              private lateinit var dMeta: TextView
+              private lateinit var dDesc: TextView
+              private lateinit var dSeasonScroll: HorizontalScrollView
+              private lateinit var dSeasonRow: LinearLayout
+              private lateinit var dEpLabel: TextView
+              private lateinit var dEpRv: RecyclerView
+              private lateinit var dStatus: TextView
+              private lateinit var epAdapter: EpAdapter
+              private val chips = ArrayList<TextView>()
+              private val seasons = ArrayList<Season>()
+              private val eps = ArrayList<Ep>()
+              private var inDetail = false
+              private var detailToken = 0
+              private var detailTrailerUrl: String? = null
+              private var curSeason = -1
+              private var epFrom = 0
+              private var epLoading = false
+              private var epHasMore = true
+              private var epToken = 0
+              private var lastCard: View? = null
 
               // identical options for preload + real load => disk/memory cache hit, downsampled decode
               private fun cardReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).centerCrop()
@@ -364,6 +463,7 @@ jobs:
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
                   bgW = min(W, 1280); bgH = bgW * 9 / 16
                   boxW = (W * 0.67f).toInt(); boxH = (H * 0.725f).toInt()   // trailer area
+                  epH = (H * 0.21f).toInt(); epW = epH * 16 / 9
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -398,6 +498,7 @@ jobs:
                   videoView = TextureView(this)
                   videoBox.addView(videoView, lp(boxW, boxH, Gravity.CENTER))
                   content.addView(videoBox, lp(boxW, boxH, Gravity.TOP or Gravity.END))
+                  curBox = videoBox; curVideo = videoView; curBg = bg
 
                   val left = View(this).apply {
                       background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
@@ -440,6 +541,8 @@ jobs:
                   rowRv.adapter = rowAdapter
                   content.addView(rowRv, lp(-1, rvH, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.008f).toInt() })
 
+                  buildDetail()
+
                   // status / placeholder text
                   status = TextView(this).apply {
                       setTextColor(Color.WHITE); gravity = Gravity.CENTER; text = "Loading…"
@@ -477,6 +580,79 @@ jobs:
                   buildRemote()
               }
 
+              private fun buildDetail() {
+                  val dark = Color.argb(255, 5, 6, 12)
+                  detail = FrameLayout(this).apply { setBackgroundColor(dark); visibility = View.GONE }
+                  dBg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                  detail.addView(dBg, lp(-1, -1))
+
+                  dBox = FrameLayout(this).apply { alpha = 0f; visibility = View.GONE }
+                  dVideo = TextureView(this)
+                  dBox.addView(dVideo, lp(boxW, boxH, Gravity.CENTER))
+                  detail.addView(dBox, lp(boxW, boxH, Gravity.TOP or Gravity.END))
+
+                  val left = View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                          intArrayOf(dark, Color.argb(235, 5, 6, 12), Color.argb(0, 5, 6, 12)))
+                  }
+                  detail.addView(left, lp((W * 0.62).toInt(), -1))
+                  val bottom = View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
+                          intArrayOf(dark, Color.argb(240, 5, 6, 12), Color.argb(0, 5, 6, 12)))
+                  }
+                  detail.addView(bottom, lp(-1, (H * 0.62).toInt(), Gravity.BOTTOM))
+
+                  val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  dLogo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
+                  dTitle = TextView(this).apply {
+                      setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
+                  }
+                  tx(dTitle, 34f)
+                  dMeta = TextView(this).apply { setTextColor(Color.parseColor("#E0E0E0")); typeface = Typeface.DEFAULT_BOLD }
+                  tx(dMeta, 13f)
+                  dDesc = TextView(this).apply {
+                      setTextColor(Color.parseColor("#D0D0D8")); maxLines = 4; ellipsize = TextUtils.TruncateAt.END
+                  }
+                  tx(dDesc, 14f)
+                  dSeasonScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false; isFocusable = false
+                      overScrollMode = View.OVER_SCROLL_NEVER; visibility = View.GONE
+                  }
+                  dSeasonRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  dSeasonScroll.addView(dSeasonRow)
+                  dInfo.addView(dLogo, LinearLayout.LayoutParams(logoH * 16 / 9, logoH))
+                  dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
+                  dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
+                  dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+                  dInfo.addView(dSeasonScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(14) })
+                  detail.addView(dInfo, lp((W * 0.42).toInt(), -2).apply { leftMargin = u(125); topMargin = (H * 0.06).toInt() })
+
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  dEpLabel = TextView(this).apply {
+                      text = "Episodes"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER_VERTICAL; setPadding(u(46), 0, 0, 0)
+                  }
+                  tx(dEpLabel, 17f)
+                  dEpRv = RecyclerView(this).apply {
+                      layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
+                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; isFocusableInTouchMode = false
+                      setPadding(u(46), padV, u(60), padV)
+                  }
+                  epAdapter = EpAdapter()
+                  dEpRv.adapter = epAdapter
+                  col.addView(dEpLabel, LinearLayout.LayoutParams(-1, titleH))
+                  col.addView(dEpRv, LinearLayout.LayoutParams(-1, epH + 2 * padV))
+                  detail.addView(col, lp(-1, -2, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.01f).toInt() })
+
+                  dStatus = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER; text = "Loading…" }
+                  tx(dStatus, 16f)
+                  detail.addView(dStatus, lp(-1, -2, Gravity.CENTER))
+
+                  root.addView(detail, lp(-1, -1))
+              }
+
               private fun styleTab(i: Int) {
                   val v = tabViews[i]
                   val f = v.isFocused
@@ -489,6 +665,7 @@ jobs:
               }
 
               private fun selectTab(i: Int) {
+                  if (inDetail) closeDetail(false)
                   tab = i
                   for (k in tabViews.indices) styleTab(k)
                   if (i == 2) {
@@ -572,10 +749,55 @@ jobs:
                   if (tv) { remote.visibility = View.GONE; chip.visibility = View.GONE }
               }
 
+              // up/down on the Shows page: always land on the FIRST card of the next / previous row
+              private fun rowNavActive(): Boolean {
+                  val f = currentFocus ?: return false
+                  return !inDetail && tab == 2 && content.visibility == View.VISIBLE &&
+                          tabViews.none { it === f } && curRow >= 0
+              }
+
+              private fun moveRow(delta: Int) {
+                  val target = curRow + delta
+                  if (target < 0 || target >= rows.size) return
+                  focusRowFirst(target, 12)
+              }
+
+              private fun focusRowFirst(target: Int, tries: Int) {
+                  rowRv.scrollToPosition(target)
+                  ui.postDelayed({
+                      val rvh = rowRv.findViewHolderForAdapterPosition(target) as? RowVH
+                      val first = rvh?.rv?.findViewHolderForAdapterPosition(0)?.itemView
+                      if (first != null) {
+                          first.requestFocus()
+                      } else {
+                          rvh?.rv?.scrollToPosition(0)
+                          if (tries > 0) focusRowFirst(target, tries - 1)
+                      }
+                  }, 80)
+              }
+
               private fun move(dir: Int) {
+                  if ((dir == View.FOCUS_UP || dir == View.FOCUS_DOWN) && rowNavActive()) {
+                      moveRow(if (dir == View.FOCUS_UP) -1 else 1)
+                      return
+                  }
                   val f = currentFocus
-                  if (f == null) { rowRv.getChildAt(0)?.requestFocus(); return }
+                  if (f == null) {
+                      if (inDetail) {
+                          (dEpRv.getChildAt(0) ?: chips.firstOrNull())?.requestFocus()
+                      } else rowRv.getChildAt(0)?.requestFocus()
+                      return
+                  }
                   f.focusSearch(dir)?.requestFocus(dir)
+              }
+
+              override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+                  if (ev.action == KeyEvent.ACTION_DOWN &&
+                      (ev.keyCode == KeyEvent.KEYCODE_DPAD_UP || ev.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) && rowNavActive()) {
+                      moveRow(if (ev.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
+                      return true
+                  }
+                  return super.dispatchKeyEvent(ev)
               }
 
               private fun hit(v: View, ev: MotionEvent): Boolean {
@@ -611,6 +833,7 @@ jobs:
 
               @Suppress("DEPRECATION")
               override fun onBackPressed() {
+                  if (inDetail) { closeDetail(true); return }
                   val f = currentFocus
                   if (tab == 2 && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()
                   else super.onBackPressed()
@@ -659,7 +882,7 @@ jobs:
               private fun addRow(r: Row) {
                   rows.add(r)
                   rowAdapter.notifyItemInserted(rows.size - 1)
-                  if (tab == 2) status.visibility = View.GONE
+                  if (tab == 2 && !inDetail) status.visibility = View.GONE
                   if (rows.size == 1) focusFirst(12)
                   if (r.spotlight) r.items.drop(1).forEach { prefetchHero(it) }
                   else if (rows.size <= 3) prefetchRow(r, 8)
@@ -684,7 +907,11 @@ jobs:
                   r.items.firstOrNull()?.let { prefetchHero(it) }
               }
 
+              private fun isSpotRow() = rows.getOrNull(curRow)?.spotlight == true
+
               private fun onCardFocus(item: Item, row: Row, pos: Int, rowPos: Int) {
+                  if (inDetail) return
+                  curRow = rowPos; curPos = pos
                   snapTo(rowPos)
                   heroRun?.let { ui.removeCallbacks(it) }
                   val r = Runnable {
@@ -753,21 +980,71 @@ jobs:
                   scheduleTrailer(item)      // trailer only after banner + title are on screen
               }
 
+              // trailer for a home item. If the list item has no trailer url, look it up from DETAIL-V2 (cached).
               private fun scheduleTrailer(item: Item) {
                   stopTrailer(false)
-                  val t = item.trailer ?: return
-                  val r = Runnable { playTrailer(t) }
+                  val spot = isSpotRow()
+                  val t = item.trailer
+                  if (t != null) { schedulePlay(t, spot); return }
+                  val cached = trailerCache[item.cid]
+                  if (cached != null) {
+                      if (cached.isNotEmpty()) schedulePlay(cached, spot) else spotAdvanceLater()
+                      return
+                  }
+                  if (item.cid.isBlank()) { spotAdvanceLater(); return }
+                  val token = heroToken
+                  Thread {
+                      val j = Api.get(DETAIL_URL + item.cid)
+                      val tu = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)?.let { trailerFrom(it) } ?: ""
+                      if (j != null) trailerCache[item.cid] = tu
+                      ui.post {
+                          if (token == heroToken && !inDetail && hero?.id == item.id) {
+                              if (tu.isNotEmpty()) schedulePlay(tu, spot) else spotAdvanceLater()
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun schedulePlay(url: String, spotLoop: Boolean) {
+                  stopTrailer(false)
+                  val r = Runnable { playTrailer(url, spotLoop) }
                   trailerRun = r
                   ui.postDelayed(r, 700)
               }
 
-              private fun playTrailer(url: String) {
+              // spotlight card without any trailer: stay 6s then go to next card
+              private fun spotAdvanceLater() {
+                  if (!isSpotRow()) return
+                  val r = Runnable { advanceSpot() }
+                  advanceRun = r
+                  ui.postDelayed(r, 6000)
+              }
+
+              // loop inside spotlight row: next card, wraps to first
+              private fun advanceSpot() {
+                  if (inDetail || tab != 2 || !isSpotRow()) return
+                  val row = rows[curRow]
+                  if (row.items.size <= 1) { player?.seekTo(0); player?.playWhenReady = true; return }
+                  focusSpot((curPos + 1) % row.items.size, 10)
+              }
+
+              private fun focusSpot(pos: Int, tries: Int) {
+                  val rv = spotRv ?: return
+                  rv.scrollToPosition(pos)
+                  ui.postDelayed({
+                      if (inDetail || !isSpotRow()) return@postDelayed
+                      val v = rv.findViewHolderForAdapterPosition(pos)?.itemView
+                      if (v != null) v.requestFocus() else if (tries > 0) focusSpot(pos, tries - 1)
+                  }, 80)
+              }
+
+              private fun playTrailer(url: String, spotLoop: Boolean) {
                   try {
-                      videoBox.animate().cancel(); videoBox.alpha = 0f; videoBox.visibility = View.VISIBLE
+                      spotLoopOn = spotLoop
+                      curBox.animate().cancel(); curBox.alpha = 0f; curBox.visibility = View.VISIBLE
                       val p = player ?: ExoPlayer.Builder(this).build().also { pl ->
                           player = pl
-                          pl.repeatMode = Player.REPEAT_MODE_ONE
-                          if (TRAILER_MUTED) pl.volume = 0f
+                          pl.setAudioAttributes(AudioAttributes.DEFAULT, true)
                           // cap decode size => stable on weak TV boxes
                           pl.trackSelectionParameters = pl.trackSelectionParameters.buildUpon().setMaxVideoSize(1280, 720).build()
                           pl.addListener(object : Player.Listener {
@@ -777,42 +1054,261 @@ jobs:
                                   var w = boxW
                                   var h = (w / ar).toInt()
                                   if (h < boxH) { h = boxH; w = (h * ar).toInt() }       // cover the marked area
-                                  videoView.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+                                  curVideo.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
                               }
                               override fun onRenderedFirstFrame() {
-                                  videoBox.animate().cancel(); videoBox.animate().alpha(1f).setDuration(450).start()
-                                  bg.animate().cancel(); bg.animate().alpha(0f).setDuration(450).start()   // no thumbnail behind video
+                                  curBox.animate().cancel(); curBox.animate().alpha(1f).setDuration(450).start()
+                                  curBg.animate().cancel(); curBg.animate().alpha(0f).setDuration(450).start()   // no thumbnail behind video
+                              }
+                              override fun onPlaybackStateChanged(playbackState: Int) {
+                                  if (playbackState == Player.STATE_ENDED && spotLoopOn && !inDetail) advanceSpot()
                               }
                               override fun onPlayerError(error: PlaybackException) {
-                                  videoBox.alpha = 0f; videoBox.visibility = View.GONE
-                                  bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start()
+                                  curBox.alpha = 0f; curBox.visibility = View.GONE
+                                  curBg.animate().cancel(); curBg.animate().alpha(1f).setDuration(250).start()
+                                  if (spotLoopOn && !inDetail) ui.postDelayed({ advanceSpot() }, 1500)
                               }
                           })
                       }
-                      p.setVideoTextureView(videoView)
+                      p.repeatMode = if (spotLoop) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+                      p.volume = if (TRAILER_MUTED) 0f else 1f
+                      p.setVideoTextureView(curVideo)
                       p.setMediaItem(MediaItem.fromUri(url))
                       p.prepare()
                       p.playWhenReady = true
                   } catch (e: Exception) {
-                      videoBox.visibility = View.GONE
+                      curBox.visibility = View.GONE
                   }
               }
 
               private fun stopTrailer(restoreBg: Boolean = true) {
                   trailerRun?.let { ui.removeCallbacks(it) }
-                  videoBox.animate().cancel()
-                  videoBox.alpha = 0f
-                  videoBox.visibility = View.GONE
-                  if (restoreBg && revealed) { bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start() }
+                  advanceRun?.let { ui.removeCallbacks(it) }
+                  spotLoopOn = false
+                  videoBox.animate().cancel(); videoBox.alpha = 0f; videoBox.visibility = View.GONE
+                  dBox.animate().cancel(); dBox.alpha = 0f; dBox.visibility = View.GONE
+                  if (restoreBg) {
+                      if (inDetail) { dBg.animate().cancel(); dBg.animate().alpha(1f).setDuration(250).start() }
+                      else if (revealed) { bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start() }
+                  }
                   player?.let { it.stop(); it.clearMediaItems() }
               }
 
               override fun onStop() { super.onStop(); stopTrailer() }
+              override fun onRestart() {
+                  super.onRestart()
+                  if (inDetail) detailTrailerUrl?.let { schedulePlay(it, false) }
+                  else if (tab == 2) hero?.let { scheduleTrailer(it) }
+              }
               override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
+
+              // ---------------------------------------------------------------- Detail page
+              private fun openDetail(item: Item, card: View) {
+                  if (item.cid.isBlank()) {
+                      Toast.makeText(this, item.title, Toast.LENGTH_SHORT).show(); return
+                  }
+                  lastCard = card
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  inDetail = true
+                  val tok = ++detailToken
+                  epToken++
+                  curBox = dBox; curVideo = dVideo; curBg = dBg
+                  content.visibility = View.GONE
+                  status.visibility = View.GONE
+                  detail.visibility = View.VISIBLE
+
+                  // instant preview from the list item
+                  seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+                  chips.clear(); dSeasonRow.removeAllViews(); dSeasonScroll.visibility = View.GONE
+                  dEpLabel.visibility = View.GONE; dEpRv.visibility = View.GONE
+                  curSeason = -1; epFrom = 0; epHasMore = true; epLoading = false
+                  detailTrailerUrl = null
+                  dBg.animate().cancel(); dBg.alpha = 1f
+                  Glide.with(this).clear(dBg)
+                  bgReq(heroUrl(item)).into(dBg)
+                  showDetailLogo(item.logo, item.title)
+                  dMeta.text = item.meta
+                  dDesc.text = item.desc
+                  dStatus.text = "Loading…"; dStatus.visibility = View.VISIBLE
+
+                  Thread {
+                      val j = Api.get(DETAIL_URL + item.cid)
+                      ui.post { if (inDetail && tok == detailToken) bindDetail(j, item) }
+                  }.start()
+              }
+
+              private fun showDetailLogo(url: String?, title: String) {
+                  Glide.with(this).clear(dLogo)
+                  if (url != null) {
+                      dLogo.visibility = View.VISIBLE; dTitle.visibility = View.GONE
+                      logoReq(url).into(dLogo)
+                  } else {
+                      dLogo.setImageDrawable(null); dLogo.visibility = View.GONE
+                      dTitle.text = title; dTitle.visibility = View.VISIBLE
+                  }
+              }
+
+              private fun bindDetail(j: JSONObject?, item: Item) {
+                  val show = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
+                  if (show == null) {
+                      dStatus.text = "Could not load details\n" + Api.lastError + "\n\nPress back"
+                      return
+                  }
+                  val m = show.optJSONObject("metadata") ?: JSONObject()
+                  val e = m.optJSONObject("emfAttributes") ?: JSONObject()
+                  fun s(k: String): String? = e.optString(k, "").ifBlank { null }
+
+                  val title = m.optString("title").ifBlank { item.title }
+                  val desc = m.optString("longDescription").ifBlank { m.optString("shortDescription") }.ifBlank { item.desc }
+                  val parts = ArrayList<String>()
+                  m.optString("year").takeIf { it.isNotBlank() }?.let { parts.add(it) }
+                  m.optString("languageLabel").takeIf { it.isNotBlank() }?.let { parts.add(it) }
+                  m.optJSONArray("genres")?.let { g ->
+                      val l = (0 until g.length()).map { k -> g.optString(k) }.filter { it.isNotBlank() }
+                      if (l.isNotEmpty()) parts.add(l.joinToString(", "))
+                  }
+                  m.optString("pcVodLabel").takeIf { it.isNotBlank() }?.let { parts.add(it) }
+
+                  dMeta.text = parts.joinToString(" • ")
+                  dDesc.text = desc
+
+                  // title image (name png): masthead_logo, fallback masthead_logo_v1, fallback list logo, else text
+                  val logoUrl = img(s("masthead_logo") ?: s("masthead_logo_v1"), 900) ?: item.logo
+                  showDetailLogo(logoUrl, title)
+
+                  // background image until the trailer starts
+                  val bgUrl = img(s("tv_background_image") ?: s("detail_cover_bg_V2") ?: s("thumbnail"), 1800)
+                  if (bgUrl != null) { Glide.with(this).clear(dBg); bgReq(bgUrl).into(dBg) }
+
+                  // seasons (bundles)
+                  seasons.clear()
+                  val sc = show.optJSONArray("containers")
+                  if (sc != null) for (k in 0 until sc.length()) {
+                      val c = sc.optJSONObject(k) ?: continue
+                      if (c.optString("layout") != "BUNDLE_ITEM") continue
+                      val sid = c.optString("id")
+                      if (sid.isBlank()) continue
+                      val st = c.optJSONObject("metadata")?.optString("title").orEmpty().ifBlank { "Season " + (seasons.size + 1) }
+                      seasons.add(Season(sid, st, c.optInt("episodeCount")))
+                  }
+                  dStatus.visibility = View.GONE
+
+                  val trailer = trailerFrom(show)
+                  detailTrailerUrl = trailer
+                  if (trailer != null) schedulePlay(trailer, false)
+
+                  if (seasons.isEmpty()) return
+                  dEpLabel.visibility = View.VISIBLE; dEpRv.visibility = View.VISIBLE
+                  buildChips()
+                  selectSeason(seasons.size - 1)     // latest season first; change to 0 for first season
+              }
+
+              private fun buildChips() {
+                  chips.clear(); dSeasonRow.removeAllViews()
+                  if (seasons.size <= 1) { dSeasonScroll.visibility = View.GONE; return }
+                  dSeasonScroll.visibility = View.VISIBLE
+                  for (i in seasons.indices) {
+                      val c = TextView(this).apply {
+                          text = seasons[i].title
+                          gravity = Gravity.CENTER; typeface = Typeface.DEFAULT_BOLD
+                          setPadding(u(16), u(6), u(16), u(6))
+                          isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      }
+                      tx(c, 13f)
+                      c.setOnFocusChangeListener { _, _ -> styleChip(i) }
+                      c.setOnClickListener { selectSeason(i) }
+                      chips.add(c)
+                      dSeasonRow.addView(c, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
+                  }
+                  for (i in chips.indices) styleChip(i)
+              }
+
+              private fun styleChip(i: Int) {
+                  val v = chips.getOrNull(i) ?: return
+                  val f = v.isFocused
+                  val sel = i == curSeason
+                  v.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                  v.background = GradientDrawable().apply {
+                      cornerRadius = u(18).toFloat()
+                      setColor(if (f) Color.WHITE else if (sel) Color.argb(110, 255, 255, 255) else Color.argb(40, 255, 255, 255))
+                  }
+              }
+
+              private fun selectSeason(i: Int) {
+                  if (i !in seasons.indices) return
+                  curSeason = i
+                  epToken++
+                  eps.clear(); epAdapter.notifyDataSetChanged()
+                  epFrom = 0; epHasMore = true; epLoading = false
+                  for (k in chips.indices) styleChip(k)
+                  dStatus.text = "Loading episodes…"; dStatus.visibility = View.VISIBLE
+                  loadEpisodes()
+              }
+
+              // bundle api: from=0&to=29, then from=30&to=59 ... while scrolling
+              private fun loadEpisodes() {
+                  if (epLoading || !epHasMore || curSeason !in seasons.indices) return
+                  epLoading = true
+                  val tok = epToken
+                  val s = seasons[curSeason]
+                  val from = epFrom
+                  val url = EP_URL + s.id + "?from=" + from + "&to=" + (from + EP_PAGE - 1) +
+                          "&orderBy=episodeNumber&sortOrder=desc&kids_safe=false"
+                  Thread {
+                      val j = Api.get(url)
+                      val arr = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)?.optJSONArray("containers")
+                      val list = ArrayList<Ep>()
+                      if (arr != null) for (k in 0 until arr.length()) parseEp(arr.optJSONObject(k))?.let { list.add(it) }
+                      ui.post {
+                          if (tok != epToken) return@post
+                          epLoading = false
+                          if (j == null) {
+                              if (eps.isEmpty()) dStatus.text = "Could not load episodes\n" + Api.lastError
+                              return@post
+                          }
+                          epFrom = from + EP_PAGE
+                          if (list.size < EP_PAGE || (s.count > 0 && epFrom >= s.count)) epHasMore = false
+                          val start = eps.size
+                          eps.addAll(list)
+                          epAdapter.notifyItemRangeInserted(start, list.size)
+                          if (eps.isEmpty()) dStatus.text = "No episodes" else dStatus.visibility = View.GONE
+                          if (start == 0 && list.isNotEmpty()) focusFirstEp(12)
+                      }
+                  }.start()
+              }
+
+              private fun focusFirstEp(tries: Int) {
+                  ui.postDelayed({
+                      if (!inDetail) return@postDelayed
+                      val ok = dEpRv.getChildAt(0)?.requestFocus() ?: false
+                      if (!ok && tries > 0) focusFirstEp(tries - 1)
+                  }, 200)
+              }
+
+              private fun closeDetail(refocus: Boolean) {
+                  inDetail = false
+                  detailToken++; epToken++
+                  stopTrailer(false)
+                  detail.visibility = View.GONE
+                  content.visibility = View.VISIBLE
+                  curBox = videoBox; curVideo = videoView; curBg = bg
+                  bg.animate().cancel(); bg.alpha = 1f
+                  info.animate().cancel(); info.alpha = 1f
+                  if (!refocus) return
+                  val c = lastCard
+                  ui.postDelayed({
+                      if (inDetail) return@postDelayed
+                      if (c != null && c.isAttachedToWindow) c.requestFocus() else focusFirst(12)
+                      hero?.let { scheduleTrailer(it) }
+                  }, 100)
+              }
 
               // ---------------------------------------------------------------- Adapters
               inner class RowVH(val root: LinearLayout, val title: TextView, val rv: RecyclerView) : RecyclerView.ViewHolder(root)
               inner class CardVH(val card: FrameLayout, val iv: ImageView, val border: View) : RecyclerView.ViewHolder(card)
+              inner class EpVH(val card: FrameLayout, val iv: ImageView, val label: TextView, val border: View) : RecyclerView.ViewHolder(card)
 
               inner class RowAdapter : RecyclerView.Adapter<RowVH>() {
                   override fun getItemCount() = rows.size
@@ -848,6 +1344,7 @@ jobs:
                       val l = h.rv.layoutParams
                       l.height = (if (r.spotlight) stripH else cardH) + 2 * padV
                       h.rv.layoutParams = l
+                      if (r.spotlight) spotRv = h.rv
                       h.rv.adapter = CardAdapter(r, pos)
                   }
               }
@@ -893,8 +1390,60 @@ jobs:
                           v.translationZ = if (has) u(10).toFloat() else 0f
                           if (has) onCardFocus(item, row, pos, rowPos)
                       }
+                      h.card.setOnClickListener { openDetail(item, h.card) }
+                  }
+              }
+
+              inner class EpAdapter : RecyclerView.Adapter<EpVH>() {
+                  override fun getItemCount() = eps.size
+
+                  override fun onCreateViewHolder(p: ViewGroup, t: Int): EpVH {
+                      val card = FrameLayout(this@MainActivity).apply {
+                          layoutParams = RecyclerView.LayoutParams(epW, epH).apply { rightMargin = u(12) }
+                          isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      }
+                      val iv = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.CENTER_CROP
+                          setBackgroundColor(Color.rgb(26, 28, 42))
+                          outlineProvider = roundOutline; clipToOutline = true
+                      }
+                      val label = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                          maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+                          setPadding(u(8), u(14), u(8), u(6))
+                          background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
+                              intArrayOf(Color.argb(230, 0, 0, 0), Color.argb(0, 0, 0, 0)))
+                      }
+                      tx(label, 11f)
+                      val border = View(this@MainActivity).apply {
+                          background = GradientDrawable().apply {
+                              setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
+                          }
+                          alpha = 0f
+                      }
+                      card.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                      card.addView(label, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+                      card.addView(border, FrameLayout.LayoutParams(-1, -1))
+                      return EpVH(card, iv, label, border)
+                  }
+
+                  override fun onBindViewHolder(h: EpVH, pos: Int) {
+                      val ep = eps[pos]
+                      cardReq(img(ep.thumb, 600), epW, epH).into(h.iv)
+                      val dur = if (ep.dur > 0) "  •  " + (ep.dur / 60) + "m" else ""
+                      h.label.text = (if (ep.num > 0) "E" + ep.num + "  " else "") + ep.title + dur
+                      h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
+                      h.card.setOnFocusChangeListener { v, has ->
+                          v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
+                          h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
+                          v.translationZ = if (has) u(10).toFloat() else 0f
+                          if (has) {
+                              dDesc.text = ep.desc.ifBlank { dDesc.text.toString() }
+                              if (pos >= eps.size - 4) loadEpisodes()      // load next 30
+                          }
+                      }
                       h.card.setOnClickListener {
-                          Toast.makeText(this@MainActivity, item.title, Toast.LENGTH_SHORT).show()
+                          Toast.makeText(this@MainActivity, ep.title, Toast.LENGTH_SHORT).show()
                       }
                   }
               }
