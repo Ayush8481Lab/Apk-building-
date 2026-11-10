@@ -200,6 +200,8 @@ jobs:
           import android.content.Context
           import android.content.res.Configuration
           import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.BitmapRegionDecoder
           import android.graphics.Canvas
           import android.graphics.Color
           import android.graphics.Outline
@@ -227,6 +229,7 @@ jobs:
           import androidx.media3.common.TrackSelectionOverride
           import androidx.media3.common.Tracks
           import androidx.media3.common.VideoSize
+          import androidx.media3.common.text.CueGroup
           import androidx.media3.datasource.DefaultHttpDataSource
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -250,6 +253,7 @@ jobs:
           import okhttp3.OkHttpClient
           import okhttp3.Request
           import okhttp3.RequestBody.Companion.toRequestBody
+          import org.json.JSONArray
           import org.json.JSONObject
           import java.security.MessageDigest
           import java.security.SecureRandom
@@ -309,6 +313,7 @@ jobs:
           const val W_PORTRAIT = 500           // portrait cards (shown ~170-260px wide, 500 is already 2x sharp)
           const val W_SPOT = 600               // spotlight strips
           const val W_EP = 480                 // episode thumbnails (shown ~310-460px wide)
+          const val W_THUMB = 1000             // episode thumbnail shown full screen while the player is loading / buffering
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
@@ -322,13 +327,14 @@ jobs:
           class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
           class SubInfo(val url: String, val lang: String, val label: String)
           class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>)
+          // extra data from the episode DETAIL-V2 response: subtitles (platformVariants[].subtitlesLanguages[]), seek-preview sprite, exact titles
+          class EpExtra(val subs: List<SubInfo>, val sprite: String?, val sn: Int, val en: Int, val et: String?)
 
-          // Player seek bar: white progress, yellow thumb, yellow ad-break markers (like the Sony LIV player)
+          // Player seek bar: white progress, yellow thumb (no ad-break markers)
           class SeekView(c: Context) : View(c) {
               var dur = 0L
               var pos = 0L
               var buf = 0L
-              var marks: List<Long> = emptyList()
               private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
               init { isFocusable = true; isFocusableInTouchMode = true; isClickable = true }
               override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
@@ -354,9 +360,6 @@ jobs:
                       pt.color = Color.WHITE
                       c.drawRoundRect(l, cy - th / 2, px, cy + th / 2, th, th, pt)
                       pt.color = Color.parseColor("#FFC107")
-                      for (m in marks) {
-                          if (m > 0 && m < dur) c.drawCircle(l + len * (m.toFloat() / dur), cy, 2.6f * d, pt)
-                      }
                       c.drawCircle(px, cy, (if (isFocused) 9f else 7f) * d, pt)
                   } else {
                       pt.color = Color.parseColor("#FFC107")
@@ -674,6 +677,41 @@ jobs:
               return Ep(m.optString("contentId"), title, m.optInt("episodeNumber"), desc, thumb, m.optInt("duration"), m.optLong("originalAirDate"))
           }
 
+          // Episode DETAIL-V2 response:
+          //   containers[0].platformVariants[].subtitlesLanguages[] = { subtitleUrl, subtitleLanguageName }
+          //   containers[0].metadata.emfAttributes.tv_sprite_image_url = seek preview sprite (..._640_360_<frames>.jpg)
+          fun parseEpExtra(j: JSONObject?): EpExtra? {
+              val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return null
+              val m = c.optJSONObject("metadata")
+              val e = m?.optJSONObject("emfAttributes")
+              val labels = HashMap<String, String>()
+              val sl = e?.optJSONArray("subtitle_language_list")
+              if (sl != null) for (k in 0 until sl.length()) {
+                  val o = sl.optJSONObject(k) ?: continue
+                  val n = o.str("subtitleLanguageName") ?: continue
+                  labels[n.uppercase()] = o.str("subtitleDisplayName") ?: n
+              }
+              val subs = ArrayList<SubInfo>()
+              val seen = HashSet<String>()
+              fun scan(arr: JSONArray?) {
+                  if (arr == null) return
+                  for (i in 0 until arr.length()) {
+                      val pv = arr.optJSONObject(i) ?: continue
+                      val sa = pv.optJSONArray("subtitlesLanguages") ?: continue
+                      for (k in 0 until sa.length()) {
+                          val o = sa.optJSONObject(k) ?: continue
+                          val su = o.str("subtitleUrl") ?: continue
+                          if (!su.startsWith("http") || !seen.add(su)) continue
+                          val name = o.str("subtitleLanguageName") ?: "und"
+                          subs.add(SubInfo(su, name.lowercase(), labels[name.uppercase()] ?: name))
+                      }
+                  }
+              }
+              scan(c.optJSONArray("platformVariants"))
+              val sprite = e?.str("tv_sprite_image_url") ?: e?.str("sprite_image_url")
+              return EpExtra(subs, sprite, m?.optInt("season") ?: 0, m?.optInt("episodeNumber") ?: 0, m?.str("episodeTitle"))
+          }
+
           // seasons / bundles (newest first) + the episodes already embedded in the show response
           fun parseSeasons(show: JSONObject): DetailData {
               val tmp = ArrayList<Season>()
@@ -825,6 +863,7 @@ jobs:
               // ---- player
               private lateinit var playerLayer: FrameLayout
               private lateinit var pSurface: SurfaceView
+              private lateinit var pThumb: ImageView          // episode thumbnail shown until the first video frame is drawn
               private lateinit var ctrl: FrameLayout
               private lateinit var pBack: ImageView
               private lateinit var pTitle: TextView
@@ -835,9 +874,12 @@ jobs:
               private lateinit var pillSub: LinearLayout
               private lateinit var pillSet: LinearLayout
               private lateinit var pillEps: LinearLayout
-              private lateinit var pCenter: ImageView
               private lateinit var pSpin: ProgressBar
               private lateinit var pStatus: TextView
+              private lateinit var pCue: TextView             // subtitle text
+              private lateinit var pPrev: LinearLayout        // seek preview (sprite tile + time)
+              private lateinit var pPrevImg: ImageView
+              private lateinit var pPrevTime: TextView
               private lateinit var drawer: FrameLayout
               private lateinit var drawerCol: LinearLayout
               private var drawerW = 0
@@ -850,6 +892,21 @@ jobs:
               private var curPlayEp: Ep? = null
               private var curPlaySeason = 0
               private var qualitySel = 0               // 0 = auto, else selected height
+              private var firstFrame = false
+
+              // ---- seek preview (sprite sheet, Netflix style)
+              private var scrubPos = -1L               // >= 0 while the user is scrubbing (seek is applied after a short pause / OK)
+              private val spriteLock = Any()
+              private val spriteExec = Executors.newSingleThreadExecutor()
+              private var spriteDec: BitmapRegionDecoder? = null
+              private var spriteTW = 0; private var spriteTH = 0; private var spriteCnt = 0; private var spriteCols = 1
+              private var spriteTok = 0
+              @Volatile private var spriteWant = -1
+              private var currentTileIdx = -1
+              private val spriteCache = object : LinkedHashMap<Int, Bitmap>(32, 0.75f, true) {
+                  override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?): Boolean = size > 40
+              }
+              private val commitRun = Runnable { commitScrub() }
 
               private val hideRun = Runnable {
                   if (inPlayer && panel == 0 && mainPlayer?.playWhenReady == true) hideControls()
@@ -1257,12 +1314,15 @@ jobs:
                   pSurface = SurfaceView(this)
                   playerLayer.addView(pSurface, lp(-1, -1))
 
-                  pCenter = ImageView(this).apply {
-                      setImageResource(R.drawable.ic_play); setPadding(u(22), u(22), u(22), u(22))
-                      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(150, 30, 30, 40)) }
+                  // episode thumbnail: covers the (still empty) video surface while the stream loads, fades out on the first video frame
+                  pThumb = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.CENTER_CROP
+                      setBackgroundColor(Color.BLACK)
                       visibility = View.GONE
                   }
-                  playerLayer.addView(pCenter, lp(u(84), u(84), Gravity.CENTER))
+                  playerLayer.addView(pThumb, lp(-1, -1))
+
+                  // single spinner in the middle (loading / buffering)
                   pSpin = ProgressBar(this).apply { visibility = View.GONE }
                   playerLayer.addView(pSpin, lp(u(56), u(56), Gravity.CENTER))
 
@@ -1295,11 +1355,11 @@ jobs:
                   top.addView(tcol, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = u(14) })
                   ctrl.addView(top, lp(-1, -2, Gravity.TOP).apply { leftMargin = u(56); rightMargin = u(56); topMargin = u(26) })
 
-                  // bottom: [pause] [seek bar] [time]  /  liv  [Subtitle & Audio] [Settings] [Episodes]
+                  // bottom: [pause] [seek bar] [time]  /  [Subtitle & Audio] [Settings] [Episodes]
                   val bottomCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                   val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                   pPause = iconBtn(R.drawable.ic_pause) { togglePause() }
-                  pSeek = SeekView(this).apply { setOnClickListener { togglePause() } }
+                  pSeek = SeekView(this).apply { setOnClickListener { if (scrubPos >= 0) commitScrub() else togglePause() } }
                   pTime = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; text = "00:00:00 / 00:00:00" }
                   tx(pTime, 16f)
                   row1.addView(pPause, LinearLayout.LayoutParams(u(46), u(46)))
@@ -1307,14 +1367,9 @@ jobs:
                   row1.addView(pTime, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(14) })
 
                   val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                  val livLogo = TextView(this).apply {
-                      text = "liv"; setTextColor(Color.parseColor("#FFC107")); typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
-                  }
-                  tx(livLogo, 30f)
                   pillSub = pill("Subtitle & Audio", R.drawable.ic_subs) { openDrawer(1) }
                   pillSet = pill("Settings", R.drawable.ic_settings) { openDrawer(2) }
                   pillEps = pill("Episodes", R.drawable.ic_eps) { openPlayerEps() }
-                  row2.addView(livLogo, LinearLayout.LayoutParams(u(74), -2))
                   row2.addView(pillSub, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
                   row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
                   row2.addView(pillEps, LinearLayout.LayoutParams(-2, -2))
@@ -1322,7 +1377,39 @@ jobs:
                   bottomCol.addView(row1, LinearLayout.LayoutParams(-1, -2))
                   bottomCol.addView(row2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
                   ctrl.addView(bottomCol, lp(-1, -2, Gravity.BOTTOM).apply { leftMargin = u(56); rightMargin = u(56); bottomMargin = u(26) })
+
+                  // seek preview bubble (sprite tile + time), follows the seek position, sits above the seek bar
+                  pPrev = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; visibility = View.GONE
+                  }
+                  pPrevImg = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.CENTER_CROP
+                      setBackgroundColor(Color.rgb(20, 20, 28))
+                      outlineProvider = roundOutline; clipToOutline = true
+                  }
+                  pPrevTime = TextView(this).apply {
+                      setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                      setShadowLayer(6f, 0f, 0f, Color.BLACK)
+                  }
+                  tx(pPrevTime, 16f)
+                  pPrev.addView(pPrevImg, LinearLayout.LayoutParams(prevW(), prevW() * 9 / 16))
+                  pPrev.addView(pPrevTime, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
+                  ctrl.addView(pPrev, lp(prevW(), -2, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = u(134) })
+
                   playerLayer.addView(ctrl, lp(-1, -1))
+
+                  // subtitle text (drawn from the player's cues)
+                  pCue = TextView(this).apply {
+                      setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                      setShadowLayer(5f, 0f, 0f, Color.BLACK)
+                      setPadding(u(14), u(6), u(14), u(6))
+                      background = GradientDrawable().apply { cornerRadius = u(6).toFloat(); setColor(Color.argb(120, 0, 0, 0)) }
+                      visibility = View.GONE
+                  }
+                  tx(pCue, 24f)
+                  playerLayer.addView(pCue, lp(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                      bottomMargin = u(48); leftMargin = u(120); rightMargin = u(120)
+                  })
 
                   pStatus = TextView(this).apply {
                       setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE
@@ -1349,6 +1436,14 @@ jobs:
                   playerLayer.addView(drawer, lp(drawerW, -1, Gravity.END))
 
                   root.addView(playerLayer, lp(-1, -1))
+              }
+
+              private fun prevW() = u(240)
+
+              // subtitles sit above the controls while they are visible, near the bottom edge when hidden
+              private fun cueLift(up: Boolean) {
+                  pCue.animate().cancel()
+                  pCue.animate().translationY(if (up) -u(150).toFloat() else 0f).setDuration(150).start()
               }
 
               private fun styleTab(i: Int) {
@@ -1933,6 +2028,7 @@ jobs:
                   super.onDestroy()
                   player?.release(); player = null
                   mainPlayer?.release(); mainPlayer = null
+                  resetSprite()
               }
 
               // ---------------------------------------------------------------- Detail page
@@ -2304,6 +2400,16 @@ jobs:
                   pSub.text = showTitle
               }
 
+              // stream subtitles + subtitles from the episode detail response (deduplicated by url)
+              private fun mergeSubs(s: StreamInfo, ex: EpExtra?): StreamInfo {
+                  if (ex == null || ex.subs.isEmpty()) return s
+                  val have = HashSet<String>()
+                  s.subs.forEach { have.add(it.url) }
+                  val all = ArrayList<SubInfo>(s.subs)
+                  for (x in ex.subs) if (have.add(x.url)) all.add(x)
+                  return StreamInfo(s.url, s.enc, s.laUrl, s.drm, all)
+              }
+
               // opens the player for an episode (from the detail page, or switching episode inside the player)
               private fun openPlayer(ep: Ep, seasonNum: Int) {
                   if (ep.id.isBlank()) return
@@ -2322,52 +2428,45 @@ jobs:
                       if (panel == 1) closeDrawer(false)
                       if (panel == 2) closePlayerEps(false)
                   }
+                  cancelScrub()
+                  resetSprite()
+                  firstFrame = false
                   panel = 0
                   ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
                   pStatus.visibility = View.GONE
-                  pCenter.visibility = View.GONE
+                  pCue.text = ""; pCue.visibility = View.GONE
                   pSpin.visibility = View.VISIBLE
+                  // episode thumbnail (w=1000) behind the spinner until the first video frame is drawn
+                  pThumb.animate().cancel(); pThumb.alpha = 1f; pThumb.visibility = View.VISIBLE
+                  Glide.with(this).clear(pThumb)
+                  Glide.with(this).load(img(ep.thumb, W_THUMB)).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(pThumb)
                   pPause.setImageResource(R.drawable.ic_pause)
-                  pSeek.pos = 0L; pSeek.buf = 0L; pSeek.dur = ep.dur * 1000L; pSeek.marks = emptyList(); pSeek.invalidate()
+                  pSeek.pos = 0L; pSeek.buf = 0L; pSeek.dur = ep.dur * 1000L; pSeek.invalidate()
                   pTime.text = "00:00:00 / " + fmtClock(ep.dur * 1000L)
                   setPlayerTitles()
                   epAdapter.notifyDataSetChanged()           // "Now Playing" badge
                   showControls()
                   ui.removeCallbacks(tickRun); ui.postDelayed(tickRun, 500)
 
-                  // stream url + license
+                  // stream url + license, plus the episode DETAIL-V2 (subtitles, seek-preview sprite, exact titles) fetched in parallel
                   Thread {
+                      val df = Api.pool.submit(Callable<JSONObject?> { fetchDetail(ep.id) })
                       val s = fetchStream(ep.id)
+                      val ex = parseEpExtra(try { df.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })
                       ui.post {
                           if (tok != playToken || !inPlayer) return@post
+                          if (ex != null && ex.en > 0) {
+                              curPlayEp = Ep(ep.id, ex.et ?: ep.title, ex.en, ep.desc, ep.thumb, ep.dur, ep.air)
+                              if (ex.sn > 0) curPlaySeason = ex.sn
+                              setPlayerTitles()
+                          }
                           if (s == null) {
                               pSpin.visibility = View.GONE
                               pStatus.text = "Stream unavailable for this content.\n" + Api.lastError
                               pStatus.visibility = View.VISIBLE
-                          } else startPlayback(s)
-                      }
-                  }.start()
-
-                  // ad-break markers + exact episode title from the episode DETAIL-V2 (best effort)
-                  Thread {
-                      val j = fetchDetail(ep.id)
-                      val m = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)?.optJSONObject("metadata")
-                      val marks = ArrayList<Long>()
-                      val cps = m?.optJSONArray("advertisingInfoList")?.optJSONObject(0)?.optJSONArray("cuePointList")
-                      if (cps != null) for (k in 0 until cps.length()) {
-                          val c = cps.optJSONObject(k) ?: continue
-                          if (c.optString("timePositionClass") == "MIDROLL") marks.add(c.optLong("contentTimePosition") * 1000L)
-                      }
-                      val sn = m?.optInt("season") ?: 0
-                      val en = m?.optInt("episodeNumber") ?: 0
-                      val et = m?.str("episodeTitle")
-                      ui.post {
-                          if (tok != playToken || !inPlayer) return@post
-                          pSeek.marks = marks; pSeek.invalidate()
-                          if (en > 0) {
-                              curPlayEp = Ep(ep.id, et ?: ep.title, en, ep.desc, ep.thumb, ep.dur, ep.air)
-                              if (sn > 0) curPlaySeason = sn
-                              setPlayerTitles()
+                          } else {
+                              startPlayback(mergeSubs(s, ex))
+                              loadSprite(ex?.sprite, spriteTok)
                           }
                       }
                   }.start()
@@ -2380,9 +2479,19 @@ jobs:
                   }
                   override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { refreshPlayUi() }
                   override fun onIsPlayingChanged(isPlaying: Boolean) { if (isPlaying) pStatus.visibility = View.GONE }
+                  override fun onRenderedFirstFrame() {
+                      firstFrame = true
+                      pThumb.animate().cancel()
+                      pThumb.animate().alpha(0f).setDuration(250).withEndAction { if (firstFrame) pThumb.visibility = View.GONE }.start()
+                      refreshPlayUi()
+                  }
+                  override fun onCues(cueGroup: CueGroup) {
+                      val t = cueGroup.cues.mapNotNull { it.text?.toString() }.filter { it.isNotBlank() }.joinToString("\n")
+                      pCue.text = t
+                      pCue.visibility = if (t.isEmpty()) View.GONE else View.VISIBLE
+                  }
                   override fun onPlayerError(error: PlaybackException) {
                       pSpin.visibility = View.GONE
-                      pCenter.visibility = View.GONE
                       pStatus.text = "Playback error\n" + error.errorCodeName + (error.cause?.message?.let { "\n" + it } ?: "")
                       pStatus.visibility = View.VISIBLE
                       showControls()
@@ -2432,7 +2541,7 @@ jobs:
                               .build()
                       )
                   }
-                  // external subtitle files (only well known text formats)
+                  // external subtitle files (only well known text formats) - from the stream api AND the episode detail response
                   val subs = ArrayList<MediaItem.SubtitleConfiguration>()
                   for (si in s.subs) {
                       val ul = si.url.lowercase().substringBefore("?")
@@ -2458,8 +2567,9 @@ jobs:
                   val p = mainPlayer ?: return
                   pPause.setImageResource(if (p.playWhenReady) R.drawable.ic_pause else R.drawable.ic_play)
                   val st = p.playbackState
-                  pSpin.visibility = if (st == Player.STATE_BUFFERING && p.playWhenReady) View.VISIBLE else View.GONE
-                  pCenter.visibility = if (!p.playWhenReady && st != Player.STATE_ENDED && pStatus.visibility != View.VISIBLE) View.VISIBLE else View.GONE
+                  // one spinner in the middle: first load (on top of the thumbnail) and any later buffering
+                  val loading = !firstFrame && st != Player.STATE_ENDED && pStatus.visibility != View.VISIBLE
+                  pSpin.visibility = if ((st == Player.STATE_BUFFERING && p.playWhenReady) || loading) View.VISIBLE else View.GONE
                   if (!p.playWhenReady) {
                       ui.removeCallbacks(hideRun)
                       if (panel == 0 && inPlayer) showControls()
@@ -2475,12 +2585,14 @@ jobs:
               private fun updateProgress() {
                   val p = mainPlayer
                   val dur = if (p != null && p.duration > 0) p.duration else (curPlayEp?.dur ?: 0) * 1000L
-                  val pos = p?.currentPosition ?: 0L
                   pSeek.dur = dur
-                  pSeek.pos = pos
                   pSeek.buf = p?.bufferedPosition ?: 0L
+                  if (scrubPos < 0) {                              // while scrubbing the bar shows the target position
+                      val pos = p?.currentPosition ?: 0L
+                      pSeek.pos = pos
+                      pTime.text = fmtClock(pos) + " / " + fmtClock(dur)
+                  }
                   pSeek.invalidate()
-                  pTime.text = fmtClock(pos) + " / " + fmtClock(dur)
               }
 
               private fun togglePause() {
@@ -2489,16 +2601,136 @@ jobs:
                   if (p.playWhenReady) p.pause() else p.play()
               }
 
+              // Scrubbing: left/right moves a target position and shows the sprite preview; the real seek happens
+              // ~0.8s after the last key press (or immediately on OK) so fast scrubbing does not spam the stream.
               private fun seekBy(deltaMs: Long) {
                   val p = mainPlayer ?: return
                   val dur = if (p.duration > 0) p.duration else (curPlayEp?.dur ?: 0) * 1000L
-                  var t = p.currentPosition + deltaMs
+                  val base = if (scrubPos >= 0) scrubPos else p.currentPosition
+                  var t = base + deltaMs
                   if (t < 0L) t = 0L
                   if (dur > 0 && t > dur - 1000L) t = max(0L, dur - 1000L)
-                  p.seekTo(t)
+                  scrubPos = t
+                  pSeek.dur = dur
                   pSeek.pos = t
                   pSeek.invalidate()
                   pTime.text = fmtClock(t) + " / " + fmtClock(dur)
+                  showPreview(t)
+                  ui.removeCallbacks(commitRun)
+                  ui.postDelayed(commitRun, 800)
+              }
+
+              private fun commitScrub() {
+                  ui.removeCallbacks(commitRun)
+                  val t = scrubPos
+                  scrubPos = -1L
+                  pPrev.visibility = View.GONE
+                  if (t >= 0L) mainPlayer?.seekTo(t)
+              }
+
+              private fun cancelScrub() {
+                  ui.removeCallbacks(commitRun)
+                  scrubPos = -1L
+                  pPrev.visibility = View.GONE
+              }
+
+              // ---- sprite sheet preview
+              // sprite url: ..._<tileW>_<tileH>_<frames>.jpg  (frames are spread evenly over the episode duration)
+              // sheet layout (columns) is detected from the real image width / tile width. Only the needed tile is decoded.
+              private fun resetSprite() {
+                  spriteTok++
+                  spriteWant = -1
+                  currentTileIdx = -1
+                  synchronized(spriteLock) {
+                      spriteDec?.let { try { it.recycle() } catch (e: Throwable) { } }
+                      spriteDec = null
+                      spriteCnt = 0
+                  }
+                  synchronized(spriteCache) { spriteCache.clear() }
+                  pPrevImg.setImageDrawable(null)
+              }
+
+              private fun loadSprite(url: String?, tok: Int) {
+                  if (url == null) return
+                  val mt = Regex("_(\\d+)_(\\d+)_(\\d+)\\.[A-Za-z]+$").find(url.substringBefore("?")) ?: return
+                  val tw = mt.groupValues[1].toInt()
+                  val th = mt.groupValues[2].toInt()
+                  val cnt = mt.groupValues[3].toInt()
+                  if (tw <= 0 || th <= 0 || cnt <= 0) return
+                  Thread {
+                      try {
+                          val req = Request.Builder().url(url)
+                              .header("User-Agent", STREAM_UA)
+                              .header("Origin", "https://www.sonyliv.com")
+                              .header("Referer", "https://www.sonyliv.com/")
+                              .build()
+                          val bytes = Net.client.newCall(req).execute().use { r -> if (r.isSuccessful) r.body?.bytes() else null }
+                              ?: return@Thread
+                          val dec = BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false) ?: return@Thread
+                          ui.post {
+                              if (tok != spriteTok || !inPlayer) {
+                                  try { dec.recycle() } catch (e: Throwable) { }
+                                  return@post
+                              }
+                              synchronized(spriteLock) {
+                                  spriteDec = dec
+                                  spriteTW = tw; spriteTH = th; spriteCnt = cnt
+                                  spriteCols = max(1, dec.width / tw)
+                              }
+                              if (scrubPos >= 0) showPreview(scrubPos)
+                          }
+                      } catch (e: Throwable) { }
+                  }.apply { isDaemon = true; start() }
+              }
+
+              // returns the tile when cached, else decodes it in the background (only the latest wanted tile is decoded)
+              private fun tileFor(idx: Int): Bitmap? {
+                  synchronized(spriteCache) { spriteCache[idx] }?.let { return it }
+                  if (spriteDec == null) return null
+                  spriteWant = idx
+                  val tok = spriteTok
+                  spriteExec.execute {
+                      if (tok != spriteTok || spriteWant != idx) return@execute
+                      var bmp: Bitmap? = null
+                      synchronized(spriteLock) {
+                          val d = spriteDec
+                          if (d != null && !d.isRecycled) {
+                              val l = (idx % spriteCols) * spriteTW
+                              val t = (idx / spriteCols) * spriteTH
+                              if (l < d.width && t < d.height) {
+                                  val r = Rect(l, t, min(d.width, l + spriteTW), min(d.height, t + spriteTH))
+                                  val o = BitmapFactory.Options().apply { inSampleSize = 2; inPreferredConfig = Bitmap.Config.RGB_565 }
+                                  try { bmp = d.decodeRegion(r, o) } catch (e: Throwable) { }
+                              }
+                          }
+                      }
+                      val b = bmp ?: return@execute
+                      synchronized(spriteCache) { spriteCache[idx] = b }
+                      ui.post { if (tok == spriteTok && scrubPos >= 0 && currentTileIdx == idx) pPrevImg.setImageBitmap(b) }
+                  }
+                  return null
+              }
+
+              private fun showPreview(posMs: Long) {
+                  val dur = pSeek.dur
+                  if (dur <= 0) return
+                  val frac = (posMs.toFloat() / dur).coerceIn(0f, 1f)
+                  pPrevTime.text = fmtClock(posMs)
+                  val has = spriteDec != null && spriteCnt > 0
+                  pPrevImg.visibility = if (has) View.VISIBLE else View.GONE
+                  if (has) {
+                      val idx = (frac * spriteCnt).toInt().coerceIn(0, spriteCnt - 1)
+                      currentTileIdx = idx
+                      tileFor(idx)?.let { pPrevImg.setImageBitmap(it) }
+                  }
+                  pPrev.visibility = View.VISIBLE
+                  // follow the seek position
+                  val loc = IntArray(2); val cl = IntArray(2)
+                  pSeek.getLocationInWindow(loc); ctrl.getLocationInWindow(cl)
+                  val d = resources.displayMetrics.density
+                  val cx = (loc[0] - cl[0]) + 10f * d + (pSeek.width - 20f * d) * frac
+                  val pw = prevW().toFloat()
+                  pPrev.translationX = (cx - pw / 2f).coerceIn(u(20).toFloat(), max(u(20).toFloat(), W - pw - u(20)))
               }
 
               private fun showControls() {
@@ -2508,6 +2740,7 @@ jobs:
                   ctrl.animate().cancel()
                   ctrl.visibility = View.VISIBLE
                   ctrl.animate().alpha(1f).setDuration(150).start()
+                  cueLift(true)
                   if (ctrl.findFocus() == null) pSeek.requestFocus()
                   schedHide()
               }
@@ -2521,6 +2754,7 @@ jobs:
                   ctrlVisible = false
                   ctrl.animate().cancel()
                   ctrl.animate().alpha(0f).setDuration(200).withEndAction { if (!ctrlVisible) ctrl.visibility = View.INVISIBLE }.start()
+                  cueLift(false)
               }
 
               // all player key handling. returns true when the key was consumed.
@@ -2658,6 +2892,7 @@ jobs:
                       b.setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, idx))
                   }
                   p.trackSelectionParameters = b.build()
+                  if (g == null) { pCue.text = ""; pCue.visibility = View.GONE }
               }
 
               private fun selectAudio(g: Tracks.Group, idx: Int) {
@@ -2715,6 +2950,8 @@ jobs:
                   panel = 1
                   ui.removeCallbacks(hideRun)
                   ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
                   ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
                   ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                   drawer.animate().cancel()
@@ -2770,6 +3007,8 @@ jobs:
                   panel = 2
                   ui.removeCallbacks(hideRun)
                   ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
                   ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
                   ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                   moveEpLayerToPlayer()
@@ -2804,9 +3043,14 @@ jobs:
                   playToken++
                   inPlayer = false
                   panel = 0
+                  cancelScrub()
+                  resetSprite()
                   ui.removeCallbacks(hideRun); ui.removeCallbacks(tickRun)
                   mainPlayer?.let { it.stop(); it.clearVideoSurface(); it.release() }
                   mainPlayer = null
+                  pThumb.animate().cancel(); pThumb.visibility = View.GONE
+                  Glide.with(this).clear(pThumb)
+                  pCue.text = ""; pCue.visibility = View.GONE
                   drawer.animate().cancel(); drawer.visibility = View.GONE; drawer.translationX = drawerW.toFloat()
                   drawer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                   ctrl.animate().cancel(); ctrl.alpha = 1f; ctrl.visibility = View.VISIBLE; ctrlVisible = true
