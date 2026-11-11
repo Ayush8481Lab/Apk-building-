@@ -288,7 +288,10 @@ jobs:
           const val MOVIES_URL = "$BASE/PAGE-V2/399?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
           // Home (tab 1) and Sports (tab 4) base pages: rows can hold SHOW / MOVIE_BUNDLE (detail page) and VOD (episode / movie / clip -> player) items
           const val HOME_BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/MWEB/IN/UP"
-          const val HOME_URL = "$HOME_BASE/PAGE-V2/244390?from=0&to=35&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
+          const val HOME_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP/PAGE-V2/34355?from=0&to=100&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
+          // any landing page opened from a "sony://page/<slug>-<id>" cta (same loader, same UI as the home page)
+          const val PAGE_Q = "?from=0&to=100&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
+          fun pageUrl(id: String) = "$BASE/PAGE-V2/$id$PAGE_Q"
           const val SPORTS_URL = "$HOME_BASE/PAGE-V2/17378?from=0&to=35&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
           const val DETAIL_URL = "https://apiv3.sonyliv.com/AGL/4.8/R/ENG/WEB/IN/UP/DETAIL-V2/"
           // movie detail: same DETAIL-V2 endpoint, the web params (children = MOVIE + MOVIE_TRAILER come inside containers[0].containers)
@@ -349,10 +352,15 @@ jobs:
               val id: String, val title: String, val portrait: String?, val landscape: String?,
               val bg: String?, val logo: String?, val meta: String, val desc: String, val trailer: String?, val spot: String?,
               val cid: String, val sub: String,
-              val obj: String, val season: Int, val epNum: Int, val epTitle: String, val dur: Int, val air: Long
+              val obj: String, val season: Int, val epNum: Int, val epTitle: String, val dur: Int, val air: Long,
+              val cta: String = "",                 // sony://asset/<id> | sony://page/<slug>-<id>  (promo / card / square tiles)
+              val subtitle: String = "",
+              val cardImg: String? = null,          // image of a card / square / promo tile
+              val launcher: Boolean = false         // LAUNCHER_ITEM style tile: no hero (banner / title) on focus
           )
 
-          class Row(val title: String, val spotlight: Boolean, val items: List<Item>)
+          // kind: spot | portrait | trending | square | landscape | card
+          class Row(val title: String, val spotlight: Boolean, val items: List<Item>, val kind: String = if (spotlight) "spot" else "portrait")
           class Season(val id: String, val title: String, val count: Int, val num: Int, val air: Long)
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
           class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
@@ -361,6 +369,7 @@ jobs:
           // extra data from the episode DETAIL-V2 response: subtitles (platformVariants[].subtitlesLanguages[]), seek-preview sprite, exact titles
           class EpExtra(val subs: List<SubInfo>, val sprite: String?, val sn: Int, val en: Int, val et: String?)
           // one home-style page (Home = 1, Shows = 2, Movies = 3, Sports = 4): own rows, own load state
+          class PageState(val td: TabData, val row: Int, val pos: Int)   // back stack entry when a landing page is opened from a tile
           class TabData(val idx: Int, val url: String) {
               val rows = ArrayList<Row>()
               var loaded = false
@@ -679,11 +688,11 @@ jobs:
           }
 
           // Launcher items, ad containers and ad slides (LAUNCHER_ITEM "TEST ... AD Spotlight ...", ad_template, ad_unit ...) never show up as rows or cards.
-          fun isAd(o: JSONObject): Boolean {
+          fun isAd(o: JSONObject, allowLauncher: Boolean = false): Boolean {
               val layout = o.optString("layout").lowercase()
-              if (layout == "launcher_item" || layout == "ad_template" || layout.startsWith("ad_")) return true
+              if ((!allowLauncher && layout == "launcher_item") || layout == "ad_template" || layout.startsWith("ad_")) return true
               val mo = o.optJSONObject("metadata")
-              if (mo != null && mo.optString("objectType").equals("LAUNCHER", true)) return true
+              if (!allowLauncher && mo != null && mo.optString("objectType").equals("LAUNCHER", true)) return true
               val ed = o.optJSONObject("editorialMetadata")
               if (ed != null && (ed.str("ad_unit") != null || ed.str("ad_unit_v1") != null || ed.str("ad_type") != null)) return true
               val m = mo ?: return false
@@ -842,7 +851,48 @@ jobs:
               val desc = m.str("shortDescription") ?: ev("launcher_short_description") ?: m.str("longDescription") ?: ""
               val logoU = img(s("masthead_logo_rectangualar"), W_LOGO)
               return Item(id, title, portrait, landscape, bgU, logoU, parts.joinToString(" • "), desc, trailerFrom(o), spotU, cid, sub,
-                  obj, m.optInt("season"), m.optInt("episodeNumber"), m.str("episodeTitle") ?: "", m.optInt("duration"), m.optLong("originalAirDate"))
+                  obj, m.optInt("season"), m.optInt("episodeNumber"), m.str("episodeTitle") ?: "", m.optInt("duration"), m.optLong("originalAirDate"),
+                  "", "", s("square_thumb"), false)
+          }
+
+          // LAUNCHER_ITEM / card / promo / square tile. Image + cta come from editorialMetadata (item) or metadata (page container itself).
+          //   cta: sony://asset/<id> (movie / show / trailer ...)  |  sony://page/<slug>-<id> (landing page)
+          fun parseLauncher(o: JSONObject): Item? {
+              val ed = o.optJSONObject("editorialMetadata") ?: JSONObject()
+              val m = o.optJSONObject("metadata") ?: JSONObject()
+              val am = o.optJSONObject("assetMetadata") ?: JSONObject()
+              fun pick(vararg keys: String): String? {
+                  for (src in listOf(ed, m)) for (k in keys) { val v = src.str(k); if (v != null) return v }
+                  return null
+              }
+              val imgKeys = arrayOf("square_image", "square_thumb", "promocard_background_tv", "poster", "image", "image_url",
+                  "mweb_poster", "landscape_image", "thumbnail", "promocard_background_mobile", "bg_image")
+              var image: String? = null
+              for (src in listOf(ed, m)) {
+                  if (image != null) break
+                  for (k in imgKeys) { val v = src.str(k); if (v != null && v.startsWith("http")) { image = v; break } }
+              }
+              if (image == null) {                                   // any other image url in the metadata (logos excluded)
+                  val rx = Regex("\\.(jpg|jpeg|png|webp)(\\?|$)", RegexOption.IGNORE_CASE)
+                  for (src in listOf(ed, m)) {
+                      if (image != null) break
+                      val ks = src.keys()
+                      while (ks.hasNext()) {
+                          val k = ks.next()
+                          if (k.contains("logo", true)) continue
+                          val v = src.str(k) ?: continue
+                          if (v.startsWith("http") && rx.containsMatchIn(v)) { image = v; break }
+                      }
+                  }
+              }
+              if (image == null) return null
+              val cta = pick("cta") ?: ""
+              val aid = am.str("contentId") ?: ""
+              val aSub = (am.str("objectSubtype") ?: "").uppercase()
+              val title = am.str("title") ?: pick("title", "card_name", "label") ?: ""
+              val subtitle = pick("sub_title", "subtitle", "sub_title_txt", "short_description", "description") ?: ""
+              return Item(o.optString("id"), title, image, image, null, null, "", "", null, null, aid, aSub, "LAUNCHER",
+                  0, 0, am.str("episodeTitle") ?: "", 0, 0L, cta, subtitle, image, true)
           }
 
           fun parseEp(o: JSONObject?): Ep? {
@@ -965,7 +1015,10 @@ jobs:
               private val tabViews = ArrayList<ImageView>()
               private val tabNames = listOf("Search", "Home", "Shows", "Movies", "Sports", "Settings")
               private val homeTabs = HashMap<Int, TabData>()
-              private var shownTab = -1                      // which home tab's rows are currently in the list
+              private var shownTd: TabData? = null           // page whose rows are currently in the list (home tab or opened landing page)
+              private val shownTab: Int get() = shownTd?.idx ?: -1
+              private var nextPageIdx = 100
+              private val pageStack = ArrayList<PageState>()
               private var rows = ArrayList<Row>()            // rows of the shown home tab
               private var hero: Item? = null
               private var player: ExoPlayer? = null
@@ -977,6 +1030,7 @@ jobs:
               private var revealed = false
               private var heroToken = 0
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
+              private var sqS = 0; private var lsW = 0; private var lsH = 0; private var rankW = 0; private var bannerW = 0; private var bannerH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
               private var logoW = 0; private var logoH = 0; private var bgW = 1200; private var bgH = 675
               // title logo sizes: listing pages = 1.35x (0.9 of the old 1.5x), detail page = 1.62x (0.9 of the old 1.8x)
@@ -1159,6 +1213,10 @@ jobs:
                   H = min(dm.widthPixels, dm.heightPixels)
                   cardH = (H * 0.27f * 1.3f).toInt(); cardW = cardH * 2 / 3          // portrait cards 1.3x
                   stripH = (H * 0.155f).toInt(); stripW = stripH * 16 / 9
+                  sqS = (cardH * 0.72f).toInt()                                       // square tiles (title + subtitle under them)
+                  lsH = (cardH * 0.62f).toInt(); lsW = lsH * 16 / 9                   // landscape tiles
+                  rankW = (cardW * 0.62f).toInt()                                     // room for the big rank number (trending)
+                  bannerW = (W * 0.80f).toInt(); bannerH = min(cardH, (bannerW / 5.4f).toInt())   // card / promo banner
                   padV = (H * 0.024f).toInt(); titleH = (H * 0.06f).toInt()
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
@@ -1758,16 +1816,14 @@ jobs:
                   if (inDetail) closeDetail(false)
                   tab = i
                   for (k in tabViews.indices) styleTab(k)
-                  if (homeTabs.containsKey(i)) {
+                  val td = homeTabs[i]
+                  if (td != null) {
                       content.visibility = View.VISIBLE
-                      if (shownTab != i) switchHome(i)
+                      if (pageStack.isNotEmpty() || shownTd !== td) { pageStack.clear(); switchHome(td) }
+                      else if (!td.loaded) startLoad(td)                              // retry after an error
                       else {
-                          val td = homeTabs[i]
-                          if (td != null && !td.loaded) startLoad(td)                 // retry after an error
-                          else {
-                              status.visibility = if (rows.isEmpty() && skelHome.visibility != View.VISIBLE) View.VISIBLE else View.GONE
-                              hero?.let { scheduleTrailer(it) }
-                          }
+                          status.visibility = if (rows.isEmpty() && skelHome.visibility != View.VISIBLE) View.VISIBLE else View.GONE
+                          hero?.let { scheduleTrailer(it) }
                       }
                   } else {
                       stopTrailer()
@@ -1777,13 +1833,12 @@ jobs:
                   }
               }
 
-              // swaps the list over to another home page (Shows <-> Movies). Rows of each page are kept, so coming back is instant.
-              private fun switchHome(i: Int) {
-                  val td = homeTabs[i] ?: return
+              // puts a page (home tab or landing page) into the list. Rows of every page are kept, so coming back is instant.
+              private fun switchHome(td: TabData, restoreRow: Int = -1, restorePos: Int = 0) {
                   heroRun?.let { ui.removeCallbacks(it) }
                   heroToken++
                   stopTrailer(false)
-                  shownTab = i
+                  shownTd = td
                   rows = td.rows
                   curRow = -1; curPos = 0; lastSnap = -1
                   hero = null; revealed = false
@@ -1799,15 +1854,37 @@ jobs:
                   if (!td.loaded) startLoad(td)
                   else {
                       skelHome.visibility = if (td.loading && td.rows.isEmpty()) View.VISIBLE else View.GONE
-                      if (td.rows.isNotEmpty()) focusFirst(12)
+                      if (td.rows.isNotEmpty()) { if (restoreRow >= 0) focusAt(restoreRow, restorePos, 12) else focusFirst(12) }
                       else if (!td.loading) { status.text = "No rows"; status.visibility = View.VISIBLE }
                   }
               }
 
               private fun startLoad(td: TabData) {
                   td.loaded = true; td.loading = true
-                  if (shownTab == td.idx) { status.visibility = View.GONE; skelHome.visibility = View.VISIBLE }
+                  if (shownTd === td) { status.visibility = View.GONE; skelHome.visibility = View.VISIBLE }
                   loadHome(td)
+              }
+
+              // landing page (sony://page/<slug>-<id>): same UI, own rows, back returns to the tile it was opened from
+              private fun openPage(id: String) {
+                  val cur = shownTd ?: return
+                  pageStack.add(PageState(cur, curRow, curPos))
+                  switchHome(TabData(nextPageIdx++, pageUrl(id)))
+              }
+
+              private fun popPage() {
+                  if (pageStack.isEmpty()) return
+                  val st = pageStack.removeAt(pageStack.size - 1)
+                  switchHome(st.td, st.row, st.pos)
+              }
+
+              private fun focusAt(r: Int, p: Int, tries: Int) {
+                  ui.postDelayed({
+                      val rvh = rowRv.findViewHolderForAdapterPosition(r) as? RowVH
+                      if (rvh == null) { rowRv.scrollToPosition(r); if (tries > 0) focusAt(r, p, tries - 1); return@postDelayed }
+                      val v = rvh.rv.findViewHolderForAdapterPosition(p)?.itemView
+                      if (v != null) v.requestFocus() else { rvh.rv.scrollToPosition(p); if (tries > 0) focusAt(r, p, tries - 1) }
+                  }, 120)
               }
 
               // ---------------------------------------------------------------- Remote overlay
@@ -2041,13 +2118,29 @@ jobs:
                       } else closeDetail(true)
                       return
                   }
+                  if (pageStack.isNotEmpty() && isHomeTab()) { popPage(); return }       // landing page -> back to the page / tile it came from
                   val f = currentFocus
                   if (isHomeTab() && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()
                   else super.onBackPressed()
               }
 
               // ---------------------------------------------------------------- Data
-              // loads one home page (Shows / Movies): spotlight + portrait rows only
+              // tray layout -> row kind. Anything unknown (tabs, ads, subscription promo ...) is skipped.
+              private fun kindOf(layout: String): String? {
+                  val l = layout.lowercase()
+                  return when {
+                      l == "spotlight_layout" -> "spot"
+                      l.contains("subscription") -> null
+                      l.contains("trending") -> "trending"
+                      l.contains("square") -> "square"
+                      l.contains("landscape") -> "landscape"
+                      l.contains("card") || l.contains("promo") -> "card"
+                      l.contains("portrait") -> "portrait"
+                      else -> null
+                  }
+              }
+
+              // loads one page (Home / Shows / Movies / Sports / landing page): spotlight, portrait, trending, square, landscape, card / promo rows
               private fun loadHome(td: TabData) {
                   Thread {
                       val page = Api.get(td.url)
@@ -2055,57 +2148,69 @@ jobs:
                       if (cs == null) {
                           ui.post {
                               td.loading = false; td.loaded = false
-                              if (shownTab == td.idx) {
+                              if (shownTd === td) {
                                   skelHome.visibility = View.GONE
-                                  val nm = tabNames[td.idx]
-                                  status.text = "Could not load $nm page\n" + Api.lastError + "\n\nSelect $nm again to retry"
+                                  val nm = if (td.idx < tabNames.size) tabNames[td.idx] else "page"
+                                  status.text = "Could not load $nm\n" + Api.lastError + (if (td.idx < tabNames.size) "\n\nSelect $nm again to retry" else "\n\nPress back")
                                   status.visibility = View.VISIBLE
                               }
                           }
                           return@Thread
                       }
-                      class Job(val title: String, val spot: Boolean, val f: Future<JSONObject?>)
+                      class Job(val title: String, val kind: String, val f: Future<JSONObject?>?, val direct: Item?)
                       val jobs = ArrayList<Job>()
                       var gotSpot = false
                       for (i in 0 until cs.length()) {
                           val c = cs.optJSONObject(i) ?: continue
-                          if (isAd(c)) continue                                 // never load ad templates / launchers / ad spotlight
-                          val layout = c.optString("layout")
-                          val spot = layout == "spotlight_layout"
-                          if (!spot && layout != "portrait_layout") continue   // skips ads, cards, landscape, square...
-                          if (spot) { if (gotSpot) continue; gotSpot = true }
+                          if (isAd(c, true)) continue                           // never load ad templates / ad spotlight
+                          val kind = kindOf(c.optString("layout")) ?: continue
+                          if (kind == "spot") { if (gotSpot) continue; gotSpot = true }
                           val uri = c.optJSONObject("retrieveItems")?.optString("uri").orEmpty()
-                          if (uri.isEmpty()) continue
                           val cm = c.optJSONObject("metadata")
                           val title = cm?.str("title") ?: cm?.str("label") ?: c.str("title")
                               ?: c.optJSONObject("editorialMetadata")?.str("title") ?: ""
-                          val url = BASE + uri + (if (spot) "" else "&from=0&to=15")
-                          jobs.add(Job(title, spot, Api.pool.submit(Callable<JSONObject?> { Api.get(url) })))
+                          if (kind == "card") {                                 // card / promo data is already inside the page container (no header, no api call)
+                              val d = parseLauncher(c)
+                              if (d != null) { jobs.add(Job(title, kind, null, d)); continue }
+                          }
+                          if (uri.isEmpty()) continue
+                          val url = BASE + uri + (if (kind == "spot") "" else "&from=0&to=15")
+                          jobs.add(Job(title, kind, Api.pool.submit(Callable<JSONObject?> { Api.get(url) }), null))
                       }
                       for (j in jobs) {
-                          val res = try { j.f.get() } catch (e: Exception) { null }
-                          val ro = res?.optJSONObject("resultObj")
-                          val arr = ro?.optJSONArray("containers")
                           val items = ArrayList<Item>()
-                          if (arr != null) for (k in 0 until arr.length()) {
-                              val c = arr.optJSONObject(k) ?: continue
-                              if (isAd(c)) continue                             // LAUNCHER_ITEM slides are skipped (hidden)
-                              parseItem(c)?.let { items.add(it) }
-                              if (j.spot) {
-                                  val dual = c.optJSONObject("editorialMetadata")?.optJSONArray("dual_spotlight_items")
-                                  if (dual != null) for (d in 0 until dual.length()) {
-                                      dual.optJSONObject(d)?.let { parseItem(it) }?.let { items.add(it) }
+                          var ro: JSONObject? = null
+                          val dd = j.direct
+                          if (dd != null) items.add(dd)
+                          else {
+                              val res = try { j.f?.get() } catch (e: Exception) { null }
+                              ro = res?.optJSONObject("resultObj")
+                              val arr = ro?.optJSONArray("containers")
+                              if (arr != null) for (k in 0 until arr.length()) {
+                                  val c = arr.optJSONObject(k) ?: continue
+                                  val isL = c.optString("layout").equals("LAUNCHER_ITEM", true)
+                                  val parsed = when {
+                                      isL -> if (isAd(c, true)) null else parseLauncher(c)
+                                      isAd(c) -> null
+                                      else -> parseItem(c)
+                                  }
+                                  if (parsed != null) items.add(parsed)
+                                  if (j.kind == "spot") {
+                                      val dual = c.optJSONObject("editorialMetadata")?.optJSONArray("dual_spotlight_items")
+                                      if (dual != null) for (d in 0 until dual.length()) {
+                                          dual.optJSONObject(d)?.let { parseItem(it) }?.let { items.add(it) }
+                                      }
                                   }
                               }
                           }
                           if (items.isEmpty()) continue
                           val title = if (j.title.isNotBlank()) j.title else (ro?.str("trayTitle") ?: "")
-                          val row = Row(title, j.spot, items)
+                          val row = Row(title, j.kind == "spot", items, j.kind)
                           ui.post { addRow(td, row) }
                       }
                       ui.post {
                           td.loading = false
-                          if (td.rows.isEmpty() && shownTab == td.idx) {
+                          if (td.rows.isEmpty() && shownTd === td) {
                               skelHome.visibility = View.GONE
                               status.text = "No rows returned\n" + Api.lastError
                               status.visibility = View.VISIBLE
@@ -2116,7 +2221,7 @@ jobs:
 
               private fun addRow(td: TabData, r: Row) {
                   td.rows.add(r)
-                  if (td.rows === rows && shownTab == td.idx) {
+                  if (td.rows === rows && shownTd === td) {
                       rowAdapter.notifyItemInserted(rows.size - 1)
                       skelHome.visibility = View.GONE
                       if (isHomeTab() && !inDetail) status.visibility = View.GONE
@@ -2181,10 +2286,10 @@ jobs:
               }
               private fun prefetchRow(r: Row, n: Int) {
                   r.items.take(n).forEach {
-                      Prefetch.add(cardUrl(r.spotlight, it))
+                      Prefetch.add(rowImg(r.kind, it))
                       if (!r.spotlight) Prefetch.add(it.logo)          // title images: ready before the card is focused
                   }
-                  r.items.take(3).forEach { prefetchHero(it) }
+                  r.items.take(3).filter { !it.launcher }.forEach { prefetchHero(it) }
               }
 
               private fun isSpotRow() = rows.getOrNull(curRow)?.spotlight == true
@@ -2194,12 +2299,13 @@ jobs:
                   curRow = rowPos; curPos = pos
                   snapTo(rowPos)
                   heroRun?.let { ui.removeCallbacks(it) }
+                  if (item.launcher) return                    // promo / card / square tiles have no hero banner
                   val r = Runnable {
                       showHero(item)
                       // aggressive look-ahead: banners + titles of the next cards (downloaded AND decoded), detail data of the neighbours
-                      row.items.getOrNull(pos + 1)?.let { prefetchHero(it, true); warmHero(it) }
-                      row.items.getOrNull(pos + 2)?.let { prefetchHero(it, true); warmHero(it) }
-                      row.items.getOrNull(pos - 1)?.let { prefetchHero(it); warmHero(it) }
+                      row.items.getOrNull(pos + 1)?.takeIf { !it.launcher }?.let { prefetchHero(it, true); warmHero(it) }
+                      row.items.getOrNull(pos + 2)?.takeIf { !it.launcher }?.let { prefetchHero(it, true); warmHero(it) }
+                      row.items.getOrNull(pos - 1)?.takeIf { !it.launcher }?.let { prefetchHero(it); warmHero(it) }
                       if (!row.spotlight) row.items.getOrNull(pos + 1)?.let { prefetchDetail(it) }
                   }
                   heroRun = r
@@ -2389,6 +2495,76 @@ jobs:
                   player?.release(); player = null
                   mainPlayer?.release(); mainPlayer = null
                   resetSprite()
+              }
+
+              // ---------------------------------------------------------------- Row kinds (sizes / images) + tile clicks
+              private fun rowImg(kind: String, i: Item): String? = when (kind) {
+                  "spot" -> img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, W_SPOT)
+                  "card" -> img(i.cardImg ?: i.landscape ?: i.bg, 1000)
+                  "square" -> img(i.cardImg ?: i.portrait ?: i.landscape ?: i.bg, 450)
+                  "landscape" -> img(i.landscape ?: i.cardImg ?: i.portrait ?: i.bg, W_EP)
+                  else -> img(i.portrait ?: i.landscape ?: i.cardImg ?: i.bg, W_PORTRAIT)
+              }
+              // tile (focus frame) size and image size per row kind
+              private fun kw(k: String) = when (k) { "spot" -> stripW; "card" -> bannerW; "square" -> sqS; "landscape" -> lsW; "trending" -> cardW + rankW; else -> cardW }
+              private fun kh(k: String) = when (k) { "spot" -> stripH; "card" -> bannerH; else -> cardH }
+              private fun imgW(k: String) = when (k) { "spot" -> stripW; "card" -> bannerW; "square" -> sqS; "landscape" -> lsW; else -> cardW }
+              private fun imgH(k: String) = when (k) { "spot" -> stripH; "card" -> bannerH; "square" -> sqS; "landscape" -> lsH; else -> cardH }
+
+              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+
+              private fun onItemClick(item: Item, card: View) {
+                  if (item.launcher || item.cta.isNotBlank()) { handleCta(item, card); return }
+                  if (item.sub == SUB_SHOW || item.sub == SUB_MOVIE_BUNDLE) openDetail(item, card)
+                  else if (item.obj == OBJ_VOD) playItem(item, card)
+              }
+
+              // cta: sony://asset/<id>  |  sony://page/<slug>-<id>
+              private fun handleCta(item: Item, card: View) {
+                  val rest = item.cta.substringAfter("sony://", "")
+                  val type = rest.substringBefore("/")
+                  val tail = rest.substringAfter("/", "").substringBefore("?").trim('/')
+                  when (type) {
+                      "page" -> {
+                          val id = tail.substringAfterLast('-')
+                          if (id.isNotEmpty() && id.all { it.isDigit() }) { lastCard = card; openPage(id) } else toast("Page not supported")
+                      }
+                      "asset" -> openAsset(tail, item, card)
+                      else -> if (item.cid.isNotBlank()) openAsset(item.cid, item, card) else toast("Not supported")
+                  }
+              }
+
+              private fun routeAsset(it2: Item, card: View) {
+                  if (it2.sub == SUB_SHOW || it2.sub == SUB_MOVIE_BUNDLE) openDetail(it2, card) else playItem(it2, card)
+              }
+
+              // asset id from a cta: show / movie bundle -> detail page, everything else (movie, trailer, episode) -> player.
+              // When the tile does not say what the asset is, DETAIL-V2 of the id is asked first.
+              private fun openAsset(id: String, item: Item, card: View) {
+                  if (id.isBlank()) return
+                  lastCard = card
+                  val known = item.sub
+                  if (known.isNotEmpty() && known != "LAUNCHER") {
+                      routeAsset(item.copy(id = id, cid = id, obj = OBJ_VOD, sub = known), card)
+                      return
+                  }
+                  Thread {
+                      val j = fetchDetail(id)
+                      val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
+                      ui.post {
+                          if (c == null) { toast("Could not open"); return@post }
+                          val m = c.optJSONObject("metadata")
+                          val st = (m?.optString("objectSubtype") ?: "").uppercase()
+                          val ot = (m?.optString("objectType") ?: "").uppercase()
+                          val sub = when {
+                              st == SUB_MOVIE_BUNDLE -> SUB_MOVIE_BUNDLE
+                              st == SUB_SHOW || ot == "SHOW" || ot == "GROUP_OF_BUNDLES" || (m?.has("seasonCount") == true) -> SUB_SHOW
+                              else -> st
+                          }
+                          val base = parseItem(c) ?: item.copy()
+                          routeAsset(base.copy(id = id, cid = id, sub = sub, obj = OBJ_VOD), card)
+                      }
+                  }.start()
               }
 
               // ---------------------------------------------------------------- Direct play from a listing page
@@ -3596,7 +3772,8 @@ jobs:
 
               // ---------------------------------------------------------------- Adapters
               inner class RowVH(val root: LinearLayout, val title: TextView, val rv: RecyclerView) : RecyclerView.ViewHolder(root)
-              inner class CardVH(val card: FrameLayout, val iv: ImageView, val border: View, val tv: TextView) : RecyclerView.ViewHolder(card)
+              inner class CardVH(val card: FrameLayout, val iv: ImageView, val border: View, val tv: TextView,
+                                 val rank: TextView?, val t1: TextView?, val t2: TextView?) : RecyclerView.ViewHolder(card)
               inner class EpVH(
                   val row: LinearLayout, val thumb: FrameLayout, val iv: ImageView, val badge: TextView, val border: View,
                   val t1: TextView, val t2: TextView, val t3: TextView
@@ -3633,27 +3810,30 @@ jobs:
                       val r = rows[pos]
                       h.title.text = r.title
                       // spotlight: strip sits at the bottom of its row, title hidden
-                      h.title.visibility = if (r.spotlight) View.GONE else View.VISIBLE
+                      h.title.visibility = if (r.spotlight || r.kind == "card") View.GONE else View.VISIBLE   // card / promo rows have no header
                       val l = h.rv.layoutParams
-                      l.height = (if (r.spotlight) stripH else cardH) + 2 * padV
+                      l.height = kh(r.kind) + 2 * padV
                       h.rv.layoutParams = l
                       h.rv.adapter = CardAdapter(r, pos)
                   }
               }
 
               inner class CardAdapter(private val row: Row, private val rowPos: Int) : RecyclerView.Adapter<CardVH>() {
-                  private val cw = if (row.spotlight) stripW else cardW
-                  private val ch = if (row.spotlight) stripH else cardH
+                  private val k = row.kind
+                  private val cw = kw(k)          // focus frame
+                  private val ch = kh(k)
+                  private val iw = imgW(k)        // image inside the frame
+                  private val ih = imgH(k)
                   override fun getItemCount() = row.items.size
 
                   // decode the next cards into memory + download their title images ahead of the focus
                   private fun warm(pos: Int) {
-                      for (k in 1..7) {
-                          val it = row.items.getOrNull(pos + k) ?: break
-                          cardReq(cardUrl(row.spotlight, it), cw, ch).priority(Priority.LOW).preload()
+                      for (n in 1..7) {
+                          val it = row.items.getOrNull(pos + n) ?: break
+                          cardReq(rowImg(k, it), iw, ih).priority(Priority.LOW).preload()
                           if (!row.spotlight) Prefetch.add(it.logo)
                       }
-                      row.items.getOrNull(pos - 1)?.let { cardReq(cardUrl(row.spotlight, it), cw, ch).priority(Priority.LOW).preload() }
+                      row.items.getOrNull(pos - 1)?.let { cardReq(rowImg(k, it), iw, ih).priority(Priority.LOW).preload() }
                   }
 
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): CardVH {
@@ -3661,6 +3841,7 @@ jobs:
                           layoutParams = RecyclerView.LayoutParams(cw, ch).apply { rightMargin = u(12) }
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
+                      val grav = (if (k == "trending") Gravity.END else Gravity.START) or Gravity.TOP
                       val iv = ImageView(this@MainActivity).apply {
                           scaleType = ImageView.ScaleType.CENTER_CROP
                           setBackgroundColor(Color.rgb(26, 28, 42))
@@ -3679,38 +3860,77 @@ jobs:
                           }
                           alpha = 0f
                       }
-                      card.addView(iv, FrameLayout.LayoutParams(-1, -1))
-                      card.addView(tvl, FrameLayout.LayoutParams(-1, -1))
-                      card.addView(border, FrameLayout.LayoutParams(-1, -1))
+                      var rank: TextView? = null
+                      if (k == "trending") {                         // big rank number left of the poster (1, 2, 3 ...), poster covers its right edge
+                          val rt = TextView(this@MainActivity).apply {
+                              setTextColor(Color.parseColor("#8E8E99")); typeface = Typeface.DEFAULT_BOLD
+                              gravity = Gravity.BOTTOM or Gravity.START
+                              includeFontPadding = false
+                              setTextSize(TypedValue.COMPLEX_UNIT_PX, ih * 0.62f)
+                          }
+                          rank = rt
+                          card.addView(rt, FrameLayout.LayoutParams(rankW + u(40), ih, Gravity.TOP or Gravity.START))
+                      }
+                      card.addView(iv, FrameLayout.LayoutParams(iw, ih, grav))
+                      card.addView(tvl, FrameLayout.LayoutParams(iw, ih, grav))
+                      card.addView(border, FrameLayout.LayoutParams(iw, ih, grav))
+                      var t1: TextView? = null
+                      var t2: TextView? = null
+                      if (k == "square" || k == "landscape") {       // title + subtitle UNDER the tile
+                          val a = TextView(this@MainActivity).apply {
+                              setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                              maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                          }
+                          tx(a, 14f)
+                          val b = TextView(this@MainActivity).apply {
+                              setTextColor(Color.parseColor("#B4B8C8"))
+                              maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                          }
+                          tx(b, 12f)
+                          card.addView(a, FrameLayout.LayoutParams(iw, -2, Gravity.TOP or Gravity.START).apply { topMargin = ih + u(8) })
+                          card.addView(b, FrameLayout.LayoutParams(iw, -2, Gravity.TOP or Gravity.START).apply { topMargin = ih + u(30) })
+                          t1 = a; t2 = b
+                      }
                       if (row.spotlight) {
                           val play = TextView(this@MainActivity).apply { text = "▶"; setTextColor(Color.WHITE) }
                           tx(play, 12f)
                           card.addView(play, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply { setMargins(u(8), 0, 0, u(6)) })
                       }
-                      return CardVH(card, iv, border, tvl)
+                      return CardVH(card, iv, border, tvl, rank, t1, t2)
                   }
 
                   override fun onBindViewHolder(h: CardVH, pos: Int) {
                       val item = row.items[pos]
-                      val url = cardUrl(row.spotlight, item)
-                      cardReq(url, cw, ch).priority(Priority.HIGH).into(h.iv)
+                      val url = rowImg(k, item)
+                      cardReq(url, iw, ih).priority(Priority.HIGH).into(h.iv)
                       if (pos == 0) warm(0)
                       h.tv.text = item.title
                       h.tv.visibility = if (url == null) View.VISIBLE else View.GONE
+                      h.rank?.text = (pos + 1).toString()
+                      val a = h.t1
+                      val b = h.t2
+                      if (a != null && b != null) {
+                          val ept = item.epTitle
+                          if (k == "landscape") {
+                              a.text = if (ept.isNotBlank()) ept else item.title
+                              b.text = if (ept.isNotBlank()) item.title else ""
+                          } else {
+                              a.text = item.title
+                              b.text = item.subtitle
+                          }
+                          a.visibility = if (a.text.isNullOrBlank()) View.GONE else View.VISIBLE
+                          b.visibility = if (b.text.isNullOrBlank()) View.GONE else View.VISIBLE
+                      }
+                      val sc = if (k == "card") 1.04f else 1.1f
                       h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
                       h.card.setOnFocusChangeListener { v, has ->
-                          v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
+                          v.animate().scaleX(if (has) sc else 1f).scaleY(if (has) sc else 1f).setDuration(150).start()
                           h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
                           v.translationZ = if (has) u(10).toFloat() else 0f
                           if (has) { warm(pos); onCardFocus(item, row, pos, rowPos) }
                       }
-                      // SHOW -> show detail page (listing rows AND spotlight).
-                      // MOVIE_BUNDLE -> movie detail page.
-                      // Any other objectType == VOD (EPISODE, TRAILER, MOVIE ...) -> straight to the player.
-                      h.card.setOnClickListener {
-                          if (item.sub == SUB_SHOW || item.sub == SUB_MOVIE_BUNDLE) openDetail(item, h.card)
-                          else if (item.obj == OBJ_VOD) playItem(item, h.card)
-                      }
+                      // SHOW / MOVIE_BUNDLE -> detail page, VOD -> player, promo / card / square tile -> its cta (asset or landing page)
+                      h.card.setOnClickListener { onItemClick(item, h.card) }
                   }
               }
 
