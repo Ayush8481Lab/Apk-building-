@@ -85,7 +85,9 @@ jobs:
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
               <application
                   android:name=".App"
-                  android:label="LIV TV"
+                  android:label="Liv 8481"
+                  android:icon="@drawable/ic_launcher"
+                  android:banner="@drawable/ic_banner"
                   android:largeHeap="true"
                   android:theme="@style/AppTheme"
                   android:usesCleartextTraffic="false">
@@ -4590,6 +4592,543 @@ jobs:
           }
 
           EOF
+
+      - name: Fetch app logo and splash video
+        run: |
+          set -e
+          R=app/src/main/res
+          mkdir -p $R/raw $R/drawable-nodpi
+          curl -L --fail --retry 3 -A "LivTVBuild/1.0 (GitHub Actions build script)" -o $R/raw/splash.mp4 "https://raw.githubusercontent.com/Ayush8481Lab/Mm/refs/heads/main/Video.Guru_20261112-002545558.mp4"
+          curl -L --fail --retry 3 -A "LivTVBuild/1.0 (GitHub Actions build script)" -o /tmp/logo.png "https://upload.wikimedia.org/wikipedia/commons/f/f7/SonyLIV_2020.png"
+          pip install pillow --break-system-packages -q || pip install pillow -q
+          python3 - <<'PYEOF'
+          from PIL import Image
+          logo = Image.open('/tmp/logo.png').convert('RGBA')
+          bb = logo.getchannel('A').point(lambda a: 255 if a > 20 else 0).getbbox()
+          if bb:
+              logo = logo.crop(bb)
+          px = [p for p in logo.resize((64, 64)).getdata() if p[3] > 200]
+          lum = (sum(0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2] for p in px) / len(px)) if px else 255
+          bgc = (255, 255, 255, 255) if lum < 110 else (5, 6, 12, 255)
+
+          def make(w, h, pad, out):
+              bg = Image.new('RGBA', (w, h), bgc)
+              s = min(w * (1 - 2 * pad) / logo.width, h * (1 - 2 * pad) / logo.height)
+              l = logo.resize((max(1, int(logo.width * s)), max(1, int(logo.height * s))), Image.LANCZOS)
+              bg.alpha_composite(l, ((w - l.width) // 2, (h - l.height) // 2))
+              bg.convert('RGB').save(out)
+
+          make(512, 512, 0.10, 'app/src/main/res/drawable-nodpi/ic_launcher.png')
+          make(640, 360, 0.15, 'app/src/main/res/drawable-nodpi/ic_banner.png')
+          print('logo + banner written')
+          PYEOF
+          ls -la $R/raw $R/drawable-nodpi
+
+      - name: Apply fixes (card crash, detail layout, search page, splash)
+        run: |
+          set -e
+          D=app/src/main/res/drawable
+          cat > $D/ic_backspace.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M22,3H7c-0.69,0 -1.23,0.35 -1.59,0.88L0,12l5.41,8.11c0.36,0.53 0.9,0.89 1.59,0.89h15c1.1,0 2,-0.9 2,-2V5c0,-1.1 -0.9,-2 -2,-2zM19,15.59L17.59,17 14,13.41 10.41,17 9,15.59 12.59,12 9,8.41 10.41,7 14,10.59 17.59,7 19,8.41 15.41,12 19,15.59z"/></vector>
+          EOF
+          cat > $D/ic_space.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M18,9v4H6V9H4v6h16V9z"/></vector>
+          EOF
+
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d matches): %s' % (n, old[:90]))
+              t = t.replace(old, new)
+
+          def region(start, end, old, new):
+              global t
+              s = t.index(start)
+              e = t.index(end, s)
+              seg = t[s:e]
+              if old not in seg:
+                  sys.exit('REGION PATCH FAILED: ' + old[:90])
+              t = t[:s] + seg.replace(old, new) + t[e:]
+
+          # ---------- 1) card / promo rows: never loaded (they crashed)
+          rep('l.contains("card") || l.contains("promo") -> "card"',
+              'l.contains("card") || l.contains("promo") -> null')
+
+          # ---------- 2) detail page: smaller title png, trailer box = same as listing page
+          rep('const val DETAIL_LOGO_SCALE = 1.62f', 'const val DETAIL_LOGO_SCALE = 1.2f')
+          rep('detBoxW = (W * 0.67f * 1.5f).toInt(); detBoxH = (H * 0.725f * 1.5f).toInt()',
+              'detBoxW = homeBoxW; detBoxH = homeBoxH')
+
+          # ---------- 3) detail page: LEFT aligned (like the listing), vertically centered
+          rep('heroLayer.addView(left, lp(-1, -1))',
+              'heroLayer.addView(left, lp((W * 0.62).toInt(), -1))')
+          rep('intArrayOf(Color.argb(225, 5, 6, 12), Color.argb(165, 5, 6, 12), Color.argb(225, 5, 6, 12))',
+              'intArrayOf(dark, Color.argb(235, 5, 6, 12), Color.argb(0, 5, 6, 12))')
+          rep('val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }',
+              'val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.START }')
+          rep('heroLayer.addView(dInfo, lp((W * 0.84f).toInt(), -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = (H * 0.04f).toInt() })',
+              'heroLayer.addView(dInfo, lp((W * 0.6f).toInt(), -2, Gravity.CENTER_VERTICAL or Gravity.START).apply { leftMargin = u(CONTENT_LEFT) })')
+          rep('val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }',
+              'val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL or Gravity.START }')
+          rep('heroLayer.addView(dHint, lp(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {',
+              'heroLayer.addView(dHint, lp(-2, -2, Gravity.BOTTOM or Gravity.START).apply {\n                      leftMargin = u(CONTENT_LEFT)')
+          region('private fun buildDetail() {', 'private fun updatePlus() {', 'Gravity.CENTER_HORIZONTAL', 'Gravity.START')
+          region('private fun buildDetail() {', 'private fun updatePlus() {', 'ImageView.ScaleType.FIT_CENTER', 'ImageView.ScaleType.FIT_START')
+          region('private fun setExtra(', 'private fun movieExtraRows(', 'Gravity.CENTER_HORIZONTAL', 'Gravity.START')
+
+          # ---------- 4) premium open animation of the icon buttons (My List / Watch Trailer)
+          s = t.index('// compact detail button: only the icon while not focused')
+          e = t.index('private fun styleEpTab()')
+          NEW_BTN = r'''// compact detail button: icon only; on focus the white pill grows open while the label slides + fades in (premium feel)
+              private fun heroIconBtn(icon: Int, label: String, onClick: () -> Unit): LinearLayout {
+                  val ll = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+                      setPadding(u(16), u(13), u(16), u(13))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val iv = ImageView(this).apply { setImageResource(icon) }
+                  val tv = TextView(this).apply {
+                      text = label; typeface = Typeface.DEFAULT_BOLD; maxLines = 1; visibility = View.GONE; alpha = 0f
+                  }
+                  tx(tv, 17f)
+                  ll.addView(iv, LinearLayout.LayoutParams(u(24), u(24)))
+                  ll.addView(tv, LinearLayout.LayoutParams(0, -2))
+                  var open = 0f
+                  var va: ValueAnimator? = null
+                  fun setOpen(p: Float, full: Int) {
+                      open = p
+                      val l = tv.layoutParams as LinearLayout.LayoutParams
+                      l.width = (full * p).toInt()
+                      l.leftMargin = (u(10) * p).toInt()
+                      tv.layoutParams = l
+                      tv.alpha = ((p - 0.25f) / 0.75f).coerceIn(0f, 1f)
+                      tv.translationX = (1f - p) * -u(14)
+                      tv.visibility = if (p <= 0.01f) View.GONE else View.VISIBLE
+                  }
+                  fun st(animate: Boolean) {
+                      val f = ll.isFocused
+                      tv.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      iv.setColorFilter(if (f) Color.BLACK else Color.WHITE)
+                      ll.background = GradientDrawable().apply {
+                          cornerRadius = u(10).toFloat()
+                          setColor(if (f) Color.WHITE else Color.argb(110, 120, 124, 140))
+                      }
+                      va?.cancel()
+                      tv.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+                      val full = tv.measuredWidth
+                      val to = if (f) 1f else 0f
+                      if (!animate) { setOpen(to, full); return }
+                      ll.animate().cancel()
+                      ll.animate().scaleX(if (f) 1.06f else 1f).scaleY(if (f) 1.06f else 1f)
+                          .setDuration(220).setInterpolator(DecelerateInterpolator()).start()
+                      va = ValueAnimator.ofFloat(open, to).apply {
+                          duration = if (f) 340L else 200L
+                          interpolator = DecelerateInterpolator(1.8f)
+                          addUpdateListener { setOpen(it.animatedValue as Float, full) }
+                          start()
+                      }
+                  }
+                  st(false)
+                  ll.tag = Runnable { st(false) }
+                  ll.setOnFocusChangeListener { _, _ -> st(true) }
+                  ll.setOnClickListener { lastBtn = ll; onClick() }
+                  return ll
+              }
+
+              '''
+          t = t[:s] + NEW_BTN + t[e:]
+          rep('(dPlus.getChildAt(1) as TextView).text = if (on) "In My List" else "My List"',
+              '(dPlus.getChildAt(1) as TextView).text = if (on) "In My List" else "My List"\n        (dPlus.tag as? Runnable)?.run()')
+
+          # ---------- 5) search page
+          CONSTS = r'''
+          const val TRENDING_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP/TRAY/EXTCOLLECTION/9014016?layout=trending_tray_layout&SSR=false&recoPath=false&isFromDetail=false&kids_safe=false&utm_medium=organic&isPageV2=true&utm_source=google"
+          const val SEARCH_URL = "https://apiv3.sonyliv.com/AGL/4.8/R/ENG/WEB/IN/UP/TRAY/SEARCH?query="'''
+          rep('const val EP_PAGE = 30', 'const val EP_PAGE = 30' + CONSTS)
+
+          rep('content.addView(skelHome, lp(-1, -1))',
+              'content.addView(skelHome, lp(-1, -1))\n        buildSearch()')
+
+          rep('val td = homeTabs[i]',
+              'searchLayer.visibility = View.GONE\n        val td = homeTabs[i]\n        if (i == 0) { openSearch(); return }')
+
+          rep('private fun closeDetail(refocus: Boolean) {', r'''private fun closeDetail(refocus: Boolean) {
+                  val fs = detailFromSearch
+                  detailFromSearch = false
+                  closeDetailInner(refocus && !fs)
+                  if (fs) {
+                      content.visibility = View.GONE
+                      searchLayer.visibility = View.VISIBLE
+                      if (refocus) ui.postDelayed({
+                          if (tab == 0 && !inDetail && !inPlayer) {
+                              val c = lastCard
+                              if (c != null && c.isAttachedToWindow) c.requestFocus() else keyViews.firstOrNull()?.requestFocus()
+                          }
+                      }, 100)
+                  }
+              }
+
+              private fun closeDetailInner(refocus: Boolean) {''')
+
+          rep('if (isHomeTab() && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()',
+              'if ((isHomeTab() || tab == 0) && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()')
+
+          # ---------- 6) splash video (plays with sound while the home page loads in the background)
+          rep('selectTab(1)', 'selectTab(1)\n        showSplash()')
+          rep('override fun dispatchKeyEvent(ev: KeyEvent): Boolean {',
+              'override fun dispatchKeyEvent(ev: KeyEvent): Boolean {\n        if (splashOn) return true')
+          rep('override fun dispatchTouchEvent(ev: MotionEvent): Boolean {',
+              'override fun dispatchTouchEvent(ev: MotionEvent): Boolean {\n        if (splashOn) return true')
+          rep('override fun onBackPressed() {',
+              'override fun onBackPressed() {\n        if (splashOn) return')
+          rep('private fun playTrailer(url: String, spotLoop: Boolean) {',
+              'private fun playTrailer(url: String, spotLoop: Boolean) {\n        if (splashOn) return')
+
+          SEARCH_CODE = r'''// ---------------------------------------------------------------- Splash video
+              private var splashOn = false
+              private var splashView: FrameLayout? = null
+              private var splashVv: VideoView? = null
+
+              private fun showSplash() {
+                  splashOn = true
+                  val f = FrameLayout(this).apply { setBackgroundColor(Color.BLACK); isClickable = true }
+                  val vv = VideoView(this)
+                  f.addView(vv, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+                  root.addView(f, lp(-1, -1))
+                  splashView = f
+                  splashVv = vv
+                  try {
+                      vv.setVideoURI(Uri.parse("android.resource://" + packageName + "/" + R.raw.splash))
+                      vv.setOnPreparedListener { mp -> mp.isLooping = false; vv.start() }
+                      vv.setOnCompletionListener { endSplash() }
+                      vv.setOnErrorListener { _, _, _ -> endSplash(); true }
+                  } catch (e: Exception) { endSplash() }
+                  ui.postDelayed({ endSplash() }, 7000)            // safety: never stay on the splash
+              }
+
+              private fun endSplash() {
+                  if (!splashOn) return
+                  splashOn = false
+                  val f = splashView
+                  splashView = null
+                  try { splashVv?.stopPlayback() } catch (e: Exception) { }
+                  splashVv = null
+                  if (f != null) root.removeView(f)
+                  // the home trailer was held back while the splash played: start it now (if the hero is already on screen)
+                  if (revealed && !inDetail && !inPlayer && isHomeTab()) hero?.let { scheduleTrailer(it) }
+              }
+
+              // ---------------------------------------------------------------- Search page (left: input + keyboard, right: trending / results grid)
+              private lateinit var searchLayer: FrameLayout
+              private lateinit var sInput: TextView
+              private lateinit var sHead: TextView
+              private lateinit var sGrid: RecyclerView
+              private lateinit var sStatus: TextView
+              private lateinit var sAdapter: SearchAdapter
+              private val sItems = ArrayList<Item>()
+              private val keyViews = ArrayList<View>()
+              private var sQuery = ""
+              private var sTok = 0
+              private var sRun: Runnable? = null
+              private var trendItems: List<Item> = emptyList()
+              private var trendLoading = false
+              private var detailFromSearch = false
+              private var sCardW = 0
+              private var sCardH = 0
+
+              inner class SearchVH(val card: FrameLayout, val iv: ImageView, val border: View, val tv: TextView) : RecyclerView.ViewHolder(card)
+
+              inner class SearchAdapter : RecyclerView.Adapter<SearchVH>() {
+                  override fun getItemCount() = sItems.size
+
+                  override fun onCreateViewHolder(p: ViewGroup, t: Int): SearchVH {
+                      val card = FrameLayout(this@MainActivity).apply {
+                          layoutParams = RecyclerView.LayoutParams(sCardW, sCardH).apply { setMargins(u(8), u(8), u(8), u(8)) }
+                          clipChildren = false
+                          isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      }
+                      val iv = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.CENTER_CROP
+                          setBackgroundColor(Color.rgb(26, 28, 42))
+                          outlineProvider = roundOutline; clipToOutline = true
+                      }
+                      val tvl = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                          maxLines = 4; ellipsize = TextUtils.TruncateAt.END
+                          setPadding(u(8), u(8), u(8), u(8)); visibility = View.GONE
+                      }
+                      tx(tvl, 14f)
+                      val border = View(this@MainActivity).apply {
+                          background = GradientDrawable().apply {
+                              setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
+                          }
+                          alpha = 0f
+                      }
+                      card.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                      card.addView(tvl, FrameLayout.LayoutParams(-1, -1))
+                      card.addView(border, FrameLayout.LayoutParams(-1, -1))
+                      return SearchVH(card, iv, border, tvl)
+                  }
+
+                  override fun onBindViewHolder(h: SearchVH, pos: Int) {
+                      val item = sItems[pos]
+                      val url = img(item.portrait ?: item.landscape ?: item.bg, W_PORTRAIT)
+                      cardReq(url, sCardW, sCardH).priority(Priority.HIGH).into(h.iv)
+                      h.tv.text = item.title
+                      h.tv.visibility = if (url == null) View.VISIBLE else View.GONE
+                      h.card.animate().cancel()
+                      h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f; h.card.translationZ = 0f
+                      h.card.setOnFocusChangeListener { v, has ->
+                          v.animate().scaleX(if (has) 1.08f else 1f).scaleY(if (has) 1.08f else 1f).setDuration(150).start()
+                          h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
+                          v.translationZ = if (has) u(10).toFloat() else 0f
+                      }
+                      h.card.setOnClickListener { openFromSearch(item, h.card) }
+                  }
+              }
+
+              private fun keyBtn(label: String, onClick: () -> Unit): TextView {
+                  val t = TextView(this).apply {
+                      text = label; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  tx(t, 18f)
+                  fun st() {
+                      val f = t.isFocused
+                      t.setTextColor(if (f) Color.BLACK else Color.parseColor("#C9CEDD"))
+                      t.background = GradientDrawable().apply {
+                          cornerRadius = u(6).toFloat(); setColor(if (f) Color.WHITE else Color.argb(255, 38, 42, 58))
+                      }
+                  }
+                  st()
+                  t.setOnFocusChangeListener { _, _ -> st() }
+                  t.setOnClickListener { onClick() }
+                  return t
+              }
+
+              private fun keyIcon(res: Int, onClick: () -> Unit): LinearLayout {
+                  val ll = LinearLayout(this).apply {
+                      gravity = Gravity.CENTER
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val iv = ImageView(this).apply { setImageResource(res) }
+                  ll.addView(iv, LinearLayout.LayoutParams(u(22), u(22)))
+                  fun st() {
+                      val f = ll.isFocused
+                      iv.setColorFilter(if (f) Color.BLACK else Color.parseColor("#C9CEDD"))
+                      ll.background = GradientDrawable().apply {
+                          cornerRadius = u(6).toFloat(); setColor(if (f) Color.WHITE else Color.argb(255, 38, 42, 58))
+                      }
+                  }
+                  st()
+                  ll.setOnFocusChangeListener { _, _ -> st() }
+                  ll.setOnClickListener { onClick() }
+                  return ll
+              }
+
+              private fun buildSearch() {
+                  searchLayer = FrameLayout(this).apply { setBackgroundColor(Color.argb(255, 5, 6, 12)); visibility = View.GONE }
+
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  sInput = TextView(this).apply {
+                      typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(14), 0, u(14), 0); maxLines = 1; ellipsize = TextUtils.TruncateAt.START
+                      background = GradientDrawable().apply {
+                          cornerRadius = u(8).toFloat(); setColor(Color.argb(255, 10, 12, 20)); setStroke(u(2), Color.WHITE)
+                      }
+                  }
+                  tx(sInput, 18f)
+                  renderInput()
+                  col.addView(sInput, LinearLayout.LayoutParams(-1, u(44)))
+
+                  val act = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  val sp = keyIcon(R.drawable.ic_space) { typeKey(" ") }
+                  val bs = keyIcon(R.drawable.ic_backspace) { typeKey("<") }
+                  keyViews.add(sp); keyViews.add(bs)
+                  act.addView(sp, LinearLayout.LayoutParams(0, u(42), 1f).apply { setMargins(u(3), u(3), u(3), u(3)) })
+                  act.addView(bs, LinearLayout.LayoutParams(0, u(42), 1f).apply { setMargins(u(3), u(3), u(3), u(3)) })
+                  col.addView(act, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(12) })
+
+                  val kb = listOf("abcdef", "ghijkl", "mnopqr", "stuvwx", "yz0123", "456789")
+                  for (r in kb) {
+                      val lr = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                      for (ch in r) {
+                          val kv = keyBtn(ch.toString()) { typeKey(ch.toString()) }
+                          keyViews.add(kv)
+                          lr.addView(kv, LinearLayout.LayoutParams(0, u(42), 1f).apply { setMargins(u(3), u(3), u(3), u(3)) })
+                      }
+                      col.addView(lr, LinearLayout.LayoutParams(-1, -2))
+                  }
+                  searchLayer.addView(col, lp(u(312), -2, Gravity.TOP or Gravity.START).apply {
+                      leftMargin = u(110); topMargin = (H * 0.15f).toInt()
+                  })
+
+                  sHead = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; text = "Trending in India" }
+                  tx(sHead, 20f)
+                  searchLayer.addView(sHead, lp(-2, -2, Gravity.TOP or Gravity.START).apply {
+                      leftMargin = u(508); topMargin = (H * 0.07f).toInt()
+                  })
+
+                  val availW = W - u(492) - u(32) - u(16)
+                  sCardW = availW / 4 - u(16)
+                  sCardH = sCardW * 3 / 2
+                  sGrid = RecyclerView(this).apply {
+                      layoutManager = androidx.recyclerview.widget.GridLayoutManager(this@MainActivity, 4)
+                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; isFocusableInTouchMode = false
+                      setPadding(u(8), u(10), u(8), u(40))
+                  }
+                  sAdapter = SearchAdapter()
+                  sGrid.adapter = sAdapter
+                  searchLayer.addView(sGrid, lp(-1, -1).apply {
+                      leftMargin = u(492); topMargin = (H * 0.13f).toInt(); rightMargin = u(32)
+                  })
+
+                  sStatus = TextView(this).apply {
+                      setTextColor(Color.parseColor("#B4B8C8")); gravity = Gravity.CENTER; visibility = View.GONE
+                  }
+                  tx(sStatus, 16f)
+                  searchLayer.addView(sStatus, lp(-2, -2, Gravity.CENTER).apply { leftMargin = u(380) })
+
+                  root.addView(searchLayer, lp(-1, -1))
+              }
+
+              private fun renderInput() {
+                  if (sQuery.isEmpty()) { sInput.setTextColor(Color.parseColor("#7A8099")); sInput.text = "Search shows & movies" }
+                  else { sInput.setTextColor(Color.WHITE); sInput.text = sQuery + "|" }
+              }
+
+              private fun typeKey(k: String) {
+                  if (k == "<") { if (sQuery.isNotEmpty()) sQuery = sQuery.dropLast(1) }
+                  else if (k == " ") { if (sQuery.isNotEmpty() && !sQuery.endsWith(" ")) sQuery += " " }
+                  else if (sQuery.length < 40) sQuery += k
+                  renderInput()
+                  onQueryChanged()
+              }
+
+              private fun onQueryChanged() {
+                  sRun?.let { ui.removeCallbacks(it) }
+                  sTok++
+                  val q = sQuery.trim()
+                  if (q.length < 2) {                                   // minimum 2 letters: below that the trending grid is shown
+                      if (trendItems.isNotEmpty()) showGrid(trendItems, "Trending in India", "")
+                      else loadTrending()
+                      return
+                  }
+                  val tok = sTok
+                  val r = Runnable { doSearch(q, tok) }
+                  sRun = r
+                  ui.postDelayed(r, 450)
+              }
+
+              private fun showGrid(list: List<Item>, head: String, empty: String) {
+                  sItems.clear(); sItems.addAll(list)
+                  sAdapter.notifyDataSetChanged()
+                  sHead.text = head
+                  sGrid.scrollToPosition(0)
+                  if (list.isEmpty()) { sStatus.text = empty; sStatus.visibility = View.VISIBLE } else sStatus.visibility = View.GONE
+              }
+
+              // search / trending asset -> Item that opens a detail page. Shows + movie bundles only.
+              // A plain MOVIE asset is mapped to its MOVIE_BUNDLE parent (that is the id the movie detail page needs).
+              private fun parseSearch(o: JSONObject): Item? {
+                  val it0 = parseItem(o) ?: return null
+                  if (it0.cid.isBlank()) return null
+                  if (it0.sub == SUB_SHOW || it0.sub == SUB_MOVIE_BUNDLE) return it0
+                  if (it0.sub == "MOVIE") {
+                      val ps = o.optJSONArray("parents")
+                      if (ps != null) for (i in 0 until ps.length()) {
+                          val p = ps.optJSONObject(i) ?: continue
+                          val pid = p.optString("parentId")
+                          if (p.optString("parentSubType").equals(SUB_MOVIE_BUNDLE, true) && pid.isNotBlank() && pid != "0")
+                              return it0.copy(id = pid, cid = pid, sub = SUB_MOVIE_BUNDLE)
+                      }
+                  }
+                  return null
+              }
+
+              private fun collectSearch(arr: JSONArray?, out: ArrayList<Item>, seen: HashSet<String>, depth: Int) {
+                  if (arr == null || depth > 3) return
+                  for (i in 0 until arr.length()) {
+                      val c = arr.optJSONObject(i) ?: continue
+                      val p = parseSearch(c)
+                      if (p != null) { if (seen.add(p.cid)) out.add(p); continue }
+                      collectSearch(c.optJSONArray("containers"), out, seen, depth + 1)
+                      collectSearch(c.optJSONArray("assets"), out, seen, depth + 1)
+                  }
+              }
+
+              private fun loadTrending() {
+                  if (trendLoading) return
+                  trendLoading = true
+                  if (sItems.isEmpty()) { sStatus.text = "Loading..."; sStatus.visibility = View.VISIBLE }
+                  Thread {
+                      val j = Api.get(TRENDING_URL)
+                      val list = ArrayList<Item>()
+                      collectSearch(j?.optJSONObject("resultObj")?.optJSONArray("containers"), list, HashSet(), 0)
+                      ui.post {
+                          trendLoading = false
+                          trendItems = list
+                          if (sQuery.trim().length < 2) {
+                              showGrid(list, "Trending in India", "Could not load trending\n" + Api.lastError)
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun doSearch(q: String, tok: Int) {
+                  if (sItems.isEmpty()) { sStatus.text = "Searching..."; sStatus.visibility = View.VISIBLE }
+                  Thread {
+                      val url = SEARCH_URL + java.net.URLEncoder.encode(q, "UTF-8") + "&from=0&to=15"
+                      val j = Api.get(url)
+                      val list = ArrayList<Item>()
+                      collectSearch(j?.optJSONObject("resultObj")?.optJSONArray("containers"), list, HashSet(), 0)
+                      ui.post {
+                          if (tok != sTok || tab != 0) return@post
+                          if (j == null) showGrid(emptyList(), "Search results", "Search failed\n" + Api.lastError)
+                          else showGrid(list, "Search results", "No results found")
+                      }
+                  }.start()
+              }
+
+              private fun openSearch() {
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  content.visibility = View.GONE
+                  status.visibility = View.GONE
+                  searchLayer.visibility = View.VISIBLE
+                  if (sItems.isEmpty()) {
+                      if (sQuery.trim().length >= 2) doSearch(sQuery.trim(), sTok)
+                      else if (trendItems.isNotEmpty()) showGrid(trendItems, "Trending in India", "")
+                      else loadTrending()
+                  }
+                  ui.postDelayed({
+                      if (tab == 0 && !inDetail && !inPlayer) {
+                          if (keyViews.size > 2) keyViews[2].requestFocus() else keyViews.firstOrNull()?.requestFocus()
+                      }
+                  }, 120)
+              }
+
+              private fun openFromSearch(item: Item, card: View) {
+                  lastCard = card
+                  detailFromSearch = true
+                  searchLayer.visibility = View.GONE
+                  openDetail(item, card)
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)',
+              SEARCH_CODE + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('all patches applied')
+          PYEOF
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
