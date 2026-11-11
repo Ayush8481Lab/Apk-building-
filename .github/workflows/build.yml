@@ -339,14 +339,17 @@ jobs:
           // Title PNG size multipliers (relative to the base logo box). Shows / Movies listing = 0.9 x old 1.5, detail page = 0.9 x old 1.8
           const val HOME_LOGO_SCALE = 1.35f
           const val DETAIL_LOGO_SCALE = 1.62f
+          // Card / promo rows (no header): full screen width, glued to the top of the screen. Max height of the banner as a share of the screen height.
+          const val CARD_MAX_H = 0.56f
 
           // ---- IMAGE WIDTHS (CDN params: ?h=auto&w=<n>&q=eco). Smaller = much faster download + decode. ----
-          const val W_LOGO = 700               // title image = masthead_logo_rectangualar ONLY, ?h=auto&w=700&q=eco
+          const val W_LOGO = 700               // title image (masthead_logo_rectangualar -> masthead_logo -> launcher_logo), ?h=auto&w=700&q=eco
           const val W_BG = 1200                // all background banners
           const val W_PORTRAIT = 500           // portrait cards (shown ~170-260px wide, 500 is already 2x sharp)
           const val W_SPOT = 600               // spotlight strips
           const val W_EP = 480                 // episode thumbnails (shown ~310-460px wide)
           const val W_THUMB = 1000             // episode / movie thumbnail shown full screen while the player is loading / buffering
+          const val W_CARD = 1280              // full screen card / promo banners
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
@@ -356,14 +359,14 @@ jobs:
               val cta: String = "",                 // sony://asset/<id> | sony://page/<slug>-<id>  (promo / card / square tiles)
               val subtitle: String = "",
               val cardImg: String? = null,          // image of a card / square / promo tile
-              val launcher: Boolean = false,        // LAUNCHER_ITEM style tile: no hero (banner / title) on focus
+              val launcher: Boolean = false,        // LAUNCHER_ITEM style tile WITHOUT a background image: no hero (banner / title) on focus
               val aspect: Float = 0f                // width / height of a card image (probed), 0 = unknown
           )
 
           // kind: spot | portrait | trending | square | landscape | card
           class Row(val title: String, val spotlight: Boolean, val items: List<Item>, val kind: String = if (spotlight) "spot" else "portrait") {
-              var dw = 0      // card / promo rows: size that fits the real image aspect ratio
-              var dh = 0
+              var dw = 0      // card / promo rows: full screen width
+              var dh = 0      // card / promo rows: height that fits the real image aspect ratio (capped)
           }
           class Season(val id: String, val title: String, val count: Int, val num: Int, val air: Long)
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
@@ -372,6 +375,8 @@ jobs:
           class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>)
           // extra data from the episode DETAIL-V2 response: subtitles (platformVariants[].subtitlesLanguages[]), seek-preview sprite, exact titles
           class EpExtra(val subs: List<SubInfo>, val sprite: String?, val sn: Int, val en: Int, val et: String?)
+          // title image + background that were fetched from the show / movie DETAIL-V2 api for a listing item that came without them
+          class Enr(val logo: String?, val bg: String?)
           // one home-style page (Home = 1, Shows = 2, Movies = 3, Sports = 4): own rows, own load state
           class PageState(val td: TabData, val row: Int, val pos: Int)   // back stack entry when a landing page is opened from a tile
           class TabData(val idx: Int, val url: String) {
@@ -808,21 +813,33 @@ jobs:
               return null
           }
 
-          // editorialMetadata.poster_background is a JSON string: {"SONY_ANDROID_TV":"url", ...}
+          // editorialMetadata.poster_background is a JSON string: {"FIRE_TV":"url","SONY_ANDROID_TV":"url", ...}
+          // poster image of ANY tv, FIRE_TV preferred, then the other android tv keys, then whatever key exists.
           fun bgFromJson(js: String?): String? {
               if (js.isNullOrBlank()) return null
               return try {
                   val j = JSONObject(js)
-                  var u = j.optString("SONY_ANDROID_TV")
-                  if (u.isBlank()) u = j.optString("JIO_ANDROID_TV")
-                  if (u.isBlank()) { val k = j.keys(); if (k.hasNext()) u = j.optString(k.next()) }
+                  var u = ""
+                  for (k in listOf("FIRE_TV", "SONY_ANDROID_TV", "JIO_ANDROID_TV", "XIAOMI_ANDROID_TV")) {
+                      u = j.optString(k)
+                      if (u.startsWith("http")) break
+                      u = ""
+                  }
+                  if (u.isBlank()) {
+                      val k = j.keys()
+                      while (k.hasNext()) {
+                          val v = j.optString(k.next())
+                          if (v.startsWith("http")) { u = v; break }
+                      }
+                  }
                   if (u.isBlank()) null else u
               } catch (e: Exception) { null }
           }
 
           // Lenient parser: CONTENT_ITEM and any other slide type that has an image.
           // Launchers / ads (LAUNCHER_ITEM) and image-less (text-only) slides are dropped.
-          // Title image: ONLY masthead_logo_rectangualar (always ?h=auto&w=700&q=eco), no fallbacks.
+          // Title image: masthead_logo_rectangualar (?h=auto&w=700&q=eco), fallback masthead_logo of the listing.
+          //   If both are missing the hero asks the show / movie api for it (see enrichNow in MainActivity).
           // Description priority: shortDescription -> launcher_short_description -> longDescription
           fun parseItem(o: JSONObject): Item? {
               val low = o.optString("layout").lowercase()
@@ -853,7 +870,7 @@ jobs:
               m.optJSONArray("genres")?.optString(0)?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
 
               val desc = m.str("shortDescription") ?: ev("launcher_short_description") ?: m.str("longDescription") ?: ""
-              val logoU = img(s("masthead_logo_rectangualar"), W_LOGO)
+              val logoU = img(s("masthead_logo_rectangualar") ?: s("masthead_logo") ?: ev("launcher_logo"), W_LOGO)
               return Item(id, title, portrait, landscape, bgU, logoU, parts.joinToString(" • "), desc, trailerFrom(o), spotU, cid, sub,
                   obj, m.optInt("season"), m.optInt("episodeNumber"), m.str("episodeTitle") ?: "", m.optInt("duration"), m.optLong("originalAirDate"),
                   "", "", s("square_thumb"), false)
@@ -861,10 +878,16 @@ jobs:
 
           // LAUNCHER_ITEM / card / promo / square tile. Image + cta come from editorialMetadata (item) or metadata (page container itself).
           //   cta: sony://asset/<id> (movie / show / trailer ...)  |  sony://page/<slug>-<id> (landing page)
+          // Hero data of a launcher item:
+          //   background   = editorialMetadata.poster_background (json of tv images, FIRE_TV preferred, any tv otherwise)
+          //   title image  = editorialMetadata.launcher_logo
+          //   description  = editorialMetadata.launcher_short_description
+          // Tiles without a poster_background (pure promo cards) get launcher = true => no hero on focus.
           fun parseLauncher(o: JSONObject): Item? {
               val ed = o.optJSONObject("editorialMetadata") ?: JSONObject()
               val m = o.optJSONObject("metadata") ?: JSONObject()
               val am = o.optJSONObject("assetMetadata") ?: JSONObject()
+              val ae = am.optJSONObject("emfAttributes") ?: JSONObject()
               fun pick(vararg keys: String): String? {
                   for (src in listOf(ed, m)) for (k in keys) { val v = src.str(k); if (v != null) return v }
                   return null
@@ -883,7 +906,7 @@ jobs:
                       val ks = src.keys()
                       while (ks.hasNext()) {
                           val k = ks.next()
-                          if (k.contains("logo", true)) continue
+                          if (k.contains("logo", true) || k.contains("background", true)) continue
                           val v = src.str(k) ?: continue
                           if (v.startsWith("http") && rx.containsMatchIn(v)) { image = v; break }
                       }
@@ -893,10 +916,15 @@ jobs:
               val cta = pick("cta") ?: ""
               val aid = am.str("contentId") ?: ""
               val aSub = (am.str("objectSubtype") ?: "").uppercase()
-              val title = am.str("title") ?: pick("title", "card_name", "label") ?: ""
+              val title = am.str("title") ?: ed.str("card_name") ?: pick("title", "label") ?: ""
               val subtitle = pick("sub_title", "subtitle", "sub_title_txt", "short_description", "description") ?: ""
-              return Item(o.optString("id"), title, image, image, null, null, "", "", null, null, aid, aSub, "LAUNCHER",
-                  0, 0, am.str("episodeTitle") ?: "", 0, 0L, cta, subtitle, image, true)
+              val poster = pick("poster", "mweb_poster")
+              val land = pick("landscape_image", "thumbnail")
+              val bgU = bgFromJson(ed.str("poster_background")) ?: bgFromJson(m.str("poster_background"))
+              val logoU = img(pick("launcher_logo") ?: ae.str("masthead_logo_rectangualar") ?: ae.str("masthead_logo"), W_LOGO)
+              val desc = ed.str("launcher_short_description") ?: ""
+              return Item(o.optString("id"), title, poster ?: image, land ?: image, bgU, logoU, "", desc, null, null, aid, aSub, "LAUNCHER",
+                  0, 0, am.str("episodeTitle") ?: "", 0, 0L, cta, subtitle, image, bgU == null)
           }
 
           // reads only the image header => width / height of a card image (any aspect ratio is fitted)
@@ -994,16 +1022,20 @@ jobs:
               return DetailData(sorted, emb, latest)
           }
 
-          // detail page image urls: title = masthead_logo_rectangualar only (w=700), background w=1200
+          // detail page image urls: title = masthead_logo_rectangualar (fallback masthead_logo) w=700, background w=1200
+          // On a show / movie detail response the title image is always available.
           fun detLogoUrl(show: JSONObject): String? {
               val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes") ?: return null
-              return img(e.str("masthead_logo_rectangualar"), W_LOGO)
+              return img(e.str("masthead_logo_rectangualar") ?: e.str("masthead_logo"), W_LOGO)
           }
 
-          fun detBgUrl(show: JSONObject): String? {
+          // raw (not resized) background url of a detail container
+          fun rawBgOf(show: JSONObject): String? {
               val e = show.optJSONObject("metadata")?.optJSONObject("emfAttributes") ?: return null
-              return img(e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail"), W_BG)
+              return e.str("tv_background_image") ?: e.str("detail_cover_bg_V2") ?: e.str("thumbnail")
           }
+
+          fun detBgUrl(show: JSONObject): String? = img(rawBgOf(show), W_BG)
 
           class MainActivity : Activity() {
               private val ui = Handler(Looper.getMainLooper())
@@ -1049,6 +1081,7 @@ jobs:
               private var advanceRun: Runnable? = null
               private var revealed = false
               private var heroToken = 0
+              private var cardMode = false                   // focused row is a card / promo row: list is full screen, banner glued to the top
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var sqS = 0; private var lsW = 0; private var lsH = 0; private var rankW = 0; private var bannerW = 0; private var bannerH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
@@ -1067,6 +1100,10 @@ jobs:
               private var curPos = 0
               private var spotLoopOn = false
               private val trailerCache = ConcurrentHashMap<String, String>()
+
+              // title image + banner fetched from the show / movie api for listing items that came without them. key = content id
+              private val enrichCache = ConcurrentHashMap<String, Enr>()
+              private val enrichBusy: MutableSet<String> = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
               // detail json cache (filled in the background when a card gets focus => detail page opens instantly). key = s<id> (show) / m<id> (movie)
               private val detailCache = object : LinkedHashMap<String, JSONObject>(16, 0.75f, true) {
@@ -1236,7 +1273,7 @@ jobs:
                   sqS = (cardH * 0.72f).toInt()                                       // square tiles (title + subtitle under them)
                   lsH = (cardH * 0.62f).toInt(); lsW = lsH * 16 / 9                   // landscape tiles
                   rankW = (cardW * 0.62f).toInt()                                     // room for the big rank number (trending)
-                  bannerW = (W * 0.80f).toInt(); bannerH = min(cardH, (bannerW / 5.4f).toInt())   // card / promo banner
+                  bannerW = W; bannerH = min(cardH, (bannerW / 5.4f).toInt())        // card / promo banner = full screen width
                   padV = (H * 0.024f).toInt(); titleH = (H * 0.06f).toInt()
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
@@ -1351,7 +1388,9 @@ jobs:
                       leftMargin = u(CONTENT_LEFT); bottomMargin = rvH + (H * 0.008f).toInt() + u(10)      // details sit right above the rows, title png above them
                   })
 
-                  // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll
+                  // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll.
+                  // The list spans the FULL screen width (card / promo rows are edge to edge); normal rows add their own left padding.
+                  // Normal mode: one row high, glued to the bottom. Card mode: full screen high (see setCardMode).
                   rowRv = object : RecyclerView(this@MainActivity) {
                       override fun requestChildRectangleOnScreen(child: View, rect: Rect, immediate: Boolean): Boolean = false
                   }.apply {
@@ -1360,13 +1399,13 @@ jobs:
                       itemAnimator = null
                       overScrollMode = View.OVER_SCROLL_NEVER
                       isFocusable = false; isFocusableInTouchMode = false
-                      setHasFixedSize(true)
+                      setHasFixedSize(false)
                       setItemViewCacheSize(6)
                       setPadding(0, 0, 0, rvH - rowH)
                   }
                   rowAdapter = RowAdapter()
                   rowRv.adapter = rowAdapter
-                  content.addView(rowRv, lp(-1, rvH, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.008f).toInt() })
+                  content.addView(rowRv, lp(-1, rvH, Gravity.BOTTOM).apply { leftMargin = 0; bottomMargin = (H * 0.008f).toInt() })
 
                   // page skeleton (shown while the page api is loading)
                   skelHome = buildHomeSkel()
@@ -1866,6 +1905,7 @@ jobs:
                   rows = td.rows
                   curRow = -1; curPos = 0; lastSnap = -1
                   hero = null; revealed = false
+                  setCardMode(false)
                   Prefetch.gate = true
                   info.animate().cancel(); info.alpha = 0f
                   bg.animate().cancel(); bg.alpha = 0f
@@ -1991,6 +2031,7 @@ jobs:
               private fun moveRow(delta: Int) {
                   val target = curRow + delta
                   if (target < 0 || target >= rows.size) return
+                  setCardMode(rows[target].kind == "card")           // list size is ready BEFORE the scroll starts
                   focusRowFirst(target, 14)
               }
 
@@ -2249,12 +2290,11 @@ jobs:
                   }.start()
               }
 
-              // card / promo row: biggest size that fits the image aspect ratio (wide strip or tall poster alike)
+              // card / promo row: EDGE TO EDGE (full screen width), height follows the image aspect ratio (capped)
               private fun cardDims(r: Row) {
                   val a = r.items.firstOrNull()?.aspect?.takeIf { it > 0.2f } ?: 5.4f
-                  val maxH = (cardH * 0.9f).toInt()
-                  val w = min(bannerW, (maxH * a).toInt())
-                  r.dw = w; r.dh = (w / a).toInt()
+                  r.dw = W
+                  r.dh = min((W / a).toInt(), (H * CARD_MAX_H).toInt())
               }
 
               private fun addRow(td: TabData, r: Row) {
@@ -2266,7 +2306,10 @@ jobs:
                       if (isHomeTab() && !inDetail) status.visibility = View.GONE
                       if (rows.size == 1) focusFirst(12)
                   }
-                  if (r.spotlight) r.items.forEach { prefetchHero(it) }
+                  if (r.spotlight) {
+                      r.items.forEach { prefetchHero(it) }
+                      r.items.take(6).forEach { enrichAsync(it) }
+                  }
                   else if (td.rows.size <= 6) prefetchRow(r, 12)
               }
 
@@ -2285,6 +2328,35 @@ jobs:
                   val j = Api.get(DETAIL_URL + cid + (if (movie) MOVIE_DETAIL_Q else ""))
                   if (j != null) synchronized(detailCache) { detailCache[key] = j }
                   return j
+              }
+
+              // ---------------------------------------------------------------- Missing title image / banner => ask the show / movie api
+              // Listing items (home / sports / launcher tiles ...) may come without a title image or banner.
+              // Title image chain: masthead_logo_rectangualar -> masthead_logo (listing, see parseItem) -> DETAIL-V2 of the show / movie
+              // (the detail page always has it). SHOW items use the show api, MOVIE_BUNDLE items use the movie api.
+              private fun needsEnrich(i: Item) = i.cid.isNotBlank() && (i.logo == null || (i.bg == null && i.spot == null))
+
+              private fun mergeEnr(i: Item): Item {
+                  val e = enrichCache[i.cid] ?: return i
+                  return i.copy(logo = i.logo ?: e.logo, bg = i.bg ?: e.bg)
+              }
+
+              // BLOCKING (background thread only). A failed request is not cached, so it is tried again next time.
+              private fun enrichNow(i: Item) {
+                  if (!needsEnrich(i) || enrichCache.containsKey(i.cid)) return
+                  val j = fetchDetail(i.cid, i.sub == SUB_MOVIE_BUNDLE) ?: return
+                  val c = j.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
+                  val lg = if (c != null) detLogoUrl(c) else null
+                  val bgRaw = if (c != null) rawBgOf(c) else null
+                  enrichCache[i.cid] = Enr(lg, bgRaw)
+                  Prefetch.add(img(bgRaw, W_BG), true)
+                  Prefetch.add(lg, true)
+              }
+
+              // same thing in the background (neighbour cards / first items of a row), so the hero swap is instant later
+              private fun enrichAsync(i: Item) {
+                  if (!needsEnrich(i) || enrichCache.containsKey(i.cid) || !enrichBusy.add(i.cid)) return
+                  Api.pool.execute { try { enrichNow(i) } finally { enrichBusy.remove(i.cid) } }
               }
 
               // focused SHOW / MOVIE_BUNDLE: warm everything the detail page needs, ahead of time.
@@ -2316,10 +2388,12 @@ jobs:
               private fun cardUrl(spot: Boolean, i: Item) =
                   if (spot) img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, W_SPOT) else img(i.portrait ?: i.landscape ?: i.bg, W_PORTRAIT)
               private fun prefetchHero(i: Item, first: Boolean = false) {
-                  Prefetch.add(heroUrl(i), first); Prefetch.add(i.logo, first)
+                  val m = mergeEnr(i)
+                  Prefetch.add(heroUrl(m), first); Prefetch.add(m.logo, first)
               }
               // decode banner + title image of a card into memory BEFORE it gets focus => hero swap is instant
-              private fun warmHero(i: Item) {
+              private fun warmHero(i0: Item) {
+                  val i = mergeEnr(i0)
                   heroUrl(i)?.let { bgReq(it).priority(Priority.NORMAL).preload() }
                   if (i.logo != null) logoReq(i.logo, homeLogoW, homeLogoH).priority(Priority.NORMAL).preload()
               }
@@ -2328,23 +2402,49 @@ jobs:
                       Prefetch.add(rowImg(r.kind, it))
                       if (!r.spotlight) Prefetch.add(it.logo)          // title images: ready before the card is focused
                   }
-                  r.items.take(3).filter { !it.launcher }.forEach { prefetchHero(it) }
+                  r.items.take(3).filter { !it.launcher }.forEach { prefetchHero(it); enrichAsync(it) }
               }
 
               private fun isSpotRow() = rows.getOrNull(curRow)?.spotlight == true
 
+              // Card / promo row focused: the list becomes FULL SCREEN high, the banner row sits at the very top of the screen
+              // (where the header / title area normally is) and the rows after it fill the space that is left below.
+              // Any other row: back to the normal "one row at the bottom" list under the hero.
+              private fun setCardMode(on: Boolean) {
+                  if (on == cardMode) return
+                  cardMode = on
+                  val l = rowRv.layoutParams as FrameLayout.LayoutParams
+                  l.height = if (on) FrameLayout.LayoutParams.MATCH_PARENT else rvH
+                  l.bottomMargin = if (on) 0 else (H * 0.008f).toInt()
+                  rowRv.layoutParams = l
+              }
+
+              // no banner / title / trailer (card rows have no header)
+              private fun hideHero() {
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  hero = null; revealed = false
+                  Prefetch.gate = true
+                  info.animate().cancel(); info.alpha = 0f
+                  bg.animate().cancel(); bg.alpha = 0f
+              }
+
               private fun onCardFocus(item: Item, row: Row, pos: Int, rowPos: Int) {
                   if (inDetail || inPlayer) return
                   curRow = rowPos; curPos = pos
+                  val cm = row.kind == "card"
+                  setCardMode(cm)
                   snapTo(rowPos)
                   heroRun?.let { ui.removeCallbacks(it) }
-                  if (item.launcher) return                    // promo / card / square tiles have no hero banner
+                  if (cm) { hideHero(); return }
+                  if (item.launcher) return                    // tiles without a poster background have no hero
                   val r = Runnable {
                       showHero(item)
                       // aggressive look-ahead: banners + titles of the next cards (downloaded AND decoded), detail data of the neighbours
-                      row.items.getOrNull(pos + 1)?.takeIf { !it.launcher }?.let { prefetchHero(it, true); warmHero(it) }
-                      row.items.getOrNull(pos + 2)?.takeIf { !it.launcher }?.let { prefetchHero(it, true); warmHero(it) }
-                      row.items.getOrNull(pos - 1)?.takeIf { !it.launcher }?.let { prefetchHero(it); warmHero(it) }
+                      row.items.getOrNull(pos + 1)?.takeIf { !it.launcher }?.let { enrichAsync(it); prefetchHero(it, true); warmHero(it) }
+                      row.items.getOrNull(pos + 2)?.takeIf { !it.launcher }?.let { enrichAsync(it); prefetchHero(it, true); warmHero(it) }
+                      row.items.getOrNull(pos - 1)?.takeIf { !it.launcher }?.let { enrichAsync(it); prefetchHero(it); warmHero(it) }
                       if (!row.spotlight) row.items.getOrNull(pos + 1)?.let { prefetchDetail(it) }
                   }
                   heroRun = r
@@ -2358,14 +2458,16 @@ jobs:
                   smoothVertical(pos)
               }
 
-              // vertical row scroll: fixed ~300ms decelerate glide
+              // vertical row scroll: fixed ~300ms decelerate glide (posted, so a list resize from setCardMode is laid out first)
               private fun smoothVertical(pos: Int) {
-                  val s = object : LinearSmoothScroller(this) {
-                      override fun getVerticalSnapPreference() = SNAP_TO_START
-                      override fun calculateTimeForDeceleration(dx: Int): Int = 300
+                  rowRv.post {
+                      val s = object : LinearSmoothScroller(this) {
+                          override fun getVerticalSnapPreference() = SNAP_TO_START
+                          override fun calculateTimeForDeceleration(dx: Int): Int = 300
+                      }
+                      s.targetPosition = pos
+                      rowRv.layoutManager?.startSmoothScroll(s)
                   }
-                  s.targetPosition = pos
-                  rowRv.layoutManager?.startSmoothScroll(s)
               }
 
               private fun showHero(item: Item) {
@@ -2380,6 +2482,20 @@ jobs:
                   bg.animate().cancel(); bg.animate().alpha(0f).setDuration(100).start()
                   metaTv.text = item.meta
                   descTv.text = item.desc
+                  if (needsEnrich(mergeEnr(item)) && !enrichCache.containsKey(item.cid)) {
+                      // title image / banner missing in the listing => take them from the show / movie api (1.5s safety)
+                      Glide.with(this).clear(bg)
+                      Glide.with(this).clear(logo)
+                      var done = false
+                      val go: () -> Unit = {
+                          if (!done && token == heroToken) { done = true; renderHero(mergeEnr(item), token) }
+                      }
+                      Thread { enrichNow(item); ui.post { go() } }.start()
+                      ui.postDelayed({ go() }, 1500)
+                  } else renderHero(mergeEnr(item), token)
+              }
+
+              private fun renderHero(item: Item, token: Int) {
                   var pending = 1 + (if (item.logo != null) 1 else 0)
                   val listener = doneListener {
                       if (token == heroToken) { pending--; if (pending <= 0) reveal(item, token) }
@@ -2539,7 +2655,7 @@ jobs:
               // ---------------------------------------------------------------- Row kinds (sizes / images) + tile clicks
               private fun rowImg(kind: String, i: Item): String? = when (kind) {
                   "spot" -> img(i.spot ?: i.landscape ?: i.portrait ?: i.bg, W_SPOT)
-                  "card" -> img(i.cardImg ?: i.landscape ?: i.bg, 1000)
+                  "card" -> img(i.cardImg ?: i.landscape ?: i.bg, W_CARD)
                   "square" -> img(i.cardImg ?: i.portrait ?: i.landscape ?: i.bg, 450)
                   "landscape" -> img(i.landscape ?: i.cardImg ?: i.portrait ?: i.bg, W_EP)
                   else -> img(i.portrait ?: i.landscape ?: i.cardImg ?: i.bg, W_PORTRAIT)
@@ -2556,7 +2672,8 @@ jobs:
               private fun imgW(r: Row) = when (r.kind) { "spot" -> stripW; "card" -> r.dw; "square" -> sqS; "landscape" -> lsW; else -> cardW }
               private fun imgH(r: Row) = when (r.kind) { "spot" -> stripH; "card" -> r.dh; "square" -> sqS; "landscape" -> lsH; else -> cardH }
               private fun hasTitle(r: Row) = !(r.spotlight || r.kind == "card" || r.title.isBlank())
-              private fun rowHeight(r: Row) = (if (hasTitle(r)) titleH else 0) + kh(r) + 2 * padV
+              private fun padOf(r: Row) = if (r.kind == "card") 0 else padV            // card rows: no vertical padding, they touch the screen edges
+              private fun rowHeight(r: Row) = (if (hasTitle(r)) titleH else 0) + kh(r) + 2 * padOf(r)
 
               private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
 
@@ -2629,8 +2746,9 @@ jobs:
                   side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
                   content.visibility = View.VISIBLE
                   curBox = videoBox; curVideo = videoView; curBg = bg; curBoxW = homeBoxW; curBoxH = homeBoxH
-                  bg.animate().cancel(); bg.alpha = 1f
-                  info.animate().cancel(); info.alpha = 1f
+                  val hv = if (hero != null) 1f else 0f                 // card rows have no hero
+                  bg.animate().cancel(); bg.alpha = hv
+                  info.animate().cancel(); info.alpha = hv
                   val c = lastCard
                   ui.postDelayed({
                       if (inDetail || inPlayer) return@postDelayed
@@ -2665,7 +2783,8 @@ jobs:
                   epLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                   epLayer.animate().cancel(); epLayer.visibility = View.GONE; epLayer.translationY = H.toFloat()
 
-                  // instant preview from the list item
+                  // instant preview from the list item (title image / banner of the listing, or the ones fetched from the show / movie api)
+                  val pv = mergeEnr(item)
                   showTitle = item.title
                   seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
                   sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
@@ -2679,11 +2798,11 @@ jobs:
                   dBg.animate().cancel(); dBg.alpha = 1f
                   dBox.animate().cancel(); dBox.alpha = 0f; dBox.visibility = View.GONE
                   Glide.with(this).clear(dBg)
-                  val previewBg = img(item.bg ?: item.landscape, W_BG)
+                  val previewBg = img(pv.bg ?: pv.landscape, W_BG)
                   shownBg = previewBg
                   bgBigReq(previewBg).priority(Priority.IMMEDIATE).into(dBg)
-                  shownLogo = item.logo
-                  showDetailLogo(item.logo, item.title)
+                  shownLogo = pv.logo
+                  showDetailLogo(pv.logo, item.title)
                   dTag.visibility = View.GONE
                   dMeta.text = item.meta
                   dDesc.text = item.desc
@@ -2739,7 +2858,7 @@ jobs:
                       if (tok == detailToken) { pending--; if (pending <= 0) fire() }
                   }
                   Prefetch.gate = false
-                  if (needLogo) {                                            // 1) title image (rectangular masthead logo only)
+                  if (needLogo) {                                            // 1) title image (masthead logo)
                       shownLogo = logoUrl
                       showDetailLogo(logoUrl, title, l)
                   } else if (logoUrl == null && shownLogo == null) {
@@ -2913,7 +3032,7 @@ jobs:
                       setExtra(movieExtraRows(e, me))
                   }
 
-                  // title image (masthead_logo_rectangualar, w=700) + background (w=1200) + first episode thumbnails => then the trailer
+                  // title image (masthead logo, w=700) + background (w=1200) + first episode thumbnails => then the trailer
                   val logoUrl = detLogoUrl(show) ?: item.logo
                   val bgUrl = detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)
                   val thumbs: List<String> = if (data == null) emptyList() else
@@ -3100,8 +3219,9 @@ jobs:
                   side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
                   content.visibility = View.VISIBLE
                   curBox = videoBox; curVideo = videoView; curBg = bg; curBoxW = homeBoxW; curBoxH = homeBoxH
-                  bg.animate().cancel(); bg.alpha = 1f
-                  info.animate().cancel(); info.alpha = 1f
+                  val hv = if (hero != null) 1f else 0f                 // card rows have no hero
+                  bg.animate().cancel(); bg.alpha = hv
+                  info.animate().cancel(); info.alpha = hv
                   if (!refocus) return
                   val c = lastCard
                   ui.postDelayed({
@@ -3834,9 +3954,10 @@ jobs:
                           clipChildren = false; clipToPadding = false
                           layoutParams = RecyclerView.LayoutParams(-1, rowH)       // fixed row height => exact snapping
                       }
+                      // the list is full screen wide: normal rows start 80 (old list margin) + 46 (old padding) from the left edge
                       val tv = TextView(this@MainActivity).apply {
                           setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                          gravity = Gravity.CENTER_VERTICAL; setPadding(u(46), 0, 0, 0)
+                          gravity = Gravity.CENTER_VERTICAL; setPadding(u(CONTENT_LEFT), 0, 0, 0)
                           maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                       }
                       tx(tv, 20f)
@@ -3846,7 +3967,7 @@ jobs:
                           overScrollMode = View.OVER_SCROLL_NEVER
                           isFocusable = false; isFocusableInTouchMode = false
                           setHasFixedSize(true); setItemViewCacheSize(6)
-                          setPadding(u(46), padV, u(60), padV)
+                          setPadding(u(CONTENT_LEFT), padV, u(60), padV)
                       }
                       r.addView(tv, LinearLayout.LayoutParams(-1, titleH))
                       r.addView(rv, LinearLayout.LayoutParams(-1, cardH + 2 * padV))
@@ -3859,8 +3980,11 @@ jobs:
                       // spotlight: strip sits at the bottom of its row, title hidden
                       h.title.visibility = if (hasTitle(r)) View.VISIBLE else View.GONE          // no header => no header area, next rows move up
                       h.root.layoutParams = RecyclerView.LayoutParams(-1, rowHeight(r))
+                      // card / promo rows: no side padding, no vertical padding => banner is edge to edge
+                      val card = r.kind == "card"
+                      h.rv.setPadding(if (card) 0 else u(CONTENT_LEFT), padOf(r), if (card) 0 else u(60), padOf(r))
                       val l = h.rv.layoutParams
-                      l.height = kh(r) + 2 * padV
+                      l.height = kh(r) + 2 * padOf(r)
                       h.rv.layoutParams = l
                       h.rv.adapter = CardAdapter(r, pos)
                   }
@@ -3886,15 +4010,16 @@ jobs:
                   }
 
                   override fun onCreateViewHolder(p: ViewGroup, t: Int): CardVH {
+                      val isCard = k == "card"
                       val card = FrameLayout(this@MainActivity).apply {
-                          layoutParams = RecyclerView.LayoutParams(cw, ch).apply { rightMargin = u(12) }
+                          layoutParams = RecyclerView.LayoutParams(cw, ch).apply { rightMargin = if (isCard) 0 else u(12) }
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
                       val grav = (if (k == "trending") Gravity.END else Gravity.START) or Gravity.TOP
                       val iv = ImageView(this@MainActivity).apply {
                           scaleType = ImageView.ScaleType.CENTER_CROP
                           setBackgroundColor(Color.rgb(26, 28, 42))
-                          outlineProvider = roundOutline; clipToOutline = true
+                          if (!isCard) { outlineProvider = roundOutline; clipToOutline = true }     // card banners: square corners, edge to edge
                       }
                       // text-only slide fallback (no image available)
                       val tvl = TextView(this@MainActivity).apply {
@@ -3905,7 +4030,7 @@ jobs:
                       tx(tvl, 14f)
                       val border = View(this@MainActivity).apply {
                           background = GradientDrawable().apply {
-                              setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
+                              setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = if (isCard) 0f else u(8).toFloat()
                           }
                           alpha = 0f
                       }
@@ -3975,7 +4100,7 @@ jobs:
                           a.visibility = if (a.text.isNullOrBlank()) View.GONE else View.VISIBLE
                           b.visibility = if (b.text.isNullOrBlank()) View.GONE else View.VISIBLE
                       }
-                      val sc = if (k == "card") 1.04f else 1.1f
+                      val sc = if (k == "card") 1f else 1.1f          // edge to edge banners are not zoomed (they would be cut at the screen edge)
                       h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f
                       h.card.setOnFocusChangeListener { v, has ->
                           v.animate().scaleX(if (has) sc else 1f).scaleY(if (has) sc else 1f).setDuration(150).start()
