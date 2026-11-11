@@ -356,11 +356,15 @@ jobs:
               val cta: String = "",                 // sony://asset/<id> | sony://page/<slug>-<id>  (promo / card / square tiles)
               val subtitle: String = "",
               val cardImg: String? = null,          // image of a card / square / promo tile
-              val launcher: Boolean = false         // LAUNCHER_ITEM style tile: no hero (banner / title) on focus
+              val launcher: Boolean = false,        // LAUNCHER_ITEM style tile: no hero (banner / title) on focus
+              val aspect: Float = 0f                // width / height of a card image (probed), 0 = unknown
           )
 
           // kind: spot | portrait | trending | square | landscape | card
-          class Row(val title: String, val spotlight: Boolean, val items: List<Item>, val kind: String = if (spotlight) "spot" else "portrait")
+          class Row(val title: String, val spotlight: Boolean, val items: List<Item>, val kind: String = if (spotlight) "spot" else "portrait") {
+              var dw = 0      // card / promo rows: size that fits the real image aspect ratio
+              var dh = 0
+          }
           class Season(val id: String, val title: String, val count: Int, val num: Int, val air: Long)
           class Ep(val id: String, val title: String, val num: Int, val desc: String, val thumb: String?, val dur: Int, val air: Long)
           class DetailData(val seasons: List<Season>, val embedded: Map<String, List<Ep>>, val latest: Ep?)
@@ -895,6 +899,22 @@ jobs:
                   0, 0, am.str("episodeTitle") ?: "", 0, 0L, cta, subtitle, image, true)
           }
 
+          // reads only the image header => width / height of a card image (any aspect ratio is fitted)
+          fun probeAspect(url: String?): Float {
+              if (url == null) return 0f
+              return try {
+                  val req = Request.Builder().url(url).header("User-Agent", STREAM_UA).build()
+                  Net.client.newCall(req).execute().use { r ->
+                      if (!r.isSuccessful) 0f
+                      else {
+                          val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                          BitmapFactory.decodeStream(r.body?.byteStream(), null, o)
+                          if (o.outWidth > 0 && o.outHeight > 0) o.outWidth.toFloat() / o.outHeight else 0f
+                      }
+                  }
+              } catch (e: Exception) { 0f }
+          }
+
           fun parseEp(o: JSONObject?): Ep? {
               if (o == null) return null
               val m = o.optJSONObject("metadata") ?: return null
@@ -1221,7 +1241,9 @@ jobs:
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
-                  homeLogoH = (logoH * HOME_LOGO_SCALE).toInt(); homeLogoW = homeLogoH * 16 / 9   // listing page logo
+                  // listing page logo: title png on top, details right above the rows => limit the logo so everything fits
+                  val maxLogo = H - rvH - (H * 0.008f).toInt() - (H * 0.035f).toInt() - (H * 0.2f).toInt()
+                  homeLogoH = min((logoH * HOME_LOGO_SCALE).toInt(), max(maxLogo, (H * 0.15f).toInt())); homeLogoW = homeLogoH * 16 / 9
                   detLogoH = (logoH * DETAIL_LOGO_SCALE).toInt(); detLogoW = detLogoH * 16 / 9    // detail page logo
                   bgW = min(W, 1200); bgH = bgW * 9 / 16
                   homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
@@ -1263,7 +1285,7 @@ jobs:
                   col.addView(sk(6), LinearLayout.LayoutParams(u(520), u(14)).apply { topMargin = u(16) })
                   col.addView(sk(6), LinearLayout.LayoutParams(u(470), u(14)).apply { topMargin = u(10) })
                   col.addView(sk(6), LinearLayout.LayoutParams(u(380), u(14)).apply { topMargin = u(10) })
-                  f.addView(col, lp(-2, -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
+                  f.addView(col, lp(-2, -2, Gravity.BOTTOM or Gravity.START).apply { leftMargin = u(CONTENT_LEFT); bottomMargin = rvH + (H * 0.008f).toInt() + u(10) })
 
                   val rowBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM }
                   val tl = FrameLayout(this)
@@ -1325,7 +1347,9 @@ jobs:
                   info.addView(titleTv, LinearLayout.LayoutParams(-2, -2))
                   info.addView(metaTv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   info.addView(descTv, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
-                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04).toInt() })
+                  content.addView(info, lp(max((W * 0.42).toInt(), homeLogoW + u(LOGO_SHIFT_X) + u(20)), -2, Gravity.BOTTOM or Gravity.START).apply {
+                      leftMargin = u(CONTENT_LEFT); bottomMargin = rvH + (H * 0.008f).toInt() + u(10)      // details sit right above the rows, title png above them
+                  })
 
                   // vertical rows: we drive scrolling ourselves (smooth, fixed duration), so block the default jump-scroll
                   rowRv = object : RecyclerView(this@MainActivity) {
@@ -2204,6 +2228,12 @@ jobs:
                               }
                           }
                           if (items.isEmpty()) continue
+                          if (j.kind == "card") {                               // any aspect ratio: read the image size first
+                              for (ix in 0 until min(items.size, 3)) {
+                                  val c0 = items[ix]
+                                  if (c0.aspect <= 0f) items[ix] = c0.copy(aspect = probeAspect(img(c0.cardImg ?: c0.landscape, 300)))
+                              }
+                          }
                           val title = if (j.title.isNotBlank()) j.title else (ro?.str("trayTitle") ?: "")
                           val row = Row(title, j.kind == "spot", items, j.kind)
                           ui.post { addRow(td, row) }
@@ -2219,7 +2249,16 @@ jobs:
                   }.start()
               }
 
+              // card / promo row: biggest size that fits the image aspect ratio (wide strip or tall poster alike)
+              private fun cardDims(r: Row) {
+                  val a = r.items.firstOrNull()?.aspect?.takeIf { it > 0.2f } ?: 5.4f
+                  val maxH = (cardH * 0.9f).toInt()
+                  val w = min(bannerW, (maxH * a).toInt())
+                  r.dw = w; r.dh = (w / a).toInt()
+              }
+
               private fun addRow(td: TabData, r: Row) {
+                  if (r.kind == "card") cardDims(r)
                   td.rows.add(r)
                   if (td.rows === rows && shownTd === td) {
                       rowAdapter.notifyItemInserted(rows.size - 1)
@@ -2505,11 +2544,19 @@ jobs:
                   "landscape" -> img(i.landscape ?: i.cardImg ?: i.portrait ?: i.bg, W_EP)
                   else -> img(i.portrait ?: i.landscape ?: i.cardImg ?: i.bg, W_PORTRAIT)
               }
-              // tile (focus frame) size and image size per row kind
-              private fun kw(k: String) = when (k) { "spot" -> stripW; "card" -> bannerW; "square" -> sqS; "landscape" -> lsW; "trending" -> cardW + rankW; else -> cardW }
-              private fun kh(k: String) = when (k) { "spot" -> stripH; "card" -> bannerH; else -> cardH }
-              private fun imgW(k: String) = when (k) { "spot" -> stripW; "card" -> bannerW; "square" -> sqS; "landscape" -> lsW; else -> cardW }
-              private fun imgH(k: String) = when (k) { "spot" -> stripH; "card" -> bannerH; "square" -> sqS; "landscape" -> lsH; else -> cardH }
+              // tile (focus frame) size and image size per row. Rows without header (card / promo / spotlight / blank title) only take their own height.
+              private fun rankSize() = cardH * 0.42f
+              private fun numW(r: Row): Int {                       // width of the biggest rank number of a trending row (1 or 2 digits)
+                  val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                  p.typeface = Typeface.DEFAULT_BOLD; p.textSize = rankSize()
+                  return p.measureText("0".repeat(r.items.size.toString().length)).toInt() + u(4)
+              }
+              private fun kw(r: Row) = when (r.kind) { "spot" -> stripW; "card" -> r.dw; "square" -> sqS; "landscape" -> lsW; "trending" -> cardW + numW(r); else -> cardW }
+              private fun kh(r: Row) = when (r.kind) { "spot" -> stripH; "card" -> r.dh; else -> cardH }
+              private fun imgW(r: Row) = when (r.kind) { "spot" -> stripW; "card" -> r.dw; "square" -> sqS; "landscape" -> lsW; else -> cardW }
+              private fun imgH(r: Row) = when (r.kind) { "spot" -> stripH; "card" -> r.dh; "square" -> sqS; "landscape" -> lsH; else -> cardH }
+              private fun hasTitle(r: Row) = !(r.spotlight || r.kind == "card" || r.title.isBlank())
+              private fun rowHeight(r: Row) = (if (hasTitle(r)) titleH else 0) + kh(r) + 2 * padV
 
               private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
 
@@ -3810,9 +3857,10 @@ jobs:
                       val r = rows[pos]
                       h.title.text = r.title
                       // spotlight: strip sits at the bottom of its row, title hidden
-                      h.title.visibility = if (r.spotlight || r.kind == "card") View.GONE else View.VISIBLE   // card / promo rows have no header
+                      h.title.visibility = if (hasTitle(r)) View.VISIBLE else View.GONE          // no header => no header area, next rows move up
+                      h.root.layoutParams = RecyclerView.LayoutParams(-1, rowHeight(r))
                       val l = h.rv.layoutParams
-                      l.height = kh(r.kind) + 2 * padV
+                      l.height = kh(r) + 2 * padV
                       h.rv.layoutParams = l
                       h.rv.adapter = CardAdapter(r, pos)
                   }
@@ -3820,10 +3868,11 @@ jobs:
 
               inner class CardAdapter(private val row: Row, private val rowPos: Int) : RecyclerView.Adapter<CardVH>() {
                   private val k = row.kind
-                  private val cw = kw(k)          // focus frame
-                  private val ch = kh(k)
-                  private val iw = imgW(k)        // image inside the frame
-                  private val ih = imgH(k)
+                  private val cw = kw(row)          // focus frame
+                  private val ch = kh(row)
+                  private val iw = imgW(row)        // image inside the frame
+                  private val ih = imgH(row)
+                  private val nw = if (k == "trending") numW(row) else 0
                   override fun getItemCount() = row.items.size
 
                   // decode the next cards into memory + download their title images ahead of the focus
@@ -3862,14 +3911,19 @@ jobs:
                       }
                       var rank: TextView? = null
                       if (k == "trending") {                         // big rank number left of the poster (1, 2, 3 ...), poster covers its right edge
+                          val pm = Paint()
+                          pm.typeface = Typeface.DEFAULT_BOLD; pm.textSize = rankSize()
+                          val desc = pm.fontMetrics.descent
                           val rt = TextView(this@MainActivity).apply {
                               setTextColor(Color.parseColor("#8E8E99")); typeface = Typeface.DEFAULT_BOLD
-                              gravity = Gravity.BOTTOM or Gravity.START
+                              gravity = Gravity.BOTTOM or Gravity.END           // right edge of the number = left edge of the poster
                               includeFontPadding = false
-                              setTextSize(TypedValue.COMPLEX_UNIT_PX, ih * 0.62f)
+                              setTextSize(TypedValue.COMPLEX_UNIT_PX, rankSize())
+                              translationY = desc                                // baseline sits on the bottom edge of the poster
+                              translationX = rankSize() * 0.05f
                           }
                           rank = rt
-                          card.addView(rt, FrameLayout.LayoutParams(rankW + u(40), ih, Gravity.TOP or Gravity.START))
+                          card.addView(rt, FrameLayout.LayoutParams(nw, ih, Gravity.TOP or Gravity.START))
                       }
                       card.addView(iv, FrameLayout.LayoutParams(iw, ih, grav))
                       card.addView(tvl, FrameLayout.LayoutParams(iw, ih, grav))
