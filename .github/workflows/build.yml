@@ -150,6 +150,12 @@ jobs:
           cat > app/src/main/res/drawable/ic_check.xml <<'EOF'
           <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M9,16.17L4.83,12l-1.42,1.41L9,19 21,7l-1.41,-1.41z"/></vector>
           EOF
+          cat > app/src/main/res/drawable/ic_add.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M19,13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></vector>
+          EOF
+          cat > app/src/main/res/drawable/ic_trailer.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M19,4H5C3.9,4 3,4.9 3,6v12c0,1.1 0.9,2 2,2h14c1.1,0 2,-0.9 2,-2V6c0,-1.1 -0.9,-2 -2,-2zM19,18H5V6h14v12zM10,16l6,-4 -6,-4z"/></vector>
+          EOF
 
           cat > app/src/main/java/com/example/livtv/App.kt <<'EOF'
           package com.example.livtv
@@ -286,7 +292,9 @@ jobs:
           const val BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP"
           const val SHOWS_URL = "$BASE/PAGE-V2/2240?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
           const val MOVIES_URL = "$BASE/PAGE-V2/399?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
-          // Home (tab 1) and Sports (tab 4) base pages: rows can hold SHOW / MOVIE_BUNDLE (detail page) and VOD (episode / movie / clip -> player) items
+          // Originals tab (same loader / same UI as Home)
+          const val ORIGINALS_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP/PAGE-V2/5193?from=0&to=100&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
+          // Home (tab 1) and Sports (tab 5) base pages: rows can hold SHOW / MOVIE_BUNDLE (detail page) and VOD (episode / movie / clip -> player) items
           const val HOME_BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/MWEB/IN/UP"
           const val HOME_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP/PAGE-V2/34355?from=0&to=100&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
           // any landing page opened from a "sony://page/<slug>-<id>" cta (same loader, same UI as the home page)
@@ -331,8 +339,7 @@ jobs:
           )
 
           // ---- LAYOUT KNOBS (units are for a 1280px wide screen, scaled automatically) ----
-          // Left edge of title image + tag + meta + description + buttons. SAME value on the Shows page and the detail page.
-          // 126 = exactly where the row titles / first card start on the Shows page.
+          // Left edge of title image + tag + meta + description + buttons on the LISTING pages. 126 = where the row titles / first card start.
           const val CONTENT_LEFT = 126
           // Extra push of the title PNG to the right (0 = artwork flush with the text under it, try 20, 40 ... to move it more right)
           const val LOGO_SHIFT_X = 0
@@ -351,6 +358,8 @@ jobs:
           const val RANK_TIGHT = -0.10f
           const val RANK_OVERLAP = 0.03f
           const val RANK_GAP = 8
+          // resume watching: a program stopped before this share of its length shows "Resume" on its detail page
+          const val RESUME_MAX = 0.95f
 
           // ---- IMAGE WIDTHS (CDN params: ?h=auto&w=<n>&q=eco). Smaller = much faster download + decode. ----
           const val W_LOGO = 700               // title image (masthead_logo_rectangualar -> masthead_logo -> launcher_logo), ?h=auto&w=700&q=eco
@@ -388,12 +397,92 @@ jobs:
           class EpExtra(val subs: List<SubInfo>, val sprite: String?, val sn: Int, val en: Int, val et: String?)
           // title image + background that were fetched from the show / movie DETAIL-V2 api for a listing item that came without them
           class Enr(val logo: String?, val bg: String?)
-          // one home-style page (Home = 1, Shows = 2, Movies = 3, Sports = 4): own rows, own load state
+          // one home-style page (Home = 1, My List = 2, Originals = 3, TV Shows = 4, Sports = 5, Movies = 6): own rows, own load state
           class PageState(val td: TabData, val row: Int, val pos: Int)   // back stack entry when a landing page is opened from a tile
           class TabData(val idx: Int, val url: String) {
               val rows = ArrayList<Row>()
               var loaded = false
               var loading = false
+          }
+          // resume watching data of one show / movie (key = content id of the show / movie bundle)
+          class Resume(val showCid: String, val sub: String, val epId: String, val title: String, val num: Int, val season: Int,
+                       val thumb: String?, val dur: Int, val pos: Long, val ts: Long)
+
+          // Saved data: "My List" + "resume watching" (SharedPreferences)
+          object Store {
+              private fun sp() = Prefetch.app.getSharedPreferences("liv", Context.MODE_PRIVATE)
+
+              fun myList(): ArrayList<Item> {
+                  val out = ArrayList<Item>()
+                  try {
+                      val a = JSONArray(sp().getString("list", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.optJSONObject(i) ?: continue
+                          val cid = o.str("cid") ?: continue
+                          out.add(Item(cid, o.optString("title"), o.str("portrait"), o.str("landscape"), o.str("bg"), o.str("logo"),
+                              o.optString("meta"), o.optString("desc"), null, null, cid, o.optString("sub"), OBJ_VOD, 0, 0, "", 0, 0L))
+                      }
+                  } catch (e: Exception) { }
+                  return out
+              }
+
+              fun inList(cid: String): Boolean = myList().any { it.cid == cid }
+
+              // returns true when the item is IN the list afterwards
+              fun toggle(i: Item): Boolean {
+                  val l = myList()
+                  val had = l.removeAll { it.cid == i.cid }
+                  if (!had) l.add(0, i)
+                  val a = JSONArray()
+                  for (x in l) a.put(JSONObject().apply {
+                      put("cid", x.cid); put("title", x.title); put("sub", x.sub)
+                      put("portrait", x.portrait ?: JSONObject.NULL)
+                      put("landscape", x.landscape ?: JSONObject.NULL)
+                      put("bg", x.bg ?: JSONObject.NULL)
+                      put("logo", x.logo ?: JSONObject.NULL)
+                      put("meta", x.meta); put("desc", x.desc)
+                  })
+                  sp().edit().putString("list", a.toString()).apply()
+                  return !had
+              }
+
+              fun getResume(k: String): Resume? = try {
+                  val o = JSONObject(sp().getString("resume", "{}")).optJSONObject(k)
+                  if (o == null) null else Resume(k, o.optString("sub"), o.optString("epId"), o.optString("title"), o.optInt("num"),
+                      o.optInt("season"), o.str("thumb"), o.optInt("dur"), o.optLong("pos"), o.optLong("ts"))
+              } catch (e: Exception) { null }
+
+              fun putResume(r: Resume) {
+                  try {
+                      val all = JSONObject(sp().getString("resume", "{}"))
+                      all.put(r.showCid, JSONObject().apply {
+                          put("sub", r.sub); put("epId", r.epId); put("title", r.title); put("num", r.num); put("season", r.season)
+                          put("thumb", r.thumb ?: JSONObject.NULL); put("dur", r.dur); put("pos", r.pos); put("ts", r.ts)
+                      })
+                      sp().edit().putString("resume", all.toString()).apply()
+                  } catch (e: Exception) { }
+              }
+
+              fun clearResume(k: String) {
+                  try {
+                      val all = JSONObject(sp().getString("resume", "{}"))
+                      if (all.has(k)) { all.remove(k); sp().edit().putString("resume", all.toString()).apply() }
+                  } catch (e: Exception) { }
+              }
+          }
+
+          // thin progress bar of the resume block (white track, yellow fill)
+          class BarView(c: Context) : View(c) {
+              var frac = 0f
+              private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
+              override fun onDraw(cv: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  pt.color = Color.argb(90, 255, 255, 255)
+                  cv.drawRoundRect(0f, 0f, w, h, h, h, pt)
+                  pt.color = Color.parseColor("#FFC107")
+                  cv.drawRoundRect(0f, 0f, w * frac.coerceIn(0f, 1f), h, h, h, pt)
+              }
           }
 
           // Modern skeleton block: dark rounded rect with a soft light band sweeping across it (all blocks sweep in sync).
@@ -688,6 +777,12 @@ jobs:
               val m = (s % 3600) / 60
               val sec = s % 60
               return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%02d:%02d".format(m, sec)
+          }
+
+          // "1h 12m left" / "23m left" (resume block)
+          fun fmtMinLeft(posMs: Long, durMs: Long): String {
+              val mins = ((durMs - posMs) / 60000L).coerceAtLeast(1L)
+              return if (mins >= 60) "${mins / 60}h ${mins % 60}m left" else "${mins}m left"
           }
 
           // old image host -> new image host (png / jpg / everything), path + params untouched
@@ -1056,7 +1151,7 @@ jobs:
               private fun tx(t: TextView, size: Float) = t.setTextSize(TypedValue.COMPLEX_UNIT_PX, size * W / 1280f)
               private fun sk(r: Int = 8) = ShimmerView(this, u(r).toFloat())
 
-              // ---- home (Shows = tab 2, Movies = tab 3 share the same UI, only the rows differ)
+              // ---- home (Home = 1, My List = 2, Originals = 3, TV Shows = 4, Sports = 5, Movies = 6 share the same UI, only the rows differ)
               private lateinit var root: FrameLayout
               private lateinit var content: FrameLayout
               private lateinit var skelHome: FrameLayout
@@ -1075,8 +1170,12 @@ jobs:
               private lateinit var side: LinearLayout
               private lateinit var brand: TextView
               private lateinit var rowAdapter: RowAdapter
-              private val tabViews = ArrayList<ImageView>()
-              private val tabNames = listOf("Search", "Home", "Shows", "Movies", "Sports", "Settings")
+              // sidebar: every tab = icon + label (label only visible while the sidebar is expanded = a tab has focus)
+              private val tabViews = ArrayList<LinearLayout>()
+              private val tabIcons = ArrayList<ImageView>()
+              private val tabLabels = ArrayList<TextView>()
+              private var sideOpen = false
+              private val tabNames = listOf("Search", "Home", "My List", "Originals", "TV Shows", "Sports", "Movies")
               private val homeTabs = HashMap<Int, TabData>()
               private var shownTd: TabData? = null           // page whose rows are currently in the list (home tab or opened landing page)
               private val shownTab: Int get() = shownTd?.idx ?: -1
@@ -1093,6 +1192,7 @@ jobs:
               private var revealed = false
               private var heroToken = 0
               private var cardMode = false                   // focused row is a card / promo row: list is full screen, banner glued to the top
+              private var modeChanged = false                // list size just changed (card mode on / off): the next vertical scroll is an instant jump (no ghost row)
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var sqS = 0; private var lsW = 0; private var lsH = 0; private var rankW = 0; private var bannerW = 0; private var bannerH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
@@ -1145,8 +1245,12 @@ jobs:
               private lateinit var dSkel: LinearLayout
               private lateinit var dExtra: LinearLayout       // movie details: audio / subtitles / cast / director / advisory / quality
               private lateinit var dWatch: TextView
-              private lateinit var dPlus: TextView
-              private lateinit var dTrailer: TextView         // "Watch Trailer" (opens the trailer in the player UI)
+              private lateinit var dPlus: LinearLayout        // "+ My List" (icon only, label appears on focus)
+              private lateinit var dTrailer: LinearLayout     // "Watch Trailer" (icon only, label appears on focus)
+              private lateinit var dResumeBox: LinearLayout   // Resume (episode no) + progress bar + time left
+              private lateinit var dResumeBtn: TextView
+              private lateinit var dResumeBar: BarView
+              private lateinit var dResumeTime: TextView
               private lateinit var dHint: TextView
               private lateinit var epTab: TextView
               private lateinit var sScroll: ScrollView
@@ -1162,6 +1266,7 @@ jobs:
               private var inDetail = false
               private var epMode = false
               private var detailMovie = false                 // the open detail page is a movie (no episodes page)
+              private var detailItem: Item? = null            // the show / movie bundle of the open detail page (My List + resume key)
               private var movieEp: Ep? = null                 // the MOVIE child asset of the open movie bundle
               private var trailerEp: Ep? = null
               private var trailerPlayUrl: String? = null
@@ -1219,6 +1324,13 @@ jobs:
               private var qualitySel = 0               // 0 = auto, else selected height
               private var firstFrame = false
 
+              // ---- resume watching
+              private var playTrack = false            // the running program is saved for "Resume" (episodes / movies opened from a detail page)
+              private var playShowCid = ""
+              private var playShowSub = ""
+              private var pendingStart = 0L            // start position (ms) of the next stream (resume)
+              private var saveTick = 0
+
               // ---- seek preview (sprite sheet, Netflix style)
               private var scrubPos = -1L               // >= 0 while the user is scrubbing (seek is applied after a short pause / OK)
               private val spriteLock = Any()
@@ -1239,6 +1351,8 @@ jobs:
               private val tickRun = object : Runnable {
                   override fun run() {
                       updateProgress()
+                      saveTick++
+                      if (saveTick % 10 == 0) saveProgress()          // every ~5s
                       if (inPlayer) ui.postDelayed(this, 500)
                   }
               }
@@ -1314,9 +1428,11 @@ jobs:
                   seasonColW = (W * 0.2f).toInt()
                   drawerW = (W * 0.36f).toInt()
                   homeTabs[1] = TabData(1, HOME_URL)
-                  homeTabs[2] = TabData(2, SHOWS_URL)
-                  homeTabs[3] = TabData(3, MOVIES_URL)
-                  homeTabs[4] = TabData(4, SPORTS_URL)
+                  homeTabs[2] = TabData(2, "")                  // My List: rows come from the saved list, no api
+                  homeTabs[3] = TabData(3, ORIGINALS_URL)
+                  homeTabs[4] = TabData(4, SHOWS_URL)
+                  homeTabs[5] = TabData(5, SPORTS_URL)
+                  homeTabs[6] = TabData(6, MOVIES_URL)
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -1447,24 +1563,34 @@ jobs:
                   tx(status, 18f)
                   root.addView(status, lp(-1, -2, Gravity.CENTER))
 
-                  // sidebar
+                  // sidebar: icons only; when a tab gets focus the bar expands and shows the names, focused tab = white pill
                   side = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(10), 0, u(10), 0)
                       background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                           intArrayOf(Color.argb(230, 0, 0, 0), Color.argb(0, 0, 0, 0)))
                   }
-                  val icons = intArrayOf(R.drawable.ic_search, R.drawable.ic_home, R.drawable.ic_tv,
-                      R.drawable.ic_movie, R.drawable.ic_sports, R.drawable.ic_settings)
+                  val icons = intArrayOf(R.drawable.ic_search, R.drawable.ic_home, R.drawable.ic_add,
+                      R.drawable.ic_check, R.drawable.ic_tv, R.drawable.ic_sports, R.drawable.ic_movie)
                   for (i in icons.indices) {
-                      val iv = ImageView(this).apply {
-                          setImageResource(icons[i]); contentDescription = tabNames[i]
-                          setPadding(u(9), u(9), u(9), u(9))
+                      val row = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+                          setPadding(u(12), u(8), u(12), u(8))
+                          contentDescription = tabNames[i]
                           isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                       }
-                      iv.setOnFocusChangeListener { _, _ -> styleTab(i) }
-                      iv.setOnClickListener { selectTab(i) }
-                      tabViews.add(iv)
-                      side.addView(iv, LinearLayout.LayoutParams(u(40), u(40)).apply { topMargin = u(16) })
+                      val iv = ImageView(this).apply { setImageResource(icons[i]) }
+                      val tv = TextView(this).apply {
+                          text = tabNames[i]; typeface = Typeface.DEFAULT_BOLD; maxLines = 1; visibility = View.GONE
+                          setTextColor(Color.WHITE)
+                      }
+                      tx(tv, 17f)
+                      row.addView(iv, LinearLayout.LayoutParams(u(22), u(22)))
+                      row.addView(tv, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(16) })
+                      row.setOnFocusChangeListener { _, _ -> styleTab(i); ui.post { updateSide() } }
+                      row.setOnClickListener { selectTab(i) }
+                      tabViews.add(row); tabIcons.add(iv); tabLabels.add(tv)
+                      side.addView(row, LinearLayout.LayoutParams(-1, u(42)).apply { topMargin = u(12) })
                   }
                   root.addView(side, lp(u(76), -1))
 
@@ -1475,6 +1601,24 @@ jobs:
                   root.addView(brand, lp(-2, -2).apply { leftMargin = u(16); topMargin = u(14) })
 
                   buildRemote()
+              }
+
+              // expands the sidebar (names visible) while one of its tabs has focus, collapses it to icons otherwise
+              private fun updateSide() {
+                  val open = tabViews.any { it.isFocused }
+                  if (open == sideOpen) return
+                  sideOpen = open
+                  val l = side.layoutParams
+                  l.width = if (open) u(250) else u(76)
+                  side.layoutParams = l
+                  side.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                      if (open) intArrayOf(Color.argb(250, 0, 0, 0), Color.argb(235, 0, 0, 0), Color.argb(0, 0, 0, 0))
+                      else intArrayOf(Color.argb(230, 0, 0, 0), Color.argb(0, 0, 0, 0)))
+                  for (k in tabViews.indices) {
+                      tabLabels[k].visibility = if (open) View.VISIBLE else View.GONE
+                      tabViews[k].gravity = if (open) (Gravity.CENTER_VERTICAL or Gravity.START) else Gravity.CENTER
+                      styleTab(k)
+                  }
               }
 
               // pill button used on the detail page
@@ -1498,6 +1642,36 @@ jobs:
                   t.setOnFocusChangeListener { _, _ -> st() }
                   t.setOnClickListener { lastBtn = t; onClick() }
                   return t
+              }
+
+              // compact detail button: only the icon while not focused, icon + name (white pill) when focused. child 0 = icon, child 1 = name
+              private fun heroIconBtn(icon: Int, label: String, onClick: () -> Unit): LinearLayout {
+                  val ll = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+                      setPadding(u(16), u(13), u(16), u(13))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val iv = ImageView(this).apply { setImageResource(icon) }
+                  val tv = TextView(this).apply {
+                      text = label; typeface = Typeface.DEFAULT_BOLD; maxLines = 1; visibility = View.GONE
+                  }
+                  tx(tv, 17f)
+                  ll.addView(iv, LinearLayout.LayoutParams(u(24), u(24)))
+                  ll.addView(tv, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(10) })
+                  fun st() {
+                      val f = ll.isFocused
+                      tv.visibility = if (f) View.VISIBLE else View.GONE
+                      tv.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      iv.setColorFilter(if (f) Color.BLACK else Color.WHITE)
+                      ll.background = GradientDrawable().apply {
+                          cornerRadius = u(10).toFloat()
+                          setColor(if (f) Color.WHITE else Color.argb(110, 120, 124, 140))
+                      }
+                  }
+                  st()
+                  ll.setOnFocusChangeListener { _, _ -> st() }
+                  ll.setOnClickListener { lastBtn = ll; onClick() }
+                  return ll
               }
 
               private fun styleEpTab() {
@@ -1537,41 +1711,49 @@ jobs:
                   dBox.addView(dVideo, lp(detBoxW, detBoxH, Gravity.CENTER))
                   heroLayer.addView(dBox, lp(detBoxW, detBoxH, Gravity.TOP or Gravity.END))
 
+                  // content is CENTERED on this page: dark scrim over the full width (darker at both sides, lighter in the middle)
                   val left = View(this).apply {
                       background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                          intArrayOf(dark, Color.argb(225, 5, 6, 12), Color.argb(0, 5, 6, 12)))
+                          intArrayOf(Color.argb(225, 5, 6, 12), Color.argb(165, 5, 6, 12), Color.argb(225, 5, 6, 12)))
                   }
-                  heroLayer.addView(left, lp((W * 0.62).toInt(), -1))
+                  heroLayer.addView(left, lp(-1, -1))
                   val bottom = View(this).apply {
                       background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
                           intArrayOf(dark, Color.argb(240, 5, 6, 12), Color.argb(0, 5, 6, 12)))
                   }
                   heroLayer.addView(bottom, lp(-1, (H * 0.45).toInt(), Gravity.BOTTOM))
 
-                  val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  // logo view HUGS the trimmed artwork (wrap_content): its left edge is exactly the left edge of the text under it
+                  val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+                  // logo view HUGS the trimmed artwork (wrap_content) and is centered
                   dLogo = ImageView(this).apply {
-                      scaleType = ImageView.ScaleType.FIT_START
+                      scaleType = ImageView.ScaleType.FIT_CENTER
                       adjustViewBounds = true
                       maxWidth = detLogoW
                       maxHeight = detLogoH
                   }
                   dTitle = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; visibility = View.GONE
+                      gravity = Gravity.CENTER_HORIZONTAL
                   }
                   tx(dTitle, 40f)
                   dTag = TextView(this).apply {
                       setTextColor(Color.parseColor("#4FC3F7")); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
+                      gravity = Gravity.CENTER_HORIZONTAL
                   }
                   tx(dTag, 16f)
-                  dMeta = TextView(this).apply { setTextColor(Color.parseColor("#E8E8E8")); typeface = Typeface.DEFAULT_BOLD }
+                  dMeta = TextView(this).apply {
+                      setTextColor(Color.parseColor("#E8E8E8")); typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.CENTER_HORIZONTAL
+                  }
                   tx(dMeta, 16f)
                   dDesc = TextView(this).apply {
-                      setTextColor(Color.parseColor("#DADAE2")); maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+                      setTextColor(Color.parseColor("#DADAE2")); maxLines = 3; ellipsize = TextUtils.TruncateAt.END
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      maxWidth = (W * 0.6f).toInt()
                   }
                   tx(dDesc, 17f)
                   // skeleton lines (replace meta + description while the detail json loads)
-                  dSkel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+                  dSkel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; visibility = View.GONE }
                   dSkel.addView(sk(6), LinearLayout.LayoutParams(u(300), u(16)))
                   dSkel.addView(sk(6), LinearLayout.LayoutParams(u(520), u(14)).apply { topMargin = u(16) })
                   dSkel.addView(sk(6), LinearLayout.LayoutParams(u(440), u(14)).apply { topMargin = u(10) })
@@ -1582,39 +1764,57 @@ jobs:
                           else Toast.makeText(this, "Movie not available yet", Toast.LENGTH_SHORT).show()
                       } else latestEp?.let { openPlayer(it, seasons.firstOrNull()?.num ?: 0) }
                   }
-                  dPlus = heroBtn("+") {
-                      Toast.makeText(this, "Added to watchlist", Toast.LENGTH_SHORT).show()
+                  // + My List: icon only, name shows on focus; saved shows / movies are listed in the My List tab
+                  dPlus = heroIconBtn(R.drawable.ic_add, "My List") {
+                      val d = detailItem
+                      if (d != null) {
+                          val now = Store.toggle(d)
+                          updatePlus()
+                          Toast.makeText(this, if (now) "Added to My List" else "Removed from My List", Toast.LENGTH_SHORT).show()
+                      }
                   }
-                  // trailer plays inside the real player UI (seek bar, subtitles, back ...)
-                  dTrailer = heroBtn("Watch Trailer") {
+                  // trailer plays inside the real player UI (seek bar, subtitles, back ...). Icon only, name shows on focus
+                  dTrailer = heroIconBtn(R.drawable.ic_trailer, "Watch Trailer") {
                       val te = trailerEp
                       if (te != null) openPlayer(te, 0, false, true, trailerPlayUrl)
                   }
                   dTrailer.visibility = View.GONE
-                  val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
                   btnRow.addView(dWatch, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(12) })
                   btnRow.addView(dPlus, LinearLayout.LayoutParams(-2, -2))
                   btnRow.addView(dTrailer, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(12) })
 
-                  // movie details block under the buttons
-                  dExtra = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  // resume block: "Resume S1 E5" + progress bar (where it stopped) + time left
+                  dResumeBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; visibility = View.GONE }
+                  dResumeBtn = heroBtn("▶  Resume") { resumeNow() }
+                  dResumeBtn.minWidth = u(420)
+                  dResumeBar = BarView(this)
+                  dResumeTime = TextView(this).apply { setTextColor(Color.parseColor("#C8C8D0")); gravity = Gravity.CENTER_HORIZONTAL }
+                  tx(dResumeTime, 14f)
+                  dResumeBox.addView(dResumeBtn, LinearLayout.LayoutParams(-2, -2))
+                  dResumeBox.addView(dResumeBar, LinearLayout.LayoutParams(-1, max(3, u(4))).apply { topMargin = u(8) })
+                  dResumeBox.addView(dResumeTime, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(5) })
 
-                  dInfo.addView(dLogo, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
+                  // movie details block under the buttons
+                  dExtra = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+
+                  dInfo.addView(dLogo, LinearLayout.LayoutParams(-2, -2))
                   dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
                   dInfo.addView(dTag, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dMeta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
-                  dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+                  dInfo.addView(dDesc, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(dSkel, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
-                  dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
-                  dInfo.addView(dExtra, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(12) })
-                  heroLayer.addView(dInfo, lp(max((W * 0.72f).toInt(), detLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
+                  dInfo.addView(dResumeBox, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
+                  dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(14) })
+                  dInfo.addView(dExtra, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(12) })
+                  heroLayer.addView(dInfo, lp((W * 0.84f).toInt(), -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = (H * 0.04f).toInt() })
 
                   dHint = TextView(this).apply {
                       text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
                   }
                   tx(dHint, 17f)
-                  heroLayer.addView(dHint, lp(-2, -2, Gravity.BOTTOM or Gravity.START).apply {
-                      leftMargin = u(CONTENT_LEFT); bottomMargin = (H * 0.05f).toInt()
+                  heroLayer.addView(dHint, lp(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                      bottomMargin = (H * 0.04f).toInt()
                   })
                   detail.addView(heroLayer, lp(-1, -1))
 
@@ -1701,6 +1901,53 @@ jobs:
                   detail.addView(dStatus, lp(-1, -2, Gravity.CENTER))
 
                   root.addView(detail, lp(-1, -1))
+              }
+
+              // ---------------------------------------------------------------- My List + Resume (detail page)
+              private fun updatePlus() {
+                  val d = detailItem
+                  val on = d != null && Store.inList(d.cid)
+                  (dPlus.getChildAt(0) as ImageView).setImageResource(if (on) R.drawable.ic_check else R.drawable.ic_add)
+                  (dPlus.getChildAt(1) as TextView).text = if (on) "In My List" else "My List"
+              }
+
+              // "Resume S1 E5" + bar + "23m left" when this show / movie was left before RESUME_MAX of its length
+              private fun updateResume() {
+                  val d = detailItem
+                  val r = if (d == null) null else Store.getResume(d.cid)
+                  if (r == null || r.dur <= 0) {
+                      dResumeBox.visibility = View.GONE
+                      if (lastBtn === dResumeBtn) lastBtn = null
+                      return
+                  }
+                  val durMs = r.dur * 1000L
+                  val pre = if (detailMovie) "Resume Movie"
+                      else ("Resume " + (if (r.season > 0) "S${r.season} " else "") + (if (r.num > 0) "E${r.num}" else "")).trim()
+                  dResumeBtn.text = "▶  $pre"
+                  dResumeBar.frac = (r.pos.toFloat() / durMs).coerceIn(0f, 1f)
+                  dResumeBar.invalidate()
+                  dResumeTime.text = fmtMinLeft(r.pos, durMs)
+                  dResumeBox.visibility = View.VISIBLE
+              }
+
+              private fun resumeNow() {
+                  val d = detailItem ?: return
+                  val r = Store.getResume(d.cid) ?: return
+                  val ep = Ep(r.epId, r.title, r.num, "", r.thumb, r.dur, 0L)
+                  openPlayer(ep, r.season, false, detailMovie, null, r.pos)
+              }
+
+              // saves where the user is in the running episode / movie (called every ~5s, on leaving the player, on stop)
+              private fun saveProgress() {
+                  if (!playTrack || playShowCid.isBlank()) return
+                  val p = mainPlayer ?: return
+                  val ep = curPlayEp ?: return
+                  val dur = if (p.duration > 0) p.duration else ep.dur * 1000L
+                  if (dur <= 0L) return
+                  val pos = p.currentPosition
+                  if (pos >= (dur * RESUME_MAX).toLong()) Store.clearResume(playShowCid)
+                  else if (pos >= 5000L) Store.putResume(Resume(playShowCid, playShowSub, ep.id, ep.title, ep.num, curPlaySeason,
+                      ep.thumb, (dur / 1000L).toInt(), pos, System.currentTimeMillis()))
               }
 
               // ---------------------------------------------------------------- Player UI
@@ -1890,15 +2137,18 @@ jobs:
                   pCue.animate().translationY(if (up) -u(150).toFloat() else 0f).setDuration(150).start()
               }
 
+              // focused tab = white pill with dark icon / name, selected tab = faint pill, others = dim
               private fun styleTab(i: Int) {
                   val v = tabViews[i]
                   val f = v.isFocused
                   val s = i == tab
-                  v.setColorFilter(if (f || s) Color.WHITE else Color.argb(150, 255, 255, 255))
-                  v.background = if (f || s) GradientDrawable().apply {
-                      shape = GradientDrawable.OVAL; setColor(Color.argb(if (f) 70 else 35, 255, 255, 255))
+                  tabIcons[i].setColorFilter(if (f) Color.BLACK else if (s) Color.WHITE else Color.argb(150, 255, 255, 255))
+                  tabLabels[i].setTextColor(if (f) Color.BLACK else if (s) Color.WHITE else Color.argb(190, 255, 255, 255))
+                  v.background = if (f) GradientDrawable().apply {
+                      cornerRadius = u(12).toFloat(); setColor(Color.WHITE)
+                  } else if (s) GradientDrawable().apply {
+                      cornerRadius = u(12).toFloat(); setColor(Color.argb(35, 255, 255, 255))
                   } else null
-                  v.animate().scaleX(if (f) 1.12f else 1f).scaleY(if (f) 1.12f else 1f).setDuration(120).start()
               }
 
               private fun selectTab(i: Int) {
@@ -1908,7 +2158,11 @@ jobs:
                   val td = homeTabs[i]
                   if (td != null) {
                       content.visibility = View.VISIBLE
-                      if (pageStack.isNotEmpty() || shownTd !== td) { pageStack.clear(); switchHome(td) }
+                      if (pageStack.isNotEmpty() || shownTd !== td || i == 2) {
+                          pageStack.clear()
+                          if (i == 2) refreshMyList(td)                                 // My List is rebuilt from the saved list every time
+                          switchHome(td)
+                      }
                       else if (!td.loaded) startLoad(td)                              // retry after an error
                       else {
                           status.visibility = if (rows.isEmpty() && skelHome.visibility != View.VISIBLE) View.VISIBLE else View.GONE
@@ -1922,6 +2176,14 @@ jobs:
                   }
               }
 
+              // My List tab: one portrait row with the saved shows / movies (newest first)
+              private fun refreshMyList(td: TabData) {
+                  td.rows.clear()
+                  td.loaded = true; td.loading = false
+                  val l = Store.myList()
+                  if (l.isNotEmpty()) td.rows.add(Row("My List", false, l, "portrait"))
+              }
+
               // puts a page (home tab or landing page) into the list. Rows of every page are kept, so coming back is instant.
               private fun switchHome(td: TabData, restoreRow: Int = -1, restorePos: Int = 0) {
                   heroRun?.let { ui.removeCallbacks(it) }
@@ -1932,6 +2194,7 @@ jobs:
                   curRow = -1; curPos = 0; lastSnap = -1
                   hero = null; revealed = false
                   setCardMode(false)
+                  modeChanged = false
                   Prefetch.gate = true
                   info.animate().cancel(); info.alpha = 0f
                   bg.animate().cancel(); bg.alpha = 0f
@@ -1945,7 +2208,10 @@ jobs:
                   else {
                       skelHome.visibility = if (td.loading && td.rows.isEmpty()) View.VISIBLE else View.GONE
                       if (td.rows.isNotEmpty()) { if (restoreRow >= 0) focusAt(restoreRow, restorePos, 12) else focusFirst(12) }
-                      else if (!td.loading) { status.text = "No rows"; status.visibility = View.VISIBLE }
+                      else if (!td.loading) {
+                          status.text = if (td.idx == 2) "Your list is empty\n\nOpen a show or movie and press the + button" else "No rows"
+                          status.visibility = View.VISIBLE
+                      }
                   }
               }
 
@@ -2123,7 +2389,7 @@ jobs:
                   val f = currentFocus
                   if (f == null) {
                       if (inDetail) {
-                          val t: View? = if (epMode) dEpRv.getChildAt(0) else dWatch
+                          val t: View? = if (epMode) dEpRv.getChildAt(0) else if (dResumeBox.visibility == View.VISIBLE) dResumeBtn else dWatch
                           t?.requestFocus()
                       } else rowRv.getChildAt(0)?.requestFocus()
                       return
@@ -2231,7 +2497,7 @@ jobs:
                   }
               }
 
-              // loads one page (Home / Shows / Movies / Sports / landing page): spotlight, portrait, trending, square, landscape, card / promo rows
+              // loads one page (Home / Originals / Shows / Sports / Movies / landing page): spotlight, portrait, trending, square, landscape, card / promo rows
               private fun loadHome(td: TabData) {
                   Thread {
                       val page = Api.get(td.url)
@@ -2445,9 +2711,13 @@ jobs:
               // Card / promo row focused: the list becomes FULL SCREEN high, the banner row sits at the very top of the screen
               // (where the header / title area normally is) and the rows after it fill the space that is left below.
               // Any other row: back to the normal "one row at the bottom" list under the hero.
+              // When the size changes, a running scroll is stopped and the next scroll is an INSTANT jump
+              // (no half-finished glide through a list that just changed size = no ghost / doubled card under the header).
               private fun setCardMode(on: Boolean) {
                   if (on == cardMode) return
                   cardMode = on
+                  modeChanged = true
+                  rowRv.stopScroll()
                   val l = rowRv.layoutParams as FrameLayout.LayoutParams
                   l.height = if (on) FrameLayout.LayoutParams.MATCH_PARENT else rvH
                   l.bottomMargin = if (on) 0 else (H * 0.008f).toInt()
@@ -2487,22 +2757,29 @@ jobs:
               }
 
               private fun snapTo(pos: Int) {
-                  if (pos == lastSnap) return
+                  if (pos == lastSnap && !modeChanged) return
                   lastSnap = pos
                   for (d in 1..3) rows.getOrNull(pos + d)?.let { prefetchRow(it, 12); warmRow(it) }   // next rows: download + decode into memory
                   rows.getOrNull(pos - 1)?.let { warmRow(it) }
                   smoothVertical(pos)
               }
 
-              // vertical row scroll: fixed decelerate glide (posted, so a list resize from setCardMode is laid out first)
+              // vertical row scroll: fixed decelerate glide (posted, so a list resize from setCardMode is laid out first).
+              // Right after a list size change (card mode on / off) the jump is instant instead.
               private fun smoothVertical(pos: Int) {
                   rowRv.post {
-                      val s = object : LinearSmoothScroller(this) {
-                          override fun getVerticalSnapPreference() = SNAP_TO_START
-                          override fun calculateTimeForDeceleration(dx: Int): Int = 260
+                      if (modeChanged) {
+                          modeChanged = false
+                          rowRv.stopScroll()
+                          (rowRv.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(pos, 0)
+                      } else {
+                          val s = object : LinearSmoothScroller(this) {
+                              override fun getVerticalSnapPreference() = SNAP_TO_START
+                              override fun calculateTimeForDeceleration(dx: Int): Int = 260
+                          }
+                          s.targetPosition = pos
+                          rowRv.layoutManager?.startSmoothScroll(s)
                       }
-                      s.targetPosition = pos
-                      rowRv.layoutManager?.startSmoothScroll(s)
                   }
               }
 
@@ -2674,7 +2951,7 @@ jobs:
                   player?.let { it.stop(); it.clearMediaItems() }
               }
 
-              override fun onStop() { super.onStop(); stopTrailer(); mainPlayer?.pause() }
+              override fun onStop() { super.onStop(); saveProgress(); stopTrailer(); mainPlayer?.pause() }
               override fun onRestart() {
                   super.onRestart()
                   if (inPlayer) return
@@ -2800,6 +3077,7 @@ jobs:
                   stopTrailer(false)
                   inDetail = true; epMode = false
                   detailMovie = mv
+                  detailItem = item
                   movieEp = null; trailerEp = null; trailerPlayUrl = null; lastBtn = null
                   val tok = ++detailToken
                   epToken++
@@ -2823,7 +3101,9 @@ jobs:
                   showEpSkel(false)
                   dHint.visibility = View.GONE
                   dTrailer.visibility = View.GONE
+                  dResumeBox.visibility = View.GONE
                   dExtra.removeAllViews()
+                  updatePlus()
                   curSeason = -1; epFrom = 0; epHasMore = true; epLoading = false
                   detailTrailerUrl = null; latestEp = null
                   dBg.animate().cancel(); dBg.alpha = 1f
@@ -2838,11 +3118,10 @@ jobs:
                   dMeta.text = item.meta
                   dDesc.text = item.desc
                   dWatch.text = if (mv) "▶  Watch Movie" else "▶  Watch Latest Episode"
-                  dWatch.minWidth = if (mv) u(280) else 0       // Watch Movie button a bit longer, text never cut
-                  dTrailer.minWidth = u(210)
+                  dWatch.minWidth = if (mv) u(330) else u(430)    // long enough: text + date / name never cut
                   dStatus.visibility = View.GONE
                   dWatch.requestFocus()
-                  ui.postDelayed({ if (inDetail && !epMode && !inPlayer) dWatch.requestFocus() }, 200)
+                  ui.postDelayed({ if (inDetail && !epMode && !inPlayer && currentFocus !== dResumeBtn) dWatch.requestFocus() }, 200)
 
                   val cachedJ = synchronized(detailCache) { detailCache[dkey(item.cid, mv)] }
                   if (cachedJ != null) bindDetail(cachedJ, item)
@@ -2917,7 +3196,7 @@ jobs:
                   dWatch.text = "▶  Watch Latest Episode" + (if (d.isEmpty()) "" else "   $d")
               }
 
-              // "Label  value" rows under the buttons (label grey + bold, value light). Cast may use 2 lines, the rest 1.
+              // "Label  value" rows under the buttons (label grey + bold, value light), centered. Cast may use 2 lines, the rest 1.
               private fun setExtra(list: List<Pair<String, String>>) {
                   dExtra.removeAllViews()
                   for ((k, v) in list) {
@@ -2931,10 +3210,12 @@ jobs:
                           setTextColor(Color.parseColor("#E4E4EA"))
                           maxLines = if (k == "Cast") 2 else 1
                           ellipsize = TextUtils.TruncateAt.END
+                          gravity = Gravity.CENTER_HORIZONTAL
+                          maxWidth = (W * 0.7f).toInt()
                           text = sb
                       }
                       tx(t, 14f)
-                      dExtra.addView(t, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(5) })
+                      dExtra.addView(t, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(5) })
                   }
               }
 
@@ -3028,6 +3309,15 @@ jobs:
                   dDesc.text = desc
                   val tag = e.str("highlight_text") ?: (if (movie) m.optJSONObject("badges")?.str("primary_tag") else null)
                   if (tag != null) { dTag.text = tag; dTag.visibility = View.VISIBLE } else dTag.visibility = View.GONE
+
+                  // what My List stores for this show / movie (images + texts of the detail response)
+                  detailItem = item.copy(
+                      title = title, desc = desc, meta = parts.joinToString(" • "),
+                      bg = rawBgOf(show) ?: item.bg, logo = detLogoUrl(show) ?: item.logo,
+                      portrait = e.str("portrait_thumb") ?: item.portrait, landscape = e.str("thumbnail") ?: item.landscape)
+                  updatePlus()
+                  updateResume()
+                  if (dResumeBox.visibility == View.VISIBLE && !epMode && !inPlayer && (currentFocus === dWatch || currentFocus == null)) dResumeBtn.requestFocus()
 
                   // seasons / bundles, newest first (shows only)
                   val data: DetailData? = if (movie) null else parseSeasons(show)
@@ -3230,7 +3520,7 @@ jobs:
                   epLayer.animate().cancel()
                   epLayer.animate().translationY(H.toFloat()).setDuration(260).setInterpolator(DecelerateInterpolator())
                       .withEndAction { if (!epMode) epLayer.visibility = View.GONE }.start()
-                  dWatch.requestFocus()
+                  (if (dResumeBox.visibility == View.VISIBLE) dResumeBtn else dWatch).requestFocus()
                   detailTrailerUrl?.let { schedulePlay(it, false) }
               }
 
@@ -3290,10 +3580,17 @@ jobs:
               //  fromHome  : opened straight from a listing card (no detail page behind it)
               //  noEps     : movie or trailer => the "Episodes" button is hidden
               //  directUrl : play this url directly (trailers) instead of asking the stream api
-              private fun openPlayer(ep: Ep, seasonNum: Int, fromHome: Boolean = false, noEps: Boolean = false, directUrl: String? = null) {
+              //  startMs   : start position (resume watching)
+              private fun openPlayer(ep: Ep, seasonNum: Int, fromHome: Boolean = false, noEps: Boolean = false, directUrl: String? = null, startMs: Long = 0L) {
                   if (ep.id.isBlank() && directUrl == null) return
+                  if (inPlayer) saveProgress()               // switching episode inside the player: keep where the old one stopped
                   val tok = ++playToken
                   curPlayEp = ep; curPlaySeason = seasonNum
+                  // episodes / movies opened from a detail page are saved for "Resume" (trailers and direct listing plays are not)
+                  playTrack = directUrl == null && !fromHome && detailItem != null
+                  playShowCid = detailItem?.cid ?: ""
+                  playShowSub = detailItem?.sub ?: ""
+                  pendingStart = startMs
                   if (!inPlayer) {
                       inPlayer = true
                       playFromHome = fromHome
@@ -3328,8 +3625,8 @@ jobs:
                   Glide.with(this).clear(pThumb)
                   Glide.with(this).load(img(ep.thumb, W_THUMB)).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(pThumb)
                   pPause.setImageResource(R.drawable.ic_pause)
-                  pSeek.pos = 0L; pSeek.buf = 0L; pSeek.dur = ep.dur * 1000L; pSeek.invalidate()
-                  pTime.text = fmtLeft(0L, ep.dur * 1000L)
+                  pSeek.pos = startMs; pSeek.buf = 0L; pSeek.dur = ep.dur * 1000L; pSeek.invalidate()
+                  pTime.text = fmtLeft(startMs, ep.dur * 1000L)
                   setPlayerTitles()
                   epAdapter.notifyDataSetChanged()           // "Now Playing" badge
                   showControls()
@@ -3443,7 +3740,9 @@ jobs:
                   }
                   if (subs.isNotEmpty()) mb.setSubtitleConfigurations(subs)
 
-                  p.setMediaItem(mb.build())
+                  val st = pendingStart                          // resume watching: start where the user stopped
+                  pendingStart = 0L
+                  p.setMediaItem(mb.build(), st)
                   p.prepare()
                   p.playWhenReady = true
                   pStatus.visibility = View.GONE
@@ -3929,6 +4228,7 @@ jobs:
               }
 
               private fun closePlayer() {
+                  saveProgress()                                    // remember where the user left (Resume on the detail page)
                   playToken++
                   inPlayer = false
                   panel = 0
@@ -3958,12 +4258,14 @@ jobs:
                   moveEpLayerToDetail()
                   detail.visibility = View.VISIBLE
                   epAdapter.notifyDataSetChanged()
+                  updateResume()                                    // new position / finished (>= 95%) => Resume block updates
                   if (epMode) {
                       heroLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                       ui.postDelayed({ if (inDetail && epMode && !inPlayer) focusPlayingEp() }, 150)
                   } else {
                       heroLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
-                      (lastBtn ?: dWatch).requestFocus()                 // back on the button that started the player (Watch Movie / Watch Trailer ...)
+                      val back: View = lastBtn ?: (if (dResumeBox.visibility == View.VISIBLE) dResumeBtn else dWatch)
+                      back.requestFocus()                           // back on the button that started the player (Watch Movie / Watch Trailer ...)
                       detailTrailerUrl?.let { schedulePlay(it, false) }
                   }
               }
