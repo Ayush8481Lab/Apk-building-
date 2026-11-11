@@ -212,6 +212,7 @@ jobs:
           import android.graphics.Rect
           import android.graphics.RectF
           import android.graphics.Shader
+          import android.graphics.SweepGradient
           import android.graphics.Typeface
           import android.graphics.drawable.Drawable
           import android.graphics.drawable.GradientDrawable
@@ -285,6 +286,10 @@ jobs:
           const val BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP"
           const val SHOWS_URL = "$BASE/PAGE-V2/2240?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
           const val MOVIES_URL = "$BASE/PAGE-V2/399?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
+          // Home (tab 1) and Sports (tab 4) base pages: rows can hold SHOW / MOVIE_BUNDLE (detail page) and VOD (episode / movie / clip -> player) items
+          const val HOME_BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/MWEB/IN/UP"
+          const val HOME_URL = "$HOME_BASE/PAGE-V2/244390?from=0&to=35&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
+          const val SPORTS_URL = "$HOME_BASE/PAGE-V2/17378?from=0&to=35&content-interventionName=TrayRanking&intervention-group=TrayRanking&kids_safe=false&utm_source=google&utm_medium=organic"
           const val DETAIL_URL = "https://apiv3.sonyliv.com/AGL/4.8/R/ENG/WEB/IN/UP/DETAIL-V2/"
           // movie detail: same DETAIL-V2 endpoint, the web params (children = MOVIE + MOVIE_TRAILER come inside containers[0].containers)
           const val MOVIE_DETAIL_Q = "?kids_safe=false&from=0&to=35&segment_id=AB_DetailPage_Disable&utm_source=google&utm_medium=organic"
@@ -355,7 +360,7 @@ jobs:
           class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>)
           // extra data from the episode DETAIL-V2 response: subtitles (platformVariants[].subtitlesLanguages[]), seek-preview sprite, exact titles
           class EpExtra(val subs: List<SubInfo>, val sprite: String?, val sn: Int, val en: Int, val et: String?)
-          // one home-style page (Shows = tab 2, Movies = tab 3): own rows, own load state
+          // one home-style page (Home = 1, Shows = 2, Movies = 3, Sports = 4): own rows, own load state
           class TabData(val idx: Int, val url: String) {
               val rows = ArrayList<Row>()
               var loaded = false
@@ -390,11 +395,14 @@ jobs:
               }
           }
 
-          // Player buffering animation (Hotstar style): faint ring + a white arc that spins and grows / shrinks.
+          // Player buffering animation (Hotstar style): faint ring + an arc that spins and grows / shrinks,
+          // painted with a pink -> blue gradient (pink tail, blue head).
           class BufferView(c: Context) : View(c) {
-              private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Color.argb(70, 255, 255, 255) }
-              private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Color.WHITE; strokeCap = Paint.Cap.ROUND }
+              private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Color.argb(60, 255, 255, 255) }
+              private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
               private val box = RectF()
+              private val pink = Color.parseColor("#FF3D9A")
+              private val blue = Color.parseColor("#3D8BFF")
               private var rot = 0f
               private var sweep = 40f
               private val spin = ValueAnimator.ofFloat(0f, 360f).apply {
@@ -416,14 +424,21 @@ jobs:
               }
               override fun onDraw(c: Canvas) {
                   val s = min(width, height).toFloat()
-                  val sw = s * 0.075f
+                  val sw = s * 0.085f
                   ring.strokeWidth = sw
                   arc.strokeWidth = sw
                   val ox = (width - s) / 2f
                   val oy = (height - s) / 2f
                   box.set(ox + sw, oy + sw, ox + s - sw, oy + s - sw)
                   c.drawOval(box, ring)
-                  c.drawArc(box, rot, sweep, false, arc)
+                  val cx = width / 2f
+                  val cy = height / 2f
+                  val f = (sweep / 360f).coerceIn(0.1f, 0.95f)
+                  arc.shader = SweepGradient(cx, cy, intArrayOf(pink, blue, blue), floatArrayOf(0f, f, 1f))
+                  c.save()
+                  c.rotate(rot, cx, cy)                         // gradient rotates together with the arc
+                  c.drawArc(box, 0f, sweep, false, arc)
+                  c.restore()
               }
           }
 
@@ -955,7 +970,7 @@ jobs:
               private var hero: Item? = null
               private var player: ExoPlayer? = null
               private var lastSnap = -1
-              private var tab = 2
+              private var tab = 1
               private var heroRun: Runnable? = null
               private var trailerRun: Runnable? = null
               private var advanceRun: Runnable? = null
@@ -1102,7 +1117,7 @@ jobs:
                   }
               }
 
-              private fun isHomeTab() = tab == 2 || tab == 3
+              private fun isHomeTab() = homeTabs.containsKey(tab)
               private fun dkey(cid: String, movie: Boolean) = (if (movie) "m" else "s") + cid
 
               // identical options for preload + real load => disk/memory cache hit, downsampled decode
@@ -1157,12 +1172,14 @@ jobs:
                   epImgW = (W * 0.24f).toInt(); epImgH = epImgW * 9 / 16             // bigger episode cards
                   seasonColW = (W * 0.2f).toInt()
                   drawerW = (W * 0.36f).toInt()
+                  homeTabs[1] = TabData(1, HOME_URL)
                   homeTabs[2] = TabData(2, SHOWS_URL)
                   homeTabs[3] = TabData(3, MOVIES_URL)
+                  homeTabs[4] = TabData(4, SPORTS_URL)
                   buildUi()
                   setContentView(root)
                   hideBars()
-                  selectTab(2)
+                  selectTab(1)
               }
 
               override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1317,7 +1334,8 @@ jobs:
               private fun heroBtn(label: String, onClick: () -> Unit): TextView {
                   val t = TextView(this).apply {
                       text = label; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
-                      setPadding(u(26), u(12), u(26), u(12))
+                      setPadding(u(34), u(13), u(34), u(13))
+                      maxLines = 1
                       isFocusable = true; isFocusableInTouchMode = true; isClickable = true
                   }
                   tx(t, 17f)
@@ -1442,7 +1460,7 @@ jobs:
                   dInfo.addView(dSkel, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
                   dInfo.addView(dExtra, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(12) })
-                  heroLayer.addView(dInfo, lp(max((W * 0.54f).toInt(), detLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
+                  heroLayer.addView(dInfo, lp(max((W * 0.72f).toInt(), detLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
 
                   dHint = TextView(this).apply {
                       text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
@@ -1740,7 +1758,7 @@ jobs:
                   if (inDetail) closeDetail(false)
                   tab = i
                   for (k in tabViews.indices) styleTab(k)
-                  if (i == 2 || i == 3) {
+                  if (homeTabs.containsKey(i)) {
                       content.visibility = View.VISIBLE
                       if (shownTab != i) switchHome(i)
                       else {
@@ -2447,6 +2465,8 @@ jobs:
                   dMeta.text = item.meta
                   dDesc.text = item.desc
                   dWatch.text = if (mv) "▶  Watch Movie" else "▶  Watch Latest Episode"
+                  dWatch.minWidth = if (mv) u(280) else 0       // Watch Movie button a bit longer, text never cut
+                  dTrailer.minWidth = u(210)
                   dStatus.visibility = View.GONE
                   dWatch.requestFocus()
                   ui.postDelayed({ if (inDetail && !epMode && !inPlayer) dWatch.requestFocus() }, 200)
