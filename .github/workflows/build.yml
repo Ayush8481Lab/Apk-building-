@@ -220,7 +220,11 @@ jobs:
           import android.os.Handler
           import android.os.Looper
           import android.os.SystemClock
+          import android.text.SpannableStringBuilder
+          import android.text.Spanned
           import android.text.TextUtils
+          import android.text.style.ForegroundColorSpan
+          import android.text.style.StyleSpan
           import android.util.TypedValue
           import android.view.*
           import android.view.animation.AccelerateDecelerateInterpolator
@@ -280,13 +284,18 @@ jobs:
 
           const val BASE = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/WEB/IN/UP"
           const val SHOWS_URL = "$BASE/PAGE-V2/2240?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
+          const val MOVIES_URL = "$BASE/PAGE-V2/399?from=0&to=50&kids_safe=false&utm_source=google&utm_medium=organic"
           const val DETAIL_URL = "https://apiv3.sonyliv.com/AGL/4.8/R/ENG/WEB/IN/UP/DETAIL-V2/"
+          // movie detail: same DETAIL-V2 endpoint, the web params (children = MOVIE + MOVIE_TRAILER come inside containers[0].containers)
+          const val MOVIE_DETAIL_Q = "?kids_safe=false&from=0&to=35&segment_id=AB_DetailPage_Disable&utm_source=google&utm_medium=organic"
           const val EP_URL = "https://apiv3.sonyliv.com/AGL/2.6/R/ENG/WEB/IN/UP/CONTENT/DETAIL/BUNDLE/"
           const val EP_PAGE = 30
           const val TRAILER_MUTED = false      // false = trailers play WITH sound
 
-          // SHOW opens the show detail page. Any other objectType == VOD item (EPISODE, TRAILER, ...) plays DIRECTLY in the player.
+          // SHOW opens the show detail page. MOVIE_BUNDLE opens the movie detail page (no episodes).
+          // Any other objectType == VOD item (EPISODE, TRAILER, MOVIE ...) plays DIRECTLY in the player.
           const val SUB_SHOW = "SHOW"
+          const val SUB_MOVIE_BUNDLE = "MOVIE_BUNDLE"
           const val OBJ_VOD = "VOD"
 
           // ---- IMAGE CDN: every image url is rewritten from the old host to the new (faster) host. Params / path stay the same.
@@ -319,7 +328,7 @@ jobs:
           const val CONTENT_LEFT = 126
           // Extra push of the title PNG to the right (0 = artwork flush with the text under it, try 20, 40 ... to move it more right)
           const val LOGO_SHIFT_X = 0
-          // Title PNG size multipliers (relative to the base logo box). Shows listing = 0.9 x old 1.5, detail page = 0.9 x old 1.8
+          // Title PNG size multipliers (relative to the base logo box). Shows / Movies listing = 0.9 x old 1.5, detail page = 0.9 x old 1.8
           const val HOME_LOGO_SCALE = 1.35f
           const val DETAIL_LOGO_SCALE = 1.62f
 
@@ -329,7 +338,7 @@ jobs:
           const val W_PORTRAIT = 500           // portrait cards (shown ~170-260px wide, 500 is already 2x sharp)
           const val W_SPOT = 600               // spotlight strips
           const val W_EP = 480                 // episode thumbnails (shown ~310-460px wide)
-          const val W_THUMB = 1000             // episode thumbnail shown full screen while the player is loading / buffering
+          const val W_THUMB = 1000             // episode / movie thumbnail shown full screen while the player is loading / buffering
 
           data class Item(
               val id: String, val title: String, val portrait: String?, val landscape: String?,
@@ -346,6 +355,12 @@ jobs:
           class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>)
           // extra data from the episode DETAIL-V2 response: subtitles (platformVariants[].subtitlesLanguages[]), seek-preview sprite, exact titles
           class EpExtra(val subs: List<SubInfo>, val sprite: String?, val sn: Int, val en: Int, val et: String?)
+          // one home-style page (Shows = tab 2, Movies = tab 3): own rows, own load state
+          class TabData(val idx: Int, val url: String) {
+              val rows = ArrayList<Row>()
+              var loaded = false
+              var loading = false
+          }
 
           // Modern skeleton block: dark rounded rect with a soft light band sweeping across it (all blocks sweep in sync).
           // Stops drawing (and animating) automatically when the view is hidden.
@@ -674,6 +689,19 @@ jobs:
               return SimpleDateFormat(if (withYear) "dd MMM yyyy" else "dd MMM", Locale.ENGLISH).format(Date(ms))
           }
 
+          // "DOLBY_VISION" -> "Dolby Vision", "UHD" -> "4K" ...
+          fun qLabel(s: String): String = when (s.uppercase()) {
+              "UHD" -> "4K"
+              "FULL_HD" -> "Full HD"
+              "HD" -> "HD"
+              "SDR" -> "SDR"
+              "HDR", "HDR10" -> "HDR"
+              "DOLBY_VISION" -> "Dolby Vision"
+              "DOLBY_ATMOS" -> "Dolby Atmos"
+              "STEREO" -> "Stereo"
+              else -> s.replace('_', ' ')
+          }
+
           // 3 background threads, download to disk only (no bitmaps in RAM), wait only briefly while the visible images load.
           // Glide has 8 source threads (see App.kt) so these 3 can never starve the images on screen.
           // While the player is open (paused = true) prefetch stops completely so the video gets all the bandwidth.
@@ -706,7 +734,7 @@ jobs:
               }
           }
 
-          // trailer url from any platformVariant (not only the first one)
+          // trailer url from any platformVariant (only the auto-play eligible ones: used for the hero autoplay)
           fun trailerFrom(o: JSONObject): String? {
               val arr = o.optJSONArray("platformVariants")
               if (arr != null) for (i in 0 until arr.length()) {
@@ -717,6 +745,39 @@ jobs:
               val e = o.optJSONObject("metadata")?.optJSONObject("emfAttributes")
               val u2 = e?.optString("trailer_url").orEmpty()
               return if (u2.startsWith("http")) u2 else null
+          }
+
+          // trailer url for the "Watch Trailer" button (ignores the autoplay eligibility flag)
+          fun trailerUrlAny(o: JSONObject): String? {
+              val arr = o.optJSONArray("platformVariants")
+              if (arr != null) for (i in 0 until arr.length()) {
+                  val pv = arr.optJSONObject(i) ?: continue
+                  val u = pv.optString("trailerUrl")
+                  if (u.startsWith("http")) return u
+              }
+              return trailerFrom(o)
+          }
+
+          // content id of the trailer asset (platformVariants[].trailerContentId)
+          fun trailerIdFrom(o: JSONObject): String? {
+              val arr = o.optJSONArray("platformVariants") ?: return null
+              for (i in 0 until arr.length()) {
+                  val pv = arr.optJSONObject(i) ?: continue
+                  val id = pv.str("trailerContentId")
+                  if (id != null) return id
+              }
+              return null
+          }
+
+          // child asset of a bundle by objectSubtype (MOVIE / MOVIE_TRAILER ...)
+          fun childBySubtype(show: JSONObject, st: String): JSONObject? {
+              val arr = show.optJSONArray("containers") ?: return null
+              for (i in 0 until arr.length()) {
+                  val c = arr.optJSONObject(i) ?: continue
+                  val sub = c.optJSONObject("metadata")?.optString("objectSubtype").orEmpty()
+                  if (sub.equals(st, true)) return c
+              }
+              return null
           }
 
           // editorialMetadata.poster_background is a JSON string: {"SONY_ANDROID_TV":"url", ...}
@@ -779,7 +840,7 @@ jobs:
               return Ep(m.optString("contentId"), title, m.optInt("episodeNumber"), desc, thumb, m.optInt("duration"), m.optLong("originalAirDate"))
           }
 
-          // Episode DETAIL-V2 response:
+          // Episode / movie DETAIL-V2 response:
           //   containers[0].platformVariants[].subtitlesLanguages[] = { subtitleUrl, subtitleLanguageName }
           //   containers[0].metadata.emfAttributes.tv_sprite_image_url = seek preview sprite (..._640_360_<frames>.jpg)
           fun parseEpExtra(j: JSONObject?): EpExtra? {
@@ -795,6 +856,8 @@ jobs:
               }
               val subs = ArrayList<SubInfo>()
               val seen = HashSet<String>()
+              val used = HashMap<String, Int>()
+              val ccRx = Regex("(^|[_\\-])CC(\\.|_)", RegexOption.IGNORE_CASE)
               fun scan(arr: JSONArray?) {
                   if (arr == null) return
                   for (i in 0 until arr.length()) {
@@ -805,7 +868,13 @@ jobs:
                           val su = o.str("subtitleUrl") ?: continue
                           if (!su.startsWith("http") || !seen.add(su)) continue
                           val name = o.str("subtitleLanguageName") ?: "und"
-                          subs.add(SubInfo(su, name.lowercase(), labels[name.uppercase()] ?: name))
+                          var lbl = labels[name.uppercase()] ?: name
+                          val fn = su.substringBefore("?").substringAfterLast('/')
+                          if (ccRx.containsMatchIn(fn)) lbl += " CC"          // closed captions file
+                          val cnt = (used[lbl] ?: 0) + 1
+                          used[lbl] = cnt
+                          if (cnt > 1) lbl += " $cnt"                          // two files with the same name stay distinguishable
+                          subs.add(SubInfo(su, name.lowercase(), lbl))
                       }
                   }
               }
@@ -859,7 +928,7 @@ jobs:
               private fun tx(t: TextView, size: Float) = t.setTextSize(TypedValue.COMPLEX_UNIT_PX, size * W / 1280f)
               private fun sk(r: Int = 8) = ShimmerView(this, u(r).toFloat())
 
-              // ---- home
+              // ---- home (Shows = tab 2, Movies = tab 3 share the same UI, only the rows differ)
               private lateinit var root: FrameLayout
               private lateinit var content: FrameLayout
               private lateinit var skelHome: FrameLayout
@@ -880,12 +949,13 @@ jobs:
               private lateinit var rowAdapter: RowAdapter
               private val tabViews = ArrayList<ImageView>()
               private val tabNames = listOf("Search", "Home", "Shows", "Movies", "Sports", "Settings")
-              private val rows = ArrayList<Row>()
+              private val homeTabs = HashMap<Int, TabData>()
+              private var shownTab = -1                      // which home tab's rows are currently in the list
+              private var rows = ArrayList<Row>()            // rows of the shown home tab
               private var hero: Item? = null
               private var player: ExoPlayer? = null
               private var lastSnap = -1
               private var tab = 2
-              private var loaded = false
               private var heroRun: Runnable? = null
               private var trailerRun: Runnable? = null
               private var advanceRun: Runnable? = null
@@ -894,7 +964,7 @@ jobs:
               private var cardW = 0; private var cardH = 0; private var stripW = 0; private var stripH = 0
               private var padV = 0; private var titleH = 0; private var rowH = 0; private var rvH = 0
               private var logoW = 0; private var logoH = 0; private var bgW = 1200; private var bgH = 675
-              // title logo sizes: Shows listing page = 1.35x (0.9 of the old 1.5x), detail page = 1.62x (0.9 of the old 1.8x)
+              // title logo sizes: listing pages = 1.35x (0.9 of the old 1.5x), detail page = 1.62x (0.9 of the old 1.8x)
               private var homeLogoW = 0; private var homeLogoH = 0
               private var detLogoW = 0; private var detLogoH = 0
 
@@ -909,7 +979,7 @@ jobs:
               private var spotLoopOn = false
               private val trailerCache = ConcurrentHashMap<String, String>()
 
-              // show detail json cache (filled in the background when a card gets focus => detail page opens instantly)
+              // detail json cache (filled in the background when a card gets focus => detail page opens instantly). key = s<id> (show) / m<id> (movie)
               private val detailCache = object : LinkedHashMap<String, JSONObject>(16, 0.75f, true) {
                   override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JSONObject>?): Boolean = size > 16
               }
@@ -932,8 +1002,10 @@ jobs:
               private lateinit var dMeta: TextView
               private lateinit var dDesc: TextView
               private lateinit var dSkel: LinearLayout
+              private lateinit var dExtra: LinearLayout       // movie details: audio / subtitles / cast / director / advisory / quality
               private lateinit var dWatch: TextView
               private lateinit var dPlus: TextView
+              private lateinit var dTrailer: TextView         // "Watch Trailer" (opens the trailer in the player UI)
               private lateinit var dHint: TextView
               private lateinit var epTab: TextView
               private lateinit var sScroll: ScrollView
@@ -948,6 +1020,11 @@ jobs:
               private val eps = ArrayList<Ep>()
               private var inDetail = false
               private var epMode = false
+              private var detailMovie = false                 // the open detail page is a movie (no episodes page)
+              private var movieEp: Ep? = null                 // the MOVIE child asset of the open movie bundle
+              private var trailerEp: Ep? = null
+              private var trailerPlayUrl: String? = null
+              private var lastBtn: View? = null               // button that opened the player (focus goes back to it)
               private var detailToken = 0
               private var detailTrailerUrl: String? = null
               private var detGateRun: Runnable? = null
@@ -991,7 +1068,7 @@ jobs:
               private var drawerW = 0
               private var mainPlayer: ExoPlayer? = null
               private var inPlayer = false
-              private var playFromHome = false         // player was opened straight from a Shows-page card (episode / trailer), no detail page behind it
+              private var playFromHome = false         // player was opened straight from a listing card (episode / trailer / movie), no detail page behind it
               private var ctrlVisible = true
               private var panel = 0                    // 0 = none, 1 = subtitle/audio/quality drawer, 2 = episodes panel
               private var drawerKind = 0
@@ -1024,6 +1101,9 @@ jobs:
                       if (inPlayer) ui.postDelayed(this, 500)
                   }
               }
+
+              private fun isHomeTab() = tab == 2 || tab == 3
+              private fun dkey(cid: String, movie: Boolean) = (if (movie) "m" else "s") + cid
 
               // identical options for preload + real load => disk/memory cache hit, downsampled decode
               private fun cardReq(url: String?, w: Int, h: Int) = Glide.with(this).load(url).override(w, h).centerCrop()
@@ -1068,7 +1148,7 @@ jobs:
                   rowH = titleH + cardH + 2 * padV
                   rvH = rowH                                                          // exactly ONE row visible, no next-row title peek
                   logoH = (H * 0.27f).toInt(); logoW = logoH * 16 / 9
-                  homeLogoH = (logoH * HOME_LOGO_SCALE).toInt(); homeLogoW = homeLogoH * 16 / 9   // Shows listing page logo
+                  homeLogoH = (logoH * HOME_LOGO_SCALE).toInt(); homeLogoW = homeLogoH * 16 / 9   // listing page logo
                   detLogoH = (logoH * DETAIL_LOGO_SCALE).toInt(); detLogoW = detLogoH * 16 / 9    // detail page logo
                   bgW = min(W, 1200); bgH = bgW * 9 / 16
                   homeBoxW = (W * 0.67f * 1.25f).toInt(); homeBoxH = (H * 0.725f * 1.25f).toInt()
@@ -1077,6 +1157,8 @@ jobs:
                   epImgW = (W * 0.24f).toInt(); epImgH = epImgW * 9 / 16             // bigger episode cards
                   seasonColW = (W * 0.2f).toInt()
                   drawerW = (W * 0.36f).toInt()
+                  homeTabs[2] = TabData(2, SHOWS_URL)
+                  homeTabs[3] = TabData(3, MOVIES_URL)
                   buildUi()
                   setContentView(root)
                   hideBars()
@@ -1097,7 +1179,7 @@ jobs:
               }
 
               // ---------------------------------------------------------------- UI
-              // Shows listing skeleton: title logo block + meta + description lines on the left, a row title + a row of cards at the bottom
+              // Listing skeleton: title logo block + meta + description lines on the left, a row title + a row of cards at the bottom
               private fun buildHomeSkel(): FrameLayout {
                   val f = FrameLayout(this).apply { visibility = View.GONE }
                   val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1187,7 +1269,7 @@ jobs:
                   rowRv.adapter = rowAdapter
                   content.addView(rowRv, lp(-1, rvH, Gravity.BOTTOM).apply { leftMargin = u(80); bottomMargin = (H * 0.008f).toInt() })
 
-                  // Shows page skeleton (shown while the page api is loading)
+                  // page skeleton (shown while the page api is loading)
                   skelHome = buildHomeSkel()
                   content.addView(skelHome, lp(-1, -1))
 
@@ -1249,7 +1331,7 @@ jobs:
                   }
                   st()
                   t.setOnFocusChangeListener { _, _ -> st() }
-                  t.setOnClickListener { onClick() }
+                  t.setOnClickListener { lastBtn = t; onClick() }
                   return t
               }
 
@@ -1329,14 +1411,28 @@ jobs:
                   dSkel.addView(sk(6), LinearLayout.LayoutParams(u(520), u(14)).apply { topMargin = u(16) })
                   dSkel.addView(sk(6), LinearLayout.LayoutParams(u(440), u(14)).apply { topMargin = u(10) })
                   dWatch = heroBtn("▶  Watch Latest Episode") {
-                      latestEp?.let { openPlayer(it, seasons.firstOrNull()?.num ?: 0) }
+                      if (detailMovie) {
+                          val mv = movieEp
+                          if (mv != null) openPlayer(mv, 0, false, true)
+                          else Toast.makeText(this, "Movie not available yet", Toast.LENGTH_SHORT).show()
+                      } else latestEp?.let { openPlayer(it, seasons.firstOrNull()?.num ?: 0) }
                   }
                   dPlus = heroBtn("+") {
                       Toast.makeText(this, "Added to watchlist", Toast.LENGTH_SHORT).show()
                   }
+                  // trailer plays inside the real player UI (seek bar, subtitles, back ...)
+                  dTrailer = heroBtn("Watch Trailer") {
+                      val te = trailerEp
+                      if (te != null) openPlayer(te, 0, false, true, trailerPlayUrl)
+                  }
+                  dTrailer.visibility = View.GONE
                   val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                   btnRow.addView(dWatch, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(12) })
                   btnRow.addView(dPlus, LinearLayout.LayoutParams(-2, -2))
+                  btnRow.addView(dTrailer, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(12) })
+
+                  // movie details block under the buttons
+                  dExtra = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
                   dInfo.addView(dLogo, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(LOGO_SHIFT_X) })
                   dInfo.addView(dTitle, LinearLayout.LayoutParams(-2, -2))
@@ -1345,7 +1441,8 @@ jobs:
                   dInfo.addView(dDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
                   dInfo.addView(dSkel, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
                   dInfo.addView(btnRow, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(16) })
-                  heroLayer.addView(dInfo, lp(max((W * 0.5f).toInt(), detLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
+                  dInfo.addView(dExtra, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(12) })
+                  heroLayer.addView(dInfo, lp(max((W * 0.54f).toInt(), detLogoW + u(LOGO_SHIFT_X) + u(20)), -2).apply { leftMargin = u(CONTENT_LEFT); topMargin = (H * 0.04f).toInt() })
 
                   dHint = TextView(this).apply {
                       text = "Episodes  ▼"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; visibility = View.GONE
@@ -1536,16 +1633,17 @@ jobs:
                   val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                   pPause = iconBtn(R.drawable.ic_pause) { togglePause() }
                   pSeek = SeekView(this).apply { setOnClickListener { if (scrubPos >= 0) commitScrub() else togglePause() } }
-                  // Netflix style: only the time LEFT until the end of the program
+                  // Netflix style: only the time LEFT until the end of the program.
+                  // Sits right next to the seek bar: no big minimum width / gap any more (it only reserves room for "00:00").
                   pTime = TextView(this).apply {
                       setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; text = ""
                       gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                      minWidth = u(96)
+                      minWidth = u(50)
                   }
                   tx(pTime, 18f)
                   row1.addView(pPause, LinearLayout.LayoutParams(u(46), u(46)))
                   row1.addView(pSeek, LinearLayout.LayoutParams(0, u(46), 1f).apply { leftMargin = u(10) })
-                  row1.addView(pTime, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(14) })
+                  row1.addView(pTime, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(2) })
 
                   val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                   pillSub = pill("Subtitle & Audio", R.drawable.ic_subs) { openDrawer(1) }
@@ -1642,12 +1740,16 @@ jobs:
                   if (inDetail) closeDetail(false)
                   tab = i
                   for (k in tabViews.indices) styleTab(k)
-                  if (i == 2) {
+                  if (i == 2 || i == 3) {
                       content.visibility = View.VISIBLE
-                      if (!loaded) { loaded = true; loadShows() }
+                      if (shownTab != i) switchHome(i)
                       else {
-                          status.visibility = if (rows.isEmpty() && skelHome.visibility != View.VISIBLE) View.VISIBLE else View.GONE
-                          hero?.let { scheduleTrailer(it) }
+                          val td = homeTabs[i]
+                          if (td != null && !td.loaded) startLoad(td)                 // retry after an error
+                          else {
+                              status.visibility = if (rows.isEmpty() && skelHome.visibility != View.VISIBLE) View.VISIBLE else View.GONE
+                              hero?.let { scheduleTrailer(it) }
+                          }
                       }
                   } else {
                       stopTrailer()
@@ -1655,6 +1757,39 @@ jobs:
                       status.visibility = View.VISIBLE
                       status.text = tabNames[i] + " — not wired yet"
                   }
+              }
+
+              // swaps the list over to another home page (Shows <-> Movies). Rows of each page are kept, so coming back is instant.
+              private fun switchHome(i: Int) {
+                  val td = homeTabs[i] ?: return
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  shownTab = i
+                  rows = td.rows
+                  curRow = -1; curPos = 0; lastSnap = -1
+                  hero = null; revealed = false
+                  Prefetch.gate = true
+                  info.animate().cancel(); info.alpha = 0f
+                  bg.animate().cancel(); bg.alpha = 0f
+                  Glide.with(this).clear(bg)
+                  Glide.with(this).clear(logo)
+                  metaTv.text = ""; descTv.text = ""
+                  rowAdapter.notifyDataSetChanged()
+                  rowRv.scrollToPosition(0)
+                  status.visibility = View.GONE
+                  if (!td.loaded) startLoad(td)
+                  else {
+                      skelHome.visibility = if (td.loading && td.rows.isEmpty()) View.VISIBLE else View.GONE
+                      if (td.rows.isNotEmpty()) focusFirst(12)
+                      else if (!td.loading) { status.text = "No rows"; status.visibility = View.VISIBLE }
+                  }
+              }
+
+              private fun startLoad(td: TabData) {
+                  td.loaded = true; td.loading = true
+                  if (shownTab == td.idx) { status.visibility = View.GONE; skelHome.visibility = View.VISIBLE }
+                  loadHome(td)
               }
 
               // ---------------------------------------------------------------- Remote overlay
@@ -1728,12 +1863,12 @@ jobs:
 
               // ---------------------------------------------------------------- Navigation
               private fun rowNavActive(): Boolean {
-                  if (inDetail || inPlayer || tab != 2 || content.visibility != View.VISIBLE || curRow < 0) return false
+                  if (inDetail || inPlayer || !isHomeTab() || content.visibility != View.VISIBLE || curRow < 0) return false
                   val f = currentFocus ?: return false
                   return tabViews.none { it === f }
               }
 
-              // Shows page: up/down always lands on the FIRST card of the next / previous row
+              // listing pages: up/down always lands on the FIRST card of the next / previous row
               private fun moveRow(delta: Int) {
                   val target = curRow + delta
                   if (target < 0 || target >= rows.size) return
@@ -1755,10 +1890,10 @@ jobs:
                   }
               }
 
-              // detail page: down = open episodes, up (from the Episodes tab) = back to the trailer view
+              // detail page: down = open episodes (shows only), up (from the Episodes tab) = back to the trailer view
               private fun handleVertical(dir: Int): Boolean {
                   if (inDetail) {
-                      if (!epMode && dir == View.FOCUS_DOWN) { showEpisodes(); return true }
+                      if (!epMode && dir == View.FOCUS_DOWN) { if (!detailMovie) showEpisodes(); return true }
                       if (epMode && dir == View.FOCUS_UP && currentFocus === epTab) { hideEpisodes(); return true }
                       return false
                   }
@@ -1889,23 +2024,25 @@ jobs:
                       return
                   }
                   val f = currentFocus
-                  if (tab == 2 && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()
+                  if (isHomeTab() && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()
                   else super.onBackPressed()
               }
 
               // ---------------------------------------------------------------- Data
-              private fun loadShows() {
-                  status.visibility = View.GONE
-                  skelHome.visibility = View.VISIBLE            // skeleton while the Shows page loads
+              // loads one home page (Shows / Movies): spotlight + portrait rows only
+              private fun loadHome(td: TabData) {
                   Thread {
-                      val page = Api.get(SHOWS_URL)
+                      val page = Api.get(td.url)
                       val cs = page?.optJSONObject("resultObj")?.optJSONArray("containers")
                       if (cs == null) {
                           ui.post {
-                              skelHome.visibility = View.GONE
-                              status.text = "Could not load Shows page\n" + Api.lastError + "\n\nSelect Shows again to retry"
-                              status.visibility = View.VISIBLE
-                              loaded = false
+                              td.loading = false; td.loaded = false
+                              if (shownTab == td.idx) {
+                                  skelHome.visibility = View.GONE
+                                  val nm = tabNames[td.idx]
+                                  status.text = "Could not load $nm page\n" + Api.lastError + "\n\nSelect $nm again to retry"
+                                  status.visibility = View.VISIBLE
+                              }
                           }
                           return@Thread
                       }
@@ -1946,10 +2083,11 @@ jobs:
                           if (items.isEmpty()) continue
                           val title = if (j.title.isNotBlank()) j.title else (ro?.str("trayTitle") ?: "")
                           val row = Row(title, j.spot, items)
-                          ui.post { addRow(row) }
+                          ui.post { addRow(td, row) }
                       }
                       ui.post {
-                          if (rows.isEmpty()) {
+                          td.loading = false
+                          if (td.rows.isEmpty() && shownTab == td.idx) {
                               skelHome.visibility = View.GONE
                               status.text = "No rows returned\n" + Api.lastError
                               status.visibility = View.VISIBLE
@@ -1958,14 +2096,16 @@ jobs:
                   }.start()
               }
 
-              private fun addRow(r: Row) {
-                  rows.add(r)
-                  rowAdapter.notifyItemInserted(rows.size - 1)
-                  skelHome.visibility = View.GONE
-                  if (tab == 2 && !inDetail) status.visibility = View.GONE
-                  if (rows.size == 1) focusFirst(12)
+              private fun addRow(td: TabData, r: Row) {
+                  td.rows.add(r)
+                  if (td.rows === rows && shownTab == td.idx) {
+                      rowAdapter.notifyItemInserted(rows.size - 1)
+                      skelHome.visibility = View.GONE
+                      if (isHomeTab() && !inDetail) status.visibility = View.GONE
+                      if (rows.size == 1) focusFirst(12)
+                  }
                   if (r.spotlight) r.items.forEach { prefetchHero(it) }
-                  else if (rows.size <= 6) prefetchRow(r, 12)
+                  else if (td.rows.size <= 6) prefetchRow(r, 12)
               }
 
               private fun focusFirst(tries: Int) {
@@ -1975,31 +2115,36 @@ jobs:
                   }, 300)
               }
 
-              // show detail json: memory cache first, then network (call from a background thread)
-              private fun fetchDetail(cid: String): JSONObject? {
-                  synchronized(detailCache) { detailCache[cid] }?.let { return it }
-                  val j = Api.get(DETAIL_URL + cid)
-                  if (j != null) synchronized(detailCache) { detailCache[cid] = j }
+              // detail json: memory cache first, then network (call from a background thread)
+              // movie = true => the movie flavour of the request (key m<id>), else show / episode / trailer (key s<id>)
+              private fun fetchDetail(cid: String, movie: Boolean = false): JSONObject? {
+                  val key = dkey(cid, movie)
+                  synchronized(detailCache) { detailCache[key] }?.let { return it }
+                  val j = Api.get(DETAIL_URL + cid + (if (movie) MOVIE_DETAIL_Q else ""))
+                  if (j != null) synchronized(detailCache) { detailCache[key] = j }
                   return j
               }
 
-              // focused SHOW: warm everything the detail page needs, ahead of time.
+              // focused SHOW / MOVIE_BUNDLE: warm everything the detail page needs, ahead of time.
               //  1) (main thread, instant) decode the DETAIL-size title image + banner into Glide's memory cache,
-              //     so opening the show draws them with zero wait
+              //     so opening the item draws them with zero wait
               //  2) (background) fetch the detail json + download its banner / title / first episode thumbnails
-              // (episodes / trailers / other VOD have no detail page, they play directly, so nothing to prefetch)
+              // (episodes / trailers / MOVIE VOD have no detail page, they play directly, so nothing to prefetch)
               private fun prefetchDetail(item: Item) {
-                  if (item.sub != SUB_SHOW || item.cid.isBlank()) return
+                  if ((item.sub != SUB_SHOW && item.sub != SUB_MOVIE_BUNDLE) || item.cid.isBlank()) return
+                  val mv = item.sub == SUB_MOVIE_BUNDLE
                   if (item.logo != null) logoReq(item.logo, detLogoW, detLogoH).priority(Priority.NORMAL).preload()
                   img(item.bg ?: item.landscape, W_BG)?.let { bgBigReq(it).priority(Priority.LOW).preload() }
                   Api.pool.execute {
-                      val j = fetchDetail(item.cid) ?: return@execute
+                      val j = fetchDetail(item.cid, mv) ?: return@execute
                       val show = j.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return@execute
                       Prefetch.add(detBgUrl(show), true)
                       Prefetch.add(detLogoUrl(show), true)
-                      val data = parseSeasons(show)
-                      data.seasons.firstOrNull()?.let { s ->
-                          data.embedded[s.id].orEmpty().take(6).forEach { Prefetch.add(img(it.thumb, W_EP), true) }
+                      if (!mv) {
+                          val data = parseSeasons(show)
+                          data.seasons.firstOrNull()?.let { s ->
+                              data.embedded[s.id].orEmpty().take(6).forEach { Prefetch.add(img(it.thumb, W_EP), true) }
+                          }
                       }
                   }
               }
@@ -2096,7 +2241,7 @@ jobs:
                   bg.animate().cancel(); bg.animate().alpha(1f).setDuration(250).start()
                   info.animate().cancel(); info.animate().alpha(1f).setDuration(250).start()
                   scheduleTrailer(item)      // trailer only after banner + title are on screen
-                  prefetchDetail(item)       // then get the detail page data/images ready in the background (SHOW only)
+                  prefetchDetail(item)       // then get the detail page data/images ready in the background (SHOW / MOVIE_BUNDLE only)
               }
 
               // trailer for a home item. If the list item has no trailer url, look it up from DETAIL-V2 (cached).
@@ -2113,7 +2258,7 @@ jobs:
                   if (item.cid.isBlank()) { spotAdvanceLater(); return }
                   val token = heroToken
                   Thread {
-                      val j = fetchDetail(item.cid)
+                      val j = fetchDetail(item.cid, item.sub == SUB_MOVIE_BUNDLE)
                       val tu = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)?.let { trailerFrom(it) } ?: ""
                       if (j != null) trailerCache[item.cid] = tu
                       ui.post {
@@ -2142,7 +2287,7 @@ jobs:
 
               // loop inside spotlight row: next card, wraps to first
               private fun advanceSpot() {
-                  if (inDetail || inPlayer || tab != 2 || !isSpotRow()) return
+                  if (inDetail || inPlayer || !isHomeTab() || !isSpotRow()) return
                   val row = rows[curRow]
                   if (row.items.size <= 1) { player?.seekTo(0); player?.playWhenReady = true; return }
                   focusSpot((curPos + 1) % row.items.size, 10)
@@ -2219,7 +2364,7 @@ jobs:
                   super.onRestart()
                   if (inPlayer) return
                   if (inDetail) { if (!epMode) detailTrailerUrl?.let { schedulePlay(it, false) } }
-                  else if (tab == 2) hero?.let { scheduleTrailer(it) }
+                  else if (isHomeTab()) hero?.let { scheduleTrailer(it) }
               }
               override fun onDestroy() {
                   super.onDestroy()
@@ -2228,8 +2373,8 @@ jobs:
                   resetSprite()
               }
 
-              // ---------------------------------------------------------------- Direct play from the Shows page
-              // objectType == VOD that is not a SHOW (EPISODE, TRAILER, ...) goes straight to the player, no detail page.
+              // ---------------------------------------------------------------- Direct play from a listing page
+              // objectType == VOD that is not a SHOW / MOVIE_BUNDLE (EPISODE, TRAILER, MOVIE ...) goes straight to the player, no detail page.
               private fun playItem(item: Item, card: View) {
                   if (item.cid.isBlank()) return
                   lastCard = card
@@ -2238,7 +2383,7 @@ jobs:
                   openPlayer(ep, item.season, true)
               }
 
-              // coming back from a player that was opened from the Shows page
+              // coming back from a player that was opened from a listing page
               private fun restoreHome() {
                   side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
                   content.visibility = View.VISIBLE
@@ -2254,18 +2399,22 @@ jobs:
               }
 
               // ---------------------------------------------------------------- Detail page
-              // Only objectSubtype == SHOW opens here. Episodes / trailers / other VOD play directly (see playItem).
+              // SHOW -> show detail (seasons + episodes). MOVIE_BUNDLE -> movie detail (Watch Movie / Watch Trailer, audio / cast ... details, NO episodes).
+              // Episodes / trailers / MOVIE VOD play directly (see playItem).
               private fun openDetail(item: Item, card: View) {
-                  if (item.sub != SUB_SHOW || item.cid.isBlank()) return
+                  if ((item.sub != SUB_SHOW && item.sub != SUB_MOVIE_BUNDLE) || item.cid.isBlank()) return
+                  val mv = item.sub == SUB_MOVIE_BUNDLE
                   lastCard = card
                   heroRun?.let { ui.removeCallbacks(it) }
                   heroToken++
                   stopTrailer(false)
                   inDetail = true; epMode = false
+                  detailMovie = mv
+                  movieEp = null; trailerEp = null; trailerPlayUrl = null; lastBtn = null
                   val tok = ++detailToken
                   epToken++
                   detGateRun?.let { ui.removeCallbacks(it) }
-                  Prefetch.gate = false                       // this show's images first, everything else waits
+                  Prefetch.gate = false                       // this item's images first, everything else waits
                   curBox = dBox; curVideo = dVideo; curBg = dBg; curBoxW = detBoxW; curBoxH = detBoxH
                   content.visibility = View.GONE
                   status.visibility = View.GONE
@@ -2282,6 +2431,8 @@ jobs:
                   epStatus.visibility = View.GONE
                   showEpSkel(false)
                   dHint.visibility = View.GONE
+                  dTrailer.visibility = View.GONE
+                  dExtra.removeAllViews()
                   curSeason = -1; epFrom = 0; epHasMore = true; epLoading = false
                   detailTrailerUrl = null; latestEp = null
                   dBg.animate().cancel(); dBg.alpha = 1f
@@ -2295,17 +2446,17 @@ jobs:
                   dTag.visibility = View.GONE
                   dMeta.text = item.meta
                   dDesc.text = item.desc
-                  dWatch.text = "▶  Watch Latest Episode"
+                  dWatch.text = if (mv) "▶  Watch Movie" else "▶  Watch Latest Episode"
                   dStatus.visibility = View.GONE
                   dWatch.requestFocus()
                   ui.postDelayed({ if (inDetail && !epMode && !inPlayer) dWatch.requestFocus() }, 200)
 
-                  val cachedJ = synchronized(detailCache) { detailCache[item.cid] }
+                  val cachedJ = synchronized(detailCache) { detailCache[dkey(item.cid, mv)] }
                   if (cachedJ != null) bindDetail(cachedJ, item)
                   else {
                       setDetailSkel(true)                      // skeleton lines until the detail json arrives
                       Thread {
-                          val j = fetchDetail(item.cid)
+                          val j = fetchDetail(item.cid, mv)
                           ui.post { if (inDetail && tok == detailToken) bindDetail(j, item) }
                       }.start()
                   }
@@ -2373,6 +2524,70 @@ jobs:
                   dWatch.text = "▶  Watch Latest Episode" + (if (d.isEmpty()) "" else "   $d")
               }
 
+              // "Label  value" rows under the buttons (label grey + bold, value light). Cast may use 2 lines, the rest 1.
+              private fun setExtra(list: List<Pair<String, String>>) {
+                  dExtra.removeAllViews()
+                  for ((k, v) in list) {
+                      if (v.isBlank()) continue
+                      val sb = SpannableStringBuilder()
+                      sb.append(k).append("   ")
+                      sb.setSpan(ForegroundColorSpan(Color.parseColor("#9AA0B4")), 0, k.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                      sb.setSpan(StyleSpan(Typeface.BOLD), 0, k.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                      sb.append(v)
+                      val t = TextView(this).apply {
+                          setTextColor(Color.parseColor("#E4E4EA"))
+                          maxLines = if (k == "Cast") 2 else 1
+                          ellipsize = TextUtils.TruncateAt.END
+                          text = sb
+                      }
+                      tx(t, 14f)
+                      dExtra.addView(t, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(5) })
+                  }
+              }
+
+              // Audio / Subtitles / Cast / Director / Advisory / Quality from the movie bundle (e) and its MOVIE child (me)
+              private fun movieExtraRows(e: JSONObject, me: JSONObject?): List<Pair<String, String>> {
+                  val out = ArrayList<Pair<String, String>>()
+
+                  val al = e.optJSONArray("audio_language_list") ?: me?.optJSONArray("audio_language_list")
+                  val audio = LinkedHashSet<String>()
+                  if (al != null) for (k in 0 until al.length()) al.optJSONObject(k)?.str("lang_label")?.let { audio.add(it) }
+                  out.add("Audio" to audio.joinToString(", "))
+
+                  val sl = e.optJSONArray("subtitle_language_list") ?: me?.optJSONArray("subtitle_language_list")
+                  val subs = LinkedHashSet<String>()
+                  if (sl != null) for (k in 0 until sl.length()) {
+                      val o = sl.optJSONObject(k) ?: continue
+                      val n = o.str("subtitleDisplayName") ?: o.str("subtitleLanguageName") ?: continue
+                      subs.add(if (o.optString("subtitleType").equals("CC", true)) "$n (CC)" else n)
+                  }
+                  out.add("Subtitles" to subs.joinToString(", "))
+
+                  // "Cast: A, B | Director: X | Producer: Y"
+                  val crew = e.str("cast_and_crew") ?: me?.str("cast_and_crew") ?: ""
+                  var cast = ""; var dir = ""
+                  for (seg in crew.split("|")) {
+                      val key = seg.substringBefore(":").trim().lowercase()
+                      val value = seg.substringAfter(":", "").trim()
+                      if (key == "cast") cast = value.split(",").map { it.trim() }.filter { it.isNotEmpty() }.take(8).joinToString(", ")
+                      else if (key == "director") dir = value
+                  }
+                  out.add("Cast" to cast)
+                  out.add("Director" to dir)
+
+                  e.str("snp_tags")?.let { t ->
+                      out.add("Advisory" to t.split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", "))
+                  }
+
+                  val q = LinkedHashSet<String>()
+                  for (src in listOf(me, e)) {
+                      if (src == null) continue
+                      for (k in listOf("Maximum_Resolution", "Maximum_Video_Quality", "Maximum_Audio_Quality")) src.str(k)?.let { q.add(qLabel(it)) }
+                  }
+                  out.add("Quality" to q.joinToString("  •  "))
+                  return out
+              }
+
               private fun bindDetail(j: JSONObject?, item: Item) {
                   setDetailSkel(false)
                   val show = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
@@ -2383,6 +2598,7 @@ jobs:
                       return
                   }
                   val tok = detailToken
+                  val movie = detailMovie
                   val m = show.optJSONObject("metadata") ?: JSONObject()
                   val e = m.optJSONObject("emfAttributes") ?: JSONObject()
 
@@ -2390,43 +2606,78 @@ jobs:
                   showTitle = title
                   val desc = m.str("shortDescription") ?: m.str("longDescription") ?: item.desc
 
-                  // "Hindi • 2026 • U/A 7+ • 16 Episodes • Comedy, Game show"
+                  // movie: children of the bundle = MOVIE (the real film, this id goes to the player) + MOVIE_TRAILER
+                  val movieChild = if (movie) childBySubtype(show, "MOVIE") else null
+                  val trailerChild = if (movie) childBySubtype(show, "MOVIE_TRAILER") else null
+                  val mm = movieChild?.optJSONObject("metadata")
+                  val me = mm?.optJSONObject("emfAttributes")
+
+                  // show : "Hindi • 2026 • U/A 7+ • 16 Episodes • Comedy, Game show"
+                  // movie: "Tamil • 2026 • U/A 13+ • 2h 18m • Comedy, Drama, Musical"
                   val parts = ArrayList<String>()
                   (m.str("languageLabel") ?: e.str("region_of_origin"))?.let { parts.add(it) }
                   m.str("year")?.let { parts.add(it) }
                   m.str("pcVodLabel")?.let { parts.add(it) }
-                  val sn = m.optInt("seasonCount")
-                  if (sn > 1) parts.add("$sn Seasons")
-                  val ec = m.optInt("episodeCount")
-                  if (ec > 0) parts.add("$ec Episodes")
+                  if (movie) {
+                      val d = fmtDur(mm?.optInt("duration") ?: 0)
+                      if (d.isNotEmpty()) parts.add(d)
+                  } else {
+                      val sn = m.optInt("seasonCount")
+                      if (sn > 1) parts.add("$sn Seasons")
+                      val ec = m.optInt("episodeCount")
+                      if (ec > 0) parts.add("$ec Episodes")
+                  }
                   m.optJSONArray("genres")?.let { g ->
                       val l = (0 until g.length()).map { k -> g.optString(k) }.filter { it.isNotBlank() }
                       if (l.isNotEmpty()) parts.add(l.joinToString(", "))
                   }
                   dMeta.text = parts.joinToString(" • ")
                   dDesc.text = desc
-                  val tag = e.str("highlight_text")
+                  val tag = e.str("highlight_text") ?: (if (movie) m.optJSONObject("badges")?.str("primary_tag") else null)
                   if (tag != null) { dTag.text = tag; dTag.visibility = View.VISIBLE } else dTag.visibility = View.GONE
 
-                  // seasons / bundles, newest first
-                  val data = parseSeasons(show)
-                  seasons.clear()
-                  seasons.addAll(data.seasons)
-                  data.latest?.let { setWatchLabel(it) }
+                  // seasons / bundles, newest first (shows only)
+                  val data: DetailData? = if (movie) null else parseSeasons(show)
+                  if (data != null) {
+                      seasons.clear()
+                      seasons.addAll(data.seasons)
+                      data.latest?.let { setWatchLabel(it) }
+                  }
                   dStatus.visibility = View.GONE
 
                   val trailer = trailerFrom(show)
                   detailTrailerUrl = trailer
 
+                  // "Watch Trailer" button: plays the trailer inside the real player UI (direct trailer url, no stream api needed)
+                  val tUrl = trailerUrlAny(show)
+                  if (tUrl != null) {
+                      val tm = trailerChild?.optJSONObject("metadata")
+                      val tid = trailerIdFrom(show) ?: (tm?.optString("contentId") ?: "")
+                      trailerPlayUrl = tUrl
+                      trailerEp = Ep(tid, "Trailer", 0, desc, e.str("thumbnail") ?: item.landscape, tm?.optInt("duration") ?: 0, 0L)
+                      dTrailer.visibility = View.VISIBLE
+                  } else {
+                      trailerPlayUrl = null; trailerEp = null
+                      dTrailer.visibility = View.GONE
+                  }
+
+                  if (movie) {
+                      val mid = mm?.optString("contentId").orEmpty()
+                      movieEp = if (movieChild != null && mid.isNotBlank())
+                          Ep(mid, "", 0, desc, me?.str("thumbnail") ?: e.str("thumbnail") ?: item.landscape, mm?.optInt("duration") ?: 0, mm?.optLong("originalAirDate") ?: 0L)
+                      else null
+                      dWatch.text = "▶  Watch Movie"
+                      setExtra(movieExtraRows(e, me))
+                  }
+
                   // title image (masthead_logo_rectangualar, w=700) + background (w=1200) + first episode thumbnails => then the trailer
                   val logoUrl = detLogoUrl(show) ?: item.logo
                   val bgUrl = detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)
-                  val thumbs = data.seasons.firstOrNull()?.let { s ->
-                      data.embedded[s.id].orEmpty().take(4).mapNotNull { img(it.thumb, W_EP) }
-                  }.orEmpty()
+                  val thumbs: List<String> = if (data == null) emptyList() else
+                      (data.seasons.firstOrNull()?.let { s -> data.embedded[s.id].orEmpty().take(4).mapNotNull { img(it.thumb, W_EP) } }.orEmpty())
                   loadDetailAssets(tok, title, logoUrl, bgUrl, thumbs, trailer)
 
-                  if (seasons.isEmpty()) return
+                  if (movie || seasons.isEmpty()) return
                   dHint.visibility = View.VISIBLE
                   buildSeasonCol()
                   selectSeason(0, false)      // newest bundle first; list loads in the background
@@ -2641,9 +2892,12 @@ jobs:
                   return StreamInfo(s.url, s.enc, s.laUrl, s.drm, all)
               }
 
-              // opens the player for an episode (from the detail page, from a Shows-page card, or switching episode inside the player)
-              private fun openPlayer(ep: Ep, seasonNum: Int, fromHome: Boolean = false) {
-                  if (ep.id.isBlank()) return
+              // opens the player for an episode / movie / trailer.
+              //  fromHome  : opened straight from a listing card (no detail page behind it)
+              //  noEps     : movie or trailer => the "Episodes" button is hidden
+              //  directUrl : play this url directly (trailers) instead of asking the stream api
+              private fun openPlayer(ep: Ep, seasonNum: Int, fromHome: Boolean = false, noEps: Boolean = false, directUrl: String? = null) {
+                  if (ep.id.isBlank() && directUrl == null) return
                   val tok = ++playToken
                   curPlayEp = ep; curPlaySeason = seasonNum
                   if (!inPlayer) {
@@ -2655,12 +2909,12 @@ jobs:
                       Prefetch.paused = true                 // all bandwidth for the video
                       detail.visibility = View.GONE
                       if (fromHome) {
-                          // no detail page / season list behind this player: hide the home screen and the Episodes button
+                          // no detail page / season list behind this player: hide the home screen
                           content.visibility = View.GONE
                           side.visibility = View.GONE; brand.visibility = View.GONE
                           status.visibility = View.GONE
-                          pillEps.visibility = View.GONE
-                      } else pillEps.visibility = View.VISIBLE
+                      }
+                      pillEps.visibility = if (fromHome || noEps) View.GONE else View.VISIBLE
                       playerLayer.visibility = View.VISIBLE
                   } else {
                       mainPlayer?.let { it.stop(); it.clearMediaItems() }
@@ -2675,7 +2929,7 @@ jobs:
                   pStatus.visibility = View.GONE
                   pCue.text = ""; pCue.visibility = View.GONE
                   pSpin.visibility = View.VISIBLE
-                  // episode thumbnail (w=1000) behind the buffering animation until the first video frame is drawn
+                  // episode / movie thumbnail (w=1000) behind the buffering animation until the first video frame is drawn
                   pThumb.animate().cancel(); pThumb.alpha = 1f; pThumb.visibility = View.VISIBLE
                   Glide.with(this).clear(pThumb)
                   Glide.with(this).load(img(ep.thumb, W_THUMB)).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(pThumb)
@@ -2687,11 +2941,11 @@ jobs:
                   showControls()
                   ui.removeCallbacks(tickRun); ui.postDelayed(tickRun, 500)
 
-                  // stream url + license, plus the episode DETAIL-V2 (subtitles, seek-preview sprite, exact titles) fetched in parallel
+                  // stream url + license, plus the content DETAIL-V2 (subtitles, seek-preview sprite, exact titles) fetched in parallel
                   Thread {
-                      val df = Api.pool.submit(Callable<JSONObject?> { fetchDetail(ep.id) })
-                      val s = fetchStream(ep.id)
-                      val ex = parseEpExtra(try { df.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })
+                      val df = if (ep.id.isBlank()) null else Api.pool.submit(Callable<JSONObject?> { fetchDetail(ep.id) })
+                      val s = if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else fetchStream(ep.id)
+                      val ex = parseEpExtra(try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })
                       ui.post {
                           if (tok != playToken || !inPlayer) return@post
                           if (ex != null && ex.en > 0) {
@@ -2819,7 +3073,7 @@ jobs:
                   val cur = curPlayEp ?: run { closePlayer(); return }
                   if (playFromHome) { closePlayer(); return }
                   val i = eps.indexOfFirst { it.id == cur.id }
-                  if (i > 0) openPlayer(eps[i - 1], curPlaySeason) else closePlayer()
+                  if (i > 0) openPlayer(eps[i - 1], curPlaySeason) else closePlayer()      // movie / trailer: not in the list => back to the detail page
               }
 
               private fun updateProgress() {
@@ -3033,6 +3287,7 @@ jobs:
                   schedHide()
                   val f = currentFocus
                   val onPill = f === pillSub || f === pillSet || f === pillEps
+                  val noEpsBtn = pillEps.visibility != View.VISIBLE
                   when (code) {
                       KeyEvent.KEYCODE_DPAD_LEFT -> {
                           if (f === pSeek) { seekBy(-step); return true }
@@ -3041,7 +3296,7 @@ jobs:
                       KeyEvent.KEYCODE_DPAD_RIGHT -> {
                           if (f === pSeek) { seekBy(step); return true }
                           if (f === pPause) { pSeek.requestFocus(); return true }
-                          if (f === pillEps || f === pBack || (playFromHome && f === pillSet)) return true
+                          if (f === pillEps || f === pBack || (noEpsBtn && f === pillSet)) return true
                       }
                       KeyEvent.KEYCODE_DPAD_UP -> {
                           if (f === pSeek) pPause.requestFocus()
@@ -3243,7 +3498,7 @@ jobs:
               }
 
               private fun openPlayerEps() {
-                  if (panel != 0 || seasons.isEmpty() || playFromHome) return
+                  if (panel != 0 || seasons.isEmpty() || pillEps.visibility != View.VISIBLE) return
                   panel = 2
                   ui.removeCallbacks(hideRun)
                   ctrlVisible = false
@@ -3300,7 +3555,7 @@ jobs:
                   Prefetch.paused = false
                   Prefetch.gate = true
                   if (playFromHome) {
-                      // opened from a Shows-page card: go back to the Shows page (same card focused, trailer resumes)
+                      // opened from a listing card: go back to that page (same card focused, trailer resumes)
                       playFromHome = false
                       pillEps.visibility = View.VISIBLE
                       restoreHome()
@@ -3314,7 +3569,7 @@ jobs:
                       ui.postDelayed({ if (inDetail && epMode && !inPlayer) focusPlayingEp() }, 150)
                   } else {
                       heroLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
-                      dWatch.requestFocus()
+                      (lastBtn ?: dWatch).requestFocus()                 // back on the button that started the player (Watch Movie / Watch Trailer ...)
                       detailTrailerUrl?.let { schedulePlay(it, false) }
                   }
               }
@@ -3429,10 +3684,11 @@ jobs:
                           v.translationZ = if (has) u(10).toFloat() else 0f
                           if (has) { warm(pos); onCardFocus(item, row, pos, rowPos) }
                       }
-                      // SHOW (listing rows AND spotlight) -> show detail page.
-                      // Any other objectType == VOD (EPISODE, TRAILER, ...) -> straight to the player.
+                      // SHOW -> show detail page (listing rows AND spotlight).
+                      // MOVIE_BUNDLE -> movie detail page.
+                      // Any other objectType == VOD (EPISODE, TRAILER, MOVIE ...) -> straight to the player.
                       h.card.setOnClickListener {
-                          if (item.sub == SUB_SHOW) openDetail(item, h.card)
+                          if (item.sub == SUB_SHOW || item.sub == SUB_MOVIE_BUNDLE) openDetail(item, h.card)
                           else if (item.obj == OBJ_VOD) playItem(item, h.card)
                       }
                   }
@@ -3532,7 +3788,6 @@ jobs:
           }
 
           EOF
-
 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
