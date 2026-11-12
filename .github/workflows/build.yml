@@ -5444,7 +5444,7 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 3 applied')
           PYEOF
-    - name: Apply update 4 (Settings, Live TV + catchup)
+                - name: Apply update 4 (Settings, Live TV + catchup)
         run: |
           set -e
           D=app/src/main/res/drawable
