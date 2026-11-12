@@ -5444,6 +5444,474 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 3 applied')
           PYEOF
+            - name: Apply update 4 (Settings, Live TV + catchup)
+        run: |
+          set -e
+          D=app/src/main/res/drawable
+          # premium Live TV icon (broadcast waves + live dot), vector SVG
+          cat > $D/ic_livetv.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M12,9.8c-1.2,0 -2.2,1 -2.2,2.2s1,2.2 2.2,2.2 2.2,-1 2.2,-2.2 -1,-2.2 -2.2,-2.2z"/><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round" android:pathData="M8.46,8.46A5,5 0 0 0 8.46,15.54M15.54,8.46A5,5 0 0 1 15.54,15.54M5.99,5.99A8.5,8.5 0 0 0 5.99,18.01M18.01,5.99A8.5,8.5 0 0 1 18.01,18.01"/></vector>
+          EOF
+
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:90]))
+              t = t.replace(old, new)
+
+          # ================= TOP LEVEL: settings, channels, epg, live token =================
+          TOP = r'''// ---------------- Settings (saved) ----------------
+          object AppSettings {
+              @Volatile var autoplay = true          // trailer autoplay, default ON
+              @Volatile var highQuality = false      // image quality: false = Optimized (default), true = High (direct jpg / png)
+              private fun sp() = Prefetch.app.getSharedPreferences("liv", Context.MODE_PRIVATE)
+              fun load() { try { autoplay = sp().getBoolean("autoplay", true); highQuality = sp().getBoolean("hq", false) } catch (e: Exception) { } }
+              fun save() { try { sp().edit().putBoolean("autoplay", autoplay).putBoolean("hq", highQuality).apply() } catch (e: Exception) { } }
+          }
+
+          // ---------------- Live TV ----------------
+          const val EPG_URL = "https://jiotvapi.cdn.jio.com/apis/v1.3/getepg/get?channel_id="
+          const val EPG_IMG = "https://jiotvimages.cdn.jio.com/dare_images/shows/"
+          const val LIVE_AUTH_ID = "1090552199"        // content id used only to get a fresh hdnea token
+
+          class Chan(val name: String, val cat: String, val base: String, val logo: String, val jio: String)
+          class Prog(val name: String, val desc: String, val thumb: String?, val start: Long, val end: Long)
+
+          val CHANNELS = listOf(
+              Chan("SET HD", "Entertainment", "https://dishmt.slivcdn.com/hls/live/2011671/SETHD/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/Sony_HD.png", "291"),
+              Chan("Sony SAB HD", "Entertainment", "https://dishmt.slivcdn.com/hls/live/2011749/SABHD/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonySAB.png", "471"),
+              Chan("Sony Pal", "Entertainment", "https://dishmt.slivcdn.com/hls/live/2011741/SonyPalSD/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyPAL.png", "474"),
+              Chan("Sony Marathi", "Marathi", "https://dishmt.slivcdn.com/hls/live/2011740/SonyMarathi/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyMarathi.png", "1146"),
+              Chan("Sony Yay Hindi", "Kids", "https://dishmt.slivcdn.com/hls/live/2011746/SonyYaySD/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyYAYHin.png", "872"),
+              Chan("Sony Max HD", "Movies", "https://dishmt.slivcdn.com/hls/live/2011670/SonyMaxhd/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyMAX.png", "476"),
+              Chan("Sony MAX2", "Movies", "https://dishmt.slivcdn.com/hls/live/2011908/MAX2/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyMAX2.png", "483"),
+              Chan("Sony Wah", "Movies", "https://dishmt.slivcdn.com/hls/live/2011906/SonyWah/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyWAH.png", "1393"),
+              Chan("Sony PIX HD", "Movies", "https://dishmt.slivcdn.com/hls/live/2011748/PIXHD/master.m3u8", "https://jiotvimages.cdn.jio.com/dare_images/images/channel/5cdc421363244aed3b06fc0f53bc1db2.png", "762"),
+              Chan("Sony Aath", "Bengali", "https://dishmt.slivcdn.com/hls/live/2011641/SonyAathSD/master.m3u8", "https://jiotvimages.cdn.jio.com/dare_images/images/channel/3bc4288071a532cad74816bab70acd05.png", "697"),
+              Chan("SONY TEN 1 HD", "Sports", "https://dishmt.slivcdn.com/hls/live/2011747/TEN1HD/master.m3u8", "https://jiotvimages.cdn.jio.com/dare_images/images/Ten_HD.png", "162"),
+              Chan("SONY TEN 2 HD", "Sports", "https://dishmt.slivcdn.com/hls/live/2020434/TEN2HD/master.m3u8", "https://jiotvimages.cdn.jio.com/dare_images/images/Ten2_HD.png", "891"),
+              Chan("SONY TEN 3 HD", "Sports", "https://dishmt.slivcdn.com/hls/live/2020591/TEN3HD/master.m3u8", "https://jiotvimages.cdn.jio.com/dare_images/images/Ten3_HD.png", "892"),
+              Chan("SONY TEN 5 HD", "Sports", "https://dishmt.slivcdn.com/hls/live/2020595/TEN5HD/master.m3u8", "https://jiotvimages.cdn.jio.com/dare_images/images/Six_HD.png", "155"),
+              Chan("Sony BBC Earth HD", "Infotainment", "https://dishmt.slivcdn.com/hls/live/2011907/SonyBBCEarthHD/master.m3u8", "https://jiotv.catchup.cdn.jio.com/dare_images/images/SonyBBCEarthHin.png", "821")
+          )
+
+          // EPG of one channel / one day (offset 0 = today GMT, -1 = yesterday ... -7)
+          fun fetchEpg(jio: String, offset: Int): List<Prog>? {
+              return try {
+                  val req = Request.Builder().url(EPG_URL + jio + "&offset=" + offset)
+                      .header("User-Agent", STREAM_UA).header("Accept", "application/json").build()
+                  Net.client.newCall(req).execute().use { r ->
+                      if (!r.isSuccessful) { Api.lastError = "HTTP " + r.code; null }
+                      else {
+                          val arr = JSONObject(r.body!!.string()).optJSONArray("epg")
+                          val out = ArrayList<Prog>()
+                          if (arr != null) for (i in 0 until arr.length()) {
+                              val o = arr.optJSONObject(i) ?: continue
+                              val th = o.str("episodeThumbnail") ?: o.str("episodePoster")
+                              out.add(Prog(o.optString("showname"), o.optString("description"), if (th == null) null else EPG_IMG + th,
+                                  o.optLong("startEpoch"), o.optLong("endEpoch")))
+                          }
+                          out.sortedBy { it.start }
+                      }
+                  }
+              } catch (e: Exception) { Api.lastError = e.toString(); null }
+          }
+
+          // hdnea token: taken from the stream url of LIVE_AUTH_ID, cached until 10 minutes before its exp
+          object LiveAuth {
+              private var tok = ""
+              private var expMs = 0L
+              private var at = 0L
+              @Synchronized fun token(): String? {
+                  val now = System.currentTimeMillis()
+                  if (tok.isNotEmpty() && now < max(expMs - 600000L, at + 60000L)) return tok
+                  val s = fetchStream(LIVE_AUTH_ID)
+                  val raw = s?.url
+                  if (raw == null) return if (tok.isNotEmpty() && now < expMs) tok else null
+                  val m = Regex("hdnea=([^&\\s]+)").find(raw) ?: return null
+                  tok = "hdnea=" + m.groupValues[1]
+                  expMs = (Regex("exp=(\\d+)").find(tok)?.groupValues?.get(1)?.toLongOrNull() ?: 0L) * 1000L
+                  at = now
+                  return tok
+              }
+          }
+
+          fun fmtTimeIst(ms: Long): String =
+              if (ms <= 0L) "" else SimpleDateFormat("hh:mm a", Locale.ENGLISH).apply { timeZone = java.util.TimeZone.getTimeZone("Asia/Kolkata") }.format(Date(ms))
+
+          object Net {'''
+          rep('object Net {', TOP)
+
+          # ================= image quality: High = direct url (domain replacement stays) =================
+          rep('return b + (if (b.contains("?")) "&" else "?") + "h=auto&w=" + w + "&q=eco"',
+              'if (AppSettings.highQuality || b.contains("jio.com")) return b\n    return b + (if (b.contains("?")) "&" else "?") + "h=auto&w=" + w + "&q=eco"')
+
+          # ================= tabs: ... Movies, Live TV, Settings =================
+          rep('private val tabNames = listOf("Search", "Home", "My List", "TV Shows", "Sports", "Movies")',
+              'private val tabNames = listOf("Search", "Home", "My List", "TV Shows", "Sports", "Movies", "Live TV", "Settings")')
+          rep('R.drawable.ic_tv, R.drawable.ic_sports, R.drawable.ic_movie)',
+              'R.drawable.ic_tv, R.drawable.ic_sports, R.drawable.ic_movie, R.drawable.ic_livetv, R.drawable.ic_settings)')
+          rep('homeTabs[1] = TabData(1, HOME_URL)', 'AppSettings.load()\n        homeTabs[1] = TabData(1, HOME_URL)')
+          rep('content.addView(skelHome, lp(-1, -1))', 'content.addView(skelHome, lp(-1, -1))\n        buildLive(); buildSettings()')
+          rep('for (k in tabViews.indices) styleTab(k)',
+              'for (k in tabViews.indices) styleTab(k)\n        liveLayer.visibility = View.GONE; settingsLayer.visibility = View.GONE')
+          rep('if (i == 0) { openSearch(); return }',
+              'if (i == 0) { openSearch(); return }\n        if (i == 6) { openLive(); return }\n        if (i == 7) { openSettings(); return }')
+          rep('if ((isHomeTab() || tab == 0) && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()',
+              'if ((isHomeTab() || tab == 0 || tab >= 6) && f != null && tabViews.none { it === f }) tabViews[tab].requestFocus()')
+          rep('if (dir == View.FOCUS_LEFT && searchLeft()) return true',
+              'if (dir == View.FOCUS_LEFT && (searchLeft() || extraLeft())) return true')
+
+          # ================= trailer autoplay switch =================
+          rep('private fun scheduleTrailer(item: Item) {',
+              'private fun scheduleTrailer(item: Item) {\n        if (!AppSettings.autoplay) { stopTrailer(false); return }')
+          rep('private fun schedulePlay(url: String, spotLoop: Boolean) {',
+              'private fun schedulePlay(url: String, spotLoop: Boolean) {\n        if (!AppSettings.autoplay) return')
+
+          # ================= live hooks into the existing player / episodes panel =================
+          rep('lastRetry = { openPlayer(ep, seasonNum, fromHome, noEps, directUrl, startMs) }',
+              'lastRetry = { openPlayer(ep, seasonNum, fromHome, noEps, directUrl, startMs) }\n        if (directUrl != "live://") liveMode = false')
+          rep('val df = if (ep.id.isBlank()) null else Api.pool.submit(Callable<JSONObject?> { fetchDetail(ep.id) })',
+              'val df = if (ep.id.isBlank() || directUrl == "live://") null else Api.pool.submit(Callable<JSONObject?> { fetchDetail(ep.id) })')
+          rep('val s = if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else fetchStream(ep.id)',
+              'val s = if (directUrl == "live://") liveStream() else if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else fetchStream(ep.id)')
+          rep('private fun restoreHome() {', 'private fun restoreHome() {\n        if (liveMode) { restoreLive(); return }')
+          rep('private fun playEpisode(ep: Ep) {', 'private fun playEpisode(ep: Ep) {\n        if (liveMode) { playCatchup(ep); return }')
+          rep('private fun loadEpisodes() {',
+              'private fun loadEpisodes() {\n        if (liveMode) { if (!epLoading && eps.isEmpty()) loadLiveEpg(); return }')
+          rep('val pos = if (id == null) -1 else eps.indexOfFirst { it.id == id }',
+              'var pos = if (id == null) -1 else eps.indexOfFirst { it.id == id }\n        if (pos < 0 && liveMode) pos = liveNowIndex()')
+          rep('else if (pos == 0 && curSeason == 0) { h.badge.text = "LATEST"; h.badge.visibility = View.VISIBLE }',
+              'else if (liveMode) { val nw = System.currentTimeMillis(); if (ep.air <= nw && nw < ep.air + ep.dur * 1000L) { h.badge.text = "LIVE NOW"; h.badge.visibility = View.VISIBLE } else h.badge.visibility = View.GONE }\n                      else if (pos == 0 && curSeason == 0) { h.badge.text = "LATEST"; h.badge.visibility = View.VISIBLE }')
+          rep('fmtDate(ep.air, true).takeIf { it.isNotEmpty() }?.let { bits.add(it) }',
+              '(if (liveMode) fmtTimeIst(ep.air) else fmtDate(ep.air, true)).takeIf { it.isNotEmpty() }?.let { bits.add(it) }')
+
+          # ================= members: Live TV page, Settings page, catchup =================
+          MEMBERS = r'''// ---------------------------------------------------------------- Live TV
+              private lateinit var liveLayer: FrameLayout
+              private lateinit var liveGrid: RecyclerView
+              private var liveCardW = 0
+              private var liveCardH = 0
+              private val LIVE_COLS = 5
+              private var liveCh: Chan? = null
+              private var liveMode = false
+              private var liveStartS = 0L
+              private var liveEndS = 0L
+              private var liveLastCard: View? = null
+
+              inner class LiveVH(val card: FrameLayout, val iv: ImageView, val border: View, val tv: TextView) : RecyclerView.ViewHolder(card)
+
+              inner class LiveAdapter : RecyclerView.Adapter<LiveVH>() {
+                  override fun getItemCount() = CHANNELS.size
+                  override fun onCreateViewHolder(p: ViewGroup, t: Int): LiveVH {
+                      val card = FrameLayout(this@MainActivity).apply {
+                          layoutParams = RecyclerView.LayoutParams(liveCardW, liveCardH).apply { setMargins(u(8), u(8), u(8), u(8)) }
+                          clipChildren = false
+                          isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                          background = GradientDrawable().apply { cornerRadius = u(12).toFloat(); setColor(Color.argb(255, 22, 25, 38)) }
+                      }
+                      val iv = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.FIT_CENTER
+                          setPadding(u(22), u(18), u(22), u(10))
+                      }
+                      val tv = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                          maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                          setPadding(u(8), 0, u(8), u(8))
+                      }
+                      tx(tv, 14f)
+                      val border = View(this@MainActivity).apply {
+                          background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(12).toFloat() }
+                          alpha = 0f
+                      }
+                      card.addView(iv, FrameLayout.LayoutParams(-1, liveCardH - u(36), Gravity.TOP))
+                      card.addView(tv, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+                      card.addView(border, FrameLayout.LayoutParams(-1, -1))
+                      return LiveVH(card, iv, border, tv)
+                  }
+                  override fun onBindViewHolder(h: LiveVH, pos: Int) {
+                      val c = CHANNELS[pos]
+                      Glide.with(this@MainActivity).load(c.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(h.iv)
+                      h.tv.text = c.name
+                      h.card.animate().cancel()
+                      h.card.scaleX = 1f; h.card.scaleY = 1f; h.border.alpha = 0f; h.card.translationZ = 0f
+                      h.card.setOnFocusChangeListener { v, has ->
+                          v.animate().scaleX(if (has) 1.08f else 1f).scaleY(if (has) 1.08f else 1f).setDuration(150).start()
+                          h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
+                          v.translationZ = if (has) u(10).toFloat() else 0f
+                      }
+                      h.card.setOnClickListener { playLive(c, h.card) }
+                  }
+              }
+
+              private fun buildLive() {
+                  liveLayer = FrameLayout(this).apply { setBackgroundColor(Color.argb(255, 5, 6, 12)); visibility = View.GONE }
+                  val head = TextView(this).apply { text = "Live TV"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+                  tx(head, 24f)
+                  liveLayer.addView(head, lp(-2, -2, Gravity.TOP or Gravity.START).apply { leftMargin = u(110); topMargin = (H * 0.07f).toInt() })
+                  val availW = W - u(110) - u(32) - u(16)
+                  liveCardW = availW / LIVE_COLS - u(16)
+                  liveCardH = (liveCardW * 0.78f).toInt()
+                  liveGrid = RecyclerView(this).apply {
+                      layoutManager = androidx.recyclerview.widget.GridLayoutManager(this@MainActivity, LIVE_COLS)
+                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; isFocusableInTouchMode = false
+                      setPadding(u(8), u(10), u(8), u(40))
+                  }
+                  liveGrid.adapter = LiveAdapter()
+                  liveLayer.addView(liveGrid, lp(-1, -1).apply { leftMargin = u(110); topMargin = (H * 0.16f).toInt(); rightMargin = u(32) })
+                  root.addView(liveLayer, lp(-1, -1))
+              }
+
+              private fun openLive() {
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  content.visibility = View.GONE
+                  status.visibility = View.GONE
+                  liveLayer.visibility = View.VISIBLE
+                  ui.postDelayed({
+                      if (tab == 6 && !inDetail && !inPlayer) liveGrid.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+                  }, 120)
+              }
+
+              // IST date vs GMT date: between 00:00 and 05:30 IST the api day (GMT) is still yesterday => today = offset 1
+              private fun liveBaseOffset(): Int {
+                  val c = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("Asia/Kolkata"))
+                  val mins = c.get(java.util.Calendar.HOUR_OF_DAY) * 60 + c.get(java.util.Calendar.MINUTE)
+                  return if (mins < 330) 1 else 0
+              }
+
+              // date column of the catchup panel: Today, Yesterday, 10 Nov ... (offset down to -7)
+              private fun liveDays(): List<Season> {
+                  val out = ArrayList<Season>()
+                  val base = liveBaseOffset()
+                  val f = SimpleDateFormat("dd MMM", Locale.ENGLISH).apply { timeZone = java.util.TimeZone.getTimeZone("Asia/Kolkata") }
+                  for (d in 0..7) {
+                      val off = base - d
+                      if (off < -7) break
+                      val label = when (d) { 0 -> "Today"; 1 -> "Yesterday"; else -> f.format(Date(System.currentTimeMillis() - d * 86400000L)) }
+                      out.add(Season(off.toString(), label, 0, 0, 0L))
+                  }
+                  return out
+              }
+
+              // live: base_url?hdnea=...   catchup: master-archive.m3u8?startTime=..&endTime=..&hdnea=...
+              private fun liveStream(): StreamInfo? {
+                  val ch = liveCh ?: return null
+                  val tk = LiveAuth.token() ?: return null
+                  val url = if (liveStartS > 0L)
+                      ch.base.replace("master.m3u8", "master-archive.m3u8") + "?startTime=" + liveStartS + "&endTime=" + liveEndS + "&" + tk
+                  else ch.base + "?" + tk
+                  return StreamInfo(url, false, "", "", emptyList())
+              }
+
+              private fun playLive(c: Chan, card: View) {
+                  liveLastCard = card
+                  liveCh = c; liveStartS = 0L; liveEndS = 0L
+                  liveMode = true
+                  showTitle = "Live"
+                  seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+                  seasons.addAll(liveDays())
+                  buildSeasonCol()
+                  epTab.text = "Catchup"
+                  (pillEps.getChildAt(1) as TextView).text = "Catchup"
+                  liveLayer.visibility = View.GONE
+                  openPlayer(Ep("", c.name, 0, "", null, 0, 0L), 0, true, false, "live://")
+                  pillEps.visibility = View.VISIBLE
+                  selectSeason(0, false)
+              }
+
+              private fun playCatchup(ep: Ep) {
+                  val ch = liveCh ?: return
+                  val now = System.currentTimeMillis()
+                  val st = ep.air
+                  val en = ep.air + ep.dur * 1000L
+                  if (st > now) { toast("This program has not aired yet"); return }
+                  if (now < en) {                                       // airing right now => live
+                      liveStartS = 0L; liveEndS = 0L
+                      showTitle = "Live"
+                      openPlayer(Ep(ep.id, ch.name, 0, ep.desc, null, 0, 0L), 0, true, false, "live://")
+                      return
+                  }
+                  if (st < now - 7 * 86400000L) { toast("Catchup is available for the last 7 days only"); return }
+                  val endCap = min(en, now - 30000L)                    // end time must be at least 30s in the past
+                  if (endCap <= st) { toast("Not available yet"); return }
+                  liveStartS = st / 1000L; liveEndS = endCap / 1000L
+                  showTitle = ch.name
+                  openPlayer(Ep(ep.id, ep.title, 0, ep.desc, null, ((endCap - st) / 1000L).toInt(), ep.air), 0, true, false, "live://")
+              }
+
+              private fun loadLiveEpg() {
+                  val ch = liveCh ?: return
+                  if (curSeason !in seasons.indices) return
+                  val tok = epToken
+                  val off = seasons[curSeason].id.toIntOrNull() ?: 0
+                  epLoading = true
+                  Thread {
+                      val list = fetchEpg(ch.jio, off)
+                      ui.post {
+                          if (tok != epToken || !liveMode) return@post
+                          epLoading = false
+                          showEpSkel(false)
+                          if (list == null) {
+                              if (eps.isEmpty()) { epStatus.text = "Could not load programs"; epStatus.visibility = View.VISIBLE }
+                              return@post
+                          }
+                          eps.clear()
+                          for (p in list) eps.add(Ep("live" + p.start, p.name, 0, p.desc, p.thumb, ((p.end - p.start) / 1000L).toInt(), p.start))
+                          epAdapter.notifyDataSetChanged()
+                          if (eps.isEmpty()) { epStatus.text = "No programs"; epStatus.visibility = View.VISIBLE } else epStatus.visibility = View.GONE
+                          if (epActive() && wantEpFocus) { wantEpFocus = false; focusFirstEp(12) }
+                      }
+                  }.start()
+              }
+
+              private fun liveNowIndex(): Int {
+                  val n = System.currentTimeMillis()
+                  return eps.indexOfFirst { it.air <= n && n < it.air + it.dur * 1000L }
+              }
+
+              private fun restoreLive() {
+                  liveMode = false
+                  liveCh = null; liveStartS = 0L; liveEndS = 0L
+                  moveEpLayerToDetail()
+                  seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+                  sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
+                  curSeason = -1; epToken++
+                  epTab.text = "Episodes"
+                  (pillEps.getChildAt(1) as TextView).text = "Episodes"
+                  side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
+                  content.visibility = View.GONE
+                  liveLayer.visibility = View.VISIBLE
+                  ui.postDelayed({
+                      if (tab == 6 && !inPlayer) {
+                          val c = liveLastCard
+                          if (c != null && c.isAttachedToWindow) c.requestFocus()
+                          else liveGrid.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+                      }
+                  }, 100)
+              }
+
+              // left from the first grid column (Live TV) / any settings row => sidebar
+              private fun extraLeft(): Boolean {
+                  if (inDetail || inPlayer) return false
+                  val f = currentFocus ?: return false
+                  if (tabViews.any { it === f }) return false
+                  if (tab == 6 && liveLayer.visibility == View.VISIBLE) {
+                      val pos = if (f.parent === liveGrid) liveGrid.getChildAdapterPosition(f) else -1
+                      if (pos >= 0 && pos % LIVE_COLS == 0) { tabViews[6].requestFocus(); return true }
+                  } else if (tab == 7 && settingsLayer.visibility == View.VISIBLE) {
+                      tabViews[7].requestFocus(); return true
+                  }
+                  return false
+              }
+
+              // ---------------------------------------------------------------- Settings page
+              private lateinit var settingsLayer: FrameLayout
+              private lateinit var setAutoVal: TextView
+              private lateinit var setQualVal: TextView
+              private var settingsRow1: View? = null
+
+              private fun settingRow(title: String, sub: String, onClick: () -> Unit): Pair<LinearLayout, TextView> {
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(24), u(16), u(24), u(16))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val t = TextView(this).apply { text = title; typeface = Typeface.DEFAULT_BOLD }
+                  tx(t, 20f)
+                  val s = TextView(this).apply { text = sub }
+                  tx(s, 14f)
+                  col.addView(t, LinearLayout.LayoutParams(-2, -2))
+                  col.addView(s, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(4) })
+                  val v = TextView(this).apply {
+                      typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; setTextColor(Color.BLACK)
+                      setPadding(u(24), u(8), u(24), u(8))
+                      background = GradientDrawable().apply { cornerRadius = u(20).toFloat(); setColor(Color.parseColor("#FFC107")) }
+                  }
+                  tx(v, 17f)
+                  row.addView(col, LinearLayout.LayoutParams(0, -2, 1f))
+                  row.addView(v, LinearLayout.LayoutParams(-2, -2))
+                  fun st() {
+                      val f = row.isFocused
+                      t.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      s.setTextColor(if (f) Color.parseColor("#444444") else Color.parseColor("#9AA0B4"))
+                      row.background = GradientDrawable().apply {
+                          cornerRadius = u(12).toFloat(); setColor(if (f) Color.WHITE else Color.argb(255, 22, 25, 38))
+                      }
+                  }
+                  st()
+                  row.setOnFocusChangeListener { _, _ -> st() }
+                  row.setOnClickListener { onClick() }
+                  return Pair(row, v)
+              }
+
+              private fun buildSettings() {
+                  settingsLayer = FrameLayout(this).apply { setBackgroundColor(Color.argb(255, 5, 6, 12)); visibility = View.GONE }
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val head = TextView(this).apply { text = "Settings"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+                  tx(head, 24f)
+                  col.addView(head, LinearLayout.LayoutParams(-2, -2))
+                  val (r1, v1) = settingRow("Trailer autoplay", "Play trailers automatically on listing and detail pages") {
+                      AppSettings.autoplay = !AppSettings.autoplay; AppSettings.save(); renderSettings()
+                  }
+                  val (r2, v2) = settingRow("Image quality", "Optimized loads faster. High loads the original jpg / png.") {
+                      AppSettings.highQuality = !AppSettings.highQuality; AppSettings.save(); renderSettings(); applyQualityChange()
+                  }
+                  setAutoVal = v1; setQualVal = v2; settingsRow1 = r1
+                  col.addView(r1, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(24) })
+                  col.addView(r2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(12) })
+                  settingsLayer.addView(col, lp((W * 0.62f).toInt(), -2, Gravity.TOP or Gravity.START).apply {
+                      leftMargin = u(110); topMargin = (H * 0.09f).toInt()
+                  })
+                  root.addView(settingsLayer, lp(-1, -1))
+                  renderSettings()
+              }
+
+              private fun renderSettings() {
+                  setAutoVal.text = if (AppSettings.autoplay) "On" else "Off"
+                  setQualVal.text = if (AppSettings.highQuality) "High" else "Optimized"
+              }
+
+              private fun openSettings() {
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  content.visibility = View.GONE
+                  status.visibility = View.GONE
+                  settingsLayer.visibility = View.VISIBLE
+                  renderSettings()
+                  ui.postDelayed({ if (tab == 7 && !inDetail && !inPlayer) settingsRow1?.requestFocus() }, 120)
+              }
+
+              // quality changed: forget the loaded pages so every image url is rebuilt with the new setting
+              private fun applyQualityChange() {
+                  for ((k, td) in homeTabs) {
+                      if (k == 2) continue
+                      td.rows.clear(); td.loaded = false; td.loading = false
+                  }
+                  shownTd = null; hero = null
+                  pageStack.clear()
+                  enrichCache.clear()
+                  synchronized(detailCache) { detailCache.clear() }
+                  trendItems = emptyList()
+                  sItems.clear(); sAdapter.notifyDataSetChanged()
+                  rowAdapter.notifyDataSetChanged()
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEMBERS + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 4 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
