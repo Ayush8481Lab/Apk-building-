@@ -5386,7 +5386,7 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 2 applied')
           PYEOF
-                - name: Apply update 3 (search sidebar nav, trailer button edge, player controls focus)
+      - name: Apply update 3 (search sidebar nav, trailer button edge, player controls focus)
         run: |
           set -e
           python3 - <<'PYEOF'
