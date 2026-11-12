@@ -5386,6 +5386,64 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 2 applied')
           PYEOF
+                - name: Apply update 3 (search sidebar nav, trailer button edge, player controls focus)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import sys, re, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:90]))
+              t = t.replace(old, new)
+
+          # ---------- 1) sidebar up/down: always move between tabs (never jumps back to the keyboard)
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', r'''private fun sideNav(dir: Int): Boolean {
+                  if (inPlayer || inDetail) return false
+                  val f = currentFocus ?: return false
+                  val i = tabViews.indexOfFirst { it === f }
+                  if (i < 0) return false
+                  if (dir == View.FOCUS_DOWN) { if (i + 1 < tabViews.size) tabViews[i + 1].requestFocus(); return true }
+                  if (dir == View.FOCUS_UP) { if (i > 0) tabViews[i - 1].requestFocus(); return true }
+                  return false
+              }
+
+              private fun isHomeTab() = homeTabs.containsKey(tab)''')
+          rep('private fun handleVertical(dir: Int): Boolean {',
+              'private fun handleVertical(dir: Int): Boolean {\n        if (sideNav(dir)) return true')
+
+          # ---------- 2) detail icon buttons (Watch Trailer / My List): right edge no longer cut, always fully rounded
+          rep('l.width = (full * p).toInt()', 'l.width = ((full + u(6)) * p).toInt()')
+          rep('val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL or Gravity.START }',
+              'val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL or Gravity.START; clipChildren = false; clipToPadding = false; setPadding(0, u(6), u(20), u(6)) }')
+          rep('val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.START }',
+              'val dInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.START; clipChildren = false; clipToPadding = false }')
+
+          # ---------- 3) player: controls hidden
+          #   left / right  -> seek + controls appear with focus on the seek bar (glider)
+          #   OK / up / down -> controls appear with focus on Play / Pause, then move freely
+          rep('private fun showControls() {', 'private fun showControls(target: View? = null) {')
+          rep('if (ctrl.findFocus() == null) pSeek.requestFocus()',
+              'if (target != null) target.requestFocus() else if (ctrl.findFocus() == null) pSeek.requestFocus()')
+          rep('KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-step); showControls(); return true }',
+              'KeyEvent.KEYCODE_DPAD_LEFT -> { seekBy(-step); showControls(pSeek); return true }')
+          rep('KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(step); showControls(); return true }',
+              'KeyEvent.KEYCODE_DPAD_RIGHT -> { seekBy(step); showControls(pSeek); return true }')
+          rep('KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> { togglePause(); showControls(); return true }',
+              'KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> { showControls(pPause); return true }')
+          rep('KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> { showControls(); return true }',
+              'KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> { showControls(pPause); return true }')
+          t, n = re.subn(r'if \(!touch\) togglePause\(\)\s*showControls\(\)', 'showControls(pPause)', t)
+          if n != 1:
+              sys.exit('PATCH FAILED okPress (%d)' % n)
+
+          P.write_text(t, encoding='utf-8')
+          print('update 3 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
