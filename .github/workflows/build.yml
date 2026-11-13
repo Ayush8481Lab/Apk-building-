@@ -50,10 +50,10 @@ jobs:
               id("org.jetbrains.kotlin.android")
           }
           android {
-              namespace = "com.example.livtv"
+              namespace = "com.sonyliv"
               compileSdk = 34
               defaultConfig {
-                  applicationId = "com.example.livtv"
+                  applicationId = "com.sonyliv"
                   minSdk = 23
                   targetSdk = 34
                   versionCode = 1
@@ -85,7 +85,7 @@ jobs:
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
               <application
                   android:name=".App"
-                  android:label="Liv 8481"
+                  android:label="Sony Liv"
                   android:icon="@drawable/ic_launcher"
                   android:banner="@drawable/ic_banner"
                   android:largeHeap="true"
@@ -160,7 +160,7 @@ jobs:
           EOF
 
           cat > app/src/main/java/com/example/livtv/App.kt <<'EOF'
-          package com.example.livtv
+          package com.sonyliv
 
           import android.app.Application
           import com.bumptech.glide.Glide
@@ -201,7 +201,7 @@ jobs:
           EOF
 
           cat > app/src/main/java/com/example/livtv/MainActivity.kt <<'EOF'
-          package com.example.livtv
+          package com.sonyliv
 
           import android.animation.ValueAnimator
           import android.app.Activity
