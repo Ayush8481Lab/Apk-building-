@@ -5912,7 +5912,7 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 4 applied')
           PYEOF
-      - name: Apply update 5 (multi audio via ?audio=LANG)
+      - name: Apply update 5 (multi audio via ?audio=LANG, only when multi track flag is false)
         run: |
           set -e
           python3 - <<'PYEOF'
@@ -5941,11 +5941,13 @@ jobs:
           rep('for (u in listOf(base, "$base/freepreview")) {',
               'for (u in listOf(base + aq, "$base/freepreview" + aq)) {')
 
-          # ---- parse audioLanguages + selectedLanguage from the response
+          # ---- parse audioLanguages ONLY when is_multi_track_per_language_available is false
+          #      (true => the single mpd / m3u8 already carries every language, handled by the normal embedded track list)
           rep('return StreamInfo(v, ro.optBoolean("isEncrypted"), la?.str("laURL") ?: "", (la?.optString("drm") ?: "").uppercase(), subs)',
               r'''val audios = ArrayList<AudioLang>()
+              val multiTrack = ro.optBoolean("is_multi_track_per_language_available", false)
               val aa = ro.optJSONArray("audioLanguages")
-              if (aa != null) for (k in 0 until aa.length()) {
+              if (!multiTrack && aa != null) for (k in 0 until aa.length()) {
                   val o = aa.optJSONObject(k) ?: continue
                   val code = o.str("audioLanguageName") ?: continue
                   audios.add(AudioLang(code, o.str("audioLanguageLabel") ?: code))
@@ -5966,11 +5968,11 @@ jobs:
           rep('val ex = parseEpExtra(try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })',
               'val ex = parseEpExtra(try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })\n                      lastEx = ex')
 
-          # ---- next episodes / movies start in the language you picked last (falls back to default if the request fails)
+          # ---- normal request first; ?audio=<last picked> only when this stream really needs it (flag false + language offered)
           rep('else if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else fetchStream(ep.id)',
-              'else if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else ((if (prefAudio.isNotEmpty()) fetchStream(ep.id, prefAudio) else null) ?: fetchStream(ep.id))')
+              'else if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else fetchStreamPref(ep.id)')
 
-          # ---- drawer: Audio section lists the api languages (when there are any), otherwise the embedded tracks as before
+          # ---- drawer: api languages only when present (flag false), otherwise embedded tracks exactly as before
           rep('var anyAudio = false',
               r'''var anyAudio = audioOpts.isNotEmpty()
                       for (ao in audioOpts) {
@@ -5985,6 +5987,16 @@ jobs:
               private var curAudio = ""
               private var prefAudio = ""
               @Volatile private var lastEx: EpExtra? = null
+
+              // default stream; if it offers separate-url languages and the user picked one before, ask for that one
+              private fun fetchStreamPref(id: String): StreamInfo? {
+                  val s = fetchStream(id) ?: return null
+                  if (prefAudio.isNotEmpty() && s.audios.isNotEmpty() && !prefAudio.equals(s.selAudio, true) &&
+                      s.audios.any { it.code.equals(prefAudio, true) }) {
+                      return fetchStream(id, prefAudio) ?: s
+                  }
+                  return s
+              }
 
               // new stream request with ?audio=<code>, continues from the same position
               private fun switchAudio(code: String) {
