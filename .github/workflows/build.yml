@@ -5912,6 +5912,108 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 4 applied')
           PYEOF
+      - name: Apply update 5 (multi audio via ?audio=LANG)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:90]))
+              t = t.replace(old, new)
+
+          # ---- data: audio options live inside StreamInfo
+          rep('class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>)',
+              'class AudioLang(val code: String, val label: String)\n'
+              'class StreamInfo(val url: String, val enc: Boolean, val laUrl: String, val drm: String, val subs: List<SubInfo>,\n'
+              '                 val audios: List<AudioLang> = emptyList(), val selAudio: String = "")')
+
+          # ---- stream api: optional ?audio=XXX on both urls (normal + /freepreview)
+          rep('fun fetchStream(contentId: String): StreamInfo? {',
+              'fun fetchStream(contentId: String, audio: String? = null): StreamInfo? {')
+          rep('val base = STREAM_API + contentId',
+              'val base = STREAM_API + contentId\n    val aq = if (audio.isNullOrBlank()) "" else "?audio=" + audio')
+          rep('for (u in listOf(base, "$base/freepreview")) {',
+              'for (u in listOf(base + aq, "$base/freepreview" + aq)) {')
+
+          # ---- parse audioLanguages + selectedLanguage from the response
+          rep('return StreamInfo(v, ro.optBoolean("isEncrypted"), la?.str("laURL") ?: "", (la?.optString("drm") ?: "").uppercase(), subs)',
+              r'''val audios = ArrayList<AudioLang>()
+              val aa = ro.optJSONArray("audioLanguages")
+              if (aa != null) for (k in 0 until aa.length()) {
+                  val o = aa.optJSONObject(k) ?: continue
+                  val code = o.str("audioLanguageName") ?: continue
+                  audios.add(AudioLang(code, o.str("audioLanguageLabel") ?: code))
+              }
+              val selA = (ro.optJSONObject("selectedLanguage")?.str("lang_code") ?: audio ?: "").uppercase()
+              return StreamInfo(v, ro.optBoolean("isEncrypted"), la?.str("laURL") ?: "", (la?.optString("drm") ?: "").uppercase(), subs,
+                  if (audios.size > 1) audios else emptyList(), selA)''')
+
+          # ---- mergeSubs must keep the audio options
+          rep('return StreamInfo(s.url, s.enc, s.laUrl, s.drm, all)',
+              'return StreamInfo(s.url, s.enc, s.laUrl, s.drm, all, s.audios, s.selAudio)')
+
+          # ---- remember audio options of the running stream
+          rep('private fun startPlayback(s: StreamInfo) {',
+              'private fun startPlayback(s: StreamInfo) {\n        audioOpts = s.audios; curAudio = s.selAudio')
+
+          # ---- keep the detail extras (subtitles) so they survive an audio switch
+          rep('val ex = parseEpExtra(try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })',
+              'val ex = parseEpExtra(try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })\n                      lastEx = ex')
+
+          # ---- next episodes / movies start in the language you picked last (falls back to default if the request fails)
+          rep('else if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else fetchStream(ep.id)',
+              'else if (directUrl != null) StreamInfo(directUrl, false, "", "", emptyList()) else ((if (prefAudio.isNotEmpty()) fetchStream(ep.id, prefAudio) else null) ?: fetchStream(ep.id))')
+
+          # ---- drawer: Audio section lists the api languages (when there are any), otherwise the embedded tracks as before
+          rep('var anyAudio = false',
+              r'''var anyAudio = audioOpts.isNotEmpty()
+                      for (ao in audioOpts) {
+                          val sel = ao.code.equals(curAudio, true)
+                          add(drawerRow(ao.label, sel) { switchAudio(ao.code); closeDrawer(true) }, sel)
+                      }''')
+          rep('for (g in tracks.groups) if (g.type == C.TRACK_TYPE_AUDIO) for (i in 0 until g.length) {',
+              'for (g in tracks.groups) if (audioOpts.isEmpty() && g.type == C.TRACK_TYPE_AUDIO) for (i in 0 until g.length) {')
+
+          # ---- members
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', r'''private var audioOpts: List<AudioLang> = emptyList()
+              private var curAudio = ""
+              private var prefAudio = ""
+              @Volatile private var lastEx: EpExtra? = null
+
+              // new stream request with ?audio=<code>, continues from the same position
+              private fun switchAudio(code: String) {
+                  val ep = curPlayEp ?: return
+                  if (liveMode || code.equals(curAudio, true)) return
+                  val pos = mainPlayer?.currentPosition ?: 0L
+                  val tok = ++playToken
+                  pSpin.visibility = View.VISIBLE
+                  Thread {
+                      val s = fetchStream(ep.id, code)
+                      ui.post {
+                          if (tok != playToken || !inPlayer) return@post
+                          if (s == null) {
+                              pSpin.visibility = View.GONE
+                              toast("This audio is not available")
+                              return@post
+                          }
+                          prefAudio = code
+                          pendingStart = pos
+                          startPlayback(mergeSubs(s, lastEx))
+                      }
+                  }.start()
+              }
+
+              private fun isHomeTab() = homeTabs.containsKey(tab)''')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 5 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
