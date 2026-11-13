@@ -6026,6 +6026,59 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 5 applied')
           PYEOF
+          # ===== PASTE THIS STEP right BEFORE "Build debug APK" =====
+      - name: Apply update 6 (launch from TV "Sony LIV" button with package com.sonyliv)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/AndroidManifest.xml')
+          t = P.read_text(encoding='utf-8')
+
+          start = t.index('<activity')
+          end = t.index('</activity>') + len('</activity>')
+
+          NEW = '''<activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:screenOrientation="sensorLandscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                      <!-- deep links / "open app" actions sent by TV buttons, remotes, other apps -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="sonyliv" />
+                          <data android:scheme="sony" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="https" android:host="www.sonyliv.com" />
+                          <data android:scheme="https" android:host="sonyliv.com" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                  </activity>
+                  <!-- the button may start the ORIGINAL app's launcher class by name: these aliases forward it to our MainActivity -->
+                  <activity-alias android:name="com.sonyliv.ui.splash.SplashActivity" android:targetActivity=".MainActivity" android:exported="true" />
+                  <activity-alias android:name="com.sonyliv.ui.splash.SplashScreenActivity" android:targetActivity=".MainActivity" android:exported="true" />
+                  <activity-alias android:name="com.sonyliv.SplashActivity" android:targetActivity=".MainActivity" android:exported="true" />
+                  <activity-alias android:name="com.sonyliv.ui.home.HomeActivity" android:targetActivity=".MainActivity" android:exported="true" />
+                  <activity-alias android:name="com.sonyliv.ui.signin.SignInActivity" android:targetActivity=".MainActivity" android:exported="true" />'''
+          t = t[:start] + NEW + t[end:]
+          P.write_text(t, encoding='utf-8')
+          print('update 6 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
