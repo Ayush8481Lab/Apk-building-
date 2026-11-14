@@ -7800,6 +7800,238 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 9 applied')
           PYEOF
+      - name: Apply update 10 (audio + subtitle sheets, no live in history, no upcoming in catchup, next-episode fix, history episodes, catchup speed, IST key moments, fast clockwise buffering)
+        run: |
+          set -e
+          D=app/src/main/res/drawable
+          cat > $D/ic_audio.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M3,9v6h4l5,5V4L7,9H3zM16.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v8.05c1.48,-0.73 2.5,-2.25 2.5,-4.02zM14,3.23v2.06c2.89,0.86 5,3.54 5,6.71s-2.11,5.85 -5,6.71v2.06c4.01,-0.91 7,-4.49 7,-8.77s-2.99,-7.86 -7,-8.77z"/></vector>
+          EOF
+          cat > $D/ic_cc.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M19,4H5c-1.11,0 -2,0.9 -2,2v12c0,1.1 0.89,2 2,2h14c1.1,0 2,-0.9 2,-2V6c0,-1.1 -0.9,-2 -2,-2zM19,18H5V6h14v12zM7,15h3c0.55,0 1,-0.45 1,-1v-1h-1.5v0.5h-2v-3h2v0.5H11v-1c0,-0.55 -0.45,-1 -1,-1H7c-0.55,0 -1,0.45 -1,1v4c0,0.55 0.45,1 1,1zM14,15h3c0.55,0 1,-0.45 1,-1v-1h-1.5v0.5h-2v-3h2v0.5H18v-1c0,-0.55 -0.45,-1 -1,-1h-3c-0.55,0 -1,0.45 -1,1v4c0,0.55 0.45,1 1,1z"/></vector>
+          EOF
+
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+              t = t.replace(old, new)
+
+          # =====================================================================
+          # 1) top level: IST 12h clock for key moments
+          # =====================================================================
+          TOP10 = r'''// ---------------- Update 10 ----------------
+          // "11:06:00" (UTC time of day) -> "04:36 PM" (IST, 12 hour)
+          fun istClock(marker: String): String {
+              val p = marker.trim().split(":")
+              if (p.size < 2) return marker
+              val h = p[0].trim().toIntOrNull() ?: return marker
+              val m = p[1].trim().toIntOrNull() ?: return marker
+              var mins = (h * 60 + m + 330) % 1440
+              if (mins < 0) mins += 1440
+              val hh = mins / 60
+              val h12 = if (hh % 12 == 0) 12 else hh % 12
+              return String.format(Locale.ENGLISH, "%02d:%02d %s", h12, mins % 60, if (hh < 12) "AM" else "PM")
+          }
+
+          object Net {'''
+          rep('object Net {', TOP10)
+
+          # =====================================================================
+          # 2) buffering animation: fixed arc, fast, clockwise only
+          # =====================================================================
+          rep('duration = 1200L; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator()',
+              'duration = 650L; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator()')
+          rep('private var sweep = 40f', 'private var sweep = 110f')
+          rep('ValueAnimator.ofFloat(35f, 250f)', 'ValueAnimator.ofFloat(110f, 110f)')
+
+          # =====================================================================
+          # 3) live never goes into history
+          # =====================================================================
+          rep('if (!histTrack || liveSport || liveMode) return',
+              'if (!histTrack || liveSport || liveMode || mainPlayer?.isCurrentMediaItemLive == true) return\n        if ((mainPlayer?.let { it.duration <= 0L } == true) && (curPlayEp?.dur ?: 0) <= 0) return')
+
+          # =====================================================================
+          # 4) catchup list: no upcoming programs
+          # =====================================================================
+          rep('for (p in list) eps.add(Ep("live" + p.start,',
+              'for (p in list) if (p.start <= System.currentTimeMillis()) eps.add(Ep("live" + p.start,')
+
+          # =====================================================================
+          # 5) catchup: speed button visible (only real live hides it)
+          # =====================================================================
+          rep('pillSpeed.visibility = if (s != null || liveMode) View.GONE else View.VISIBLE',
+              'pillSpeed.visibility = if (s != null || (liveMode && liveStartS == 0L)) View.GONE else View.VISIBLE')
+
+          # =====================================================================
+          # 6) history: episodes played from history show the Episodes button
+          # =====================================================================
+          rep('openPlayer(ep, h.season, true, true, null, resume)',
+              'openPlayer(ep, h.season, true, false, null, resume)')
+
+          # =====================================================================
+          # 7) next episode = the episode with the next higher number that has already aired (none for the latest episode)
+          # =====================================================================
+          rep('if (i == 0) { hideNext(); return }', 'val nxt = nextEpOf(eps[i]); if (nxt == null) { hideNext(); return }')
+          rep('showNext(eps[i - 1], left)', 'showNext(nxt, left)')
+          rep('if (i > 0) openPlayer(eps[i - 1], curPlaySeason, playFromHome) else closePlayer()',
+              'val nx = nextEpOf(cur); if (nx != null) openPlayer(nx, curPlaySeason, playFromHome) else closePlayer()')
+
+          # =====================================================================
+          # 8) key moments: IST 12h time
+          # =====================================================================
+          rep('(momentMarks[ep.id] ?: "")', 'istClock(momentMarks[ep.id] ?: "")')
+
+          # =====================================================================
+          # 9) separate Audio + Subtitles buttons
+          # =====================================================================
+          rep('private lateinit var pillSpeed: LinearLayout',
+              'private lateinit var pillSpeed: LinearLayout\n    private lateinit var pillAudio: LinearLayout')
+          rep('pillSub = pill("Subtitle & Audio", R.drawable.ic_subs) { openDrawer(1) }',
+              'pillAudio = pill("Audio", R.drawable.ic_audio) { openTrackSheet(2) }\n        pillSub = pill("Subtitles", R.drawable.ic_cc) { openTrackSheet(3) }')
+          rep('row2.addView(pillSub, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })',
+              'row2.addView(pillAudio, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })\n        row2.addView(pillSub, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })')
+          rep('f === pillSub || f === pillSet || f === pillSpeed',
+              'f === pillAudio || f === pillSub || f === pillSet || f === pillSpeed')
+          rep('if (f === pillSub || f === pPause || f === pBack || f === pGoLive) return true',
+              'if (f === pillAudio || f === pPause || f === pBack || f === pGoLive) return true')
+          rep('else if (f === pSeek || f === pPause || f === pTime) pillSub.requestFocus()',
+              'else if (f === pSeek || f === pPause || f === pTime) pillAudio.requestFocus()')
+          rep('if (refocus) showControls(if (qvKind == 0) pillSet else pillSpeed)',
+              'if (refocus) showControls(when (qvKind) { 0 -> pillSet; 1 -> pillSpeed; 2 -> pillAudio; else -> pillSub })')
+
+          # =====================================================================
+          # 10) MEMBERS
+          # =====================================================================
+          MEM = r'''// ---------------------------------------------------------------- Update 10
+              private fun nextEpOf(cur: Ep): Ep? {
+                  val me = eps.firstOrNull { it.id == cur.id } ?: return null
+                  if (me.num <= 0) return null
+                  val now = System.currentTimeMillis()
+                  var best: Ep? = null
+                  for (e in eps) {
+                      val b = best
+                      if (e.num > me.num && (e.air <= 0L || e.air <= now) && (b == null || e.num < b.num)) best = e
+                  }
+                  return best
+              }
+
+              // modern pill (both sides semicircle) used by the Audio / Subtitles sheets
+              private fun qvPill(label: String, sel: Boolean, onClick: () -> Unit): LinearLayout {
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+                      setPadding(u(30), 0, u(30), 0)
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                  }
+                  val ck = ImageView(this).apply { setImageResource(R.drawable.ic_check); visibility = if (sel) View.VISIBLE else View.GONE }
+                  val tv = TextView(this).apply { text = label; typeface = Typeface.DEFAULT_BOLD; maxLines = 1; gravity = Gravity.CENTER }
+                  tx(tv, 19f)
+                  r.addView(ck, LinearLayout.LayoutParams(u(22), u(22)).apply { rightMargin = u(10) })
+                  r.addView(tv, LinearLayout.LayoutParams(-2, -2))
+                  fun st() {
+                      val fo = r.isFocused
+                      tv.setTextColor(if (fo) Color.BLACK else if (sel) Color.parseColor("#FFC107") else Color.WHITE)
+                      ck.setColorFilter(if (fo) Color.BLACK else Color.parseColor("#FFC107"))
+                      r.background = GradientDrawable().apply {
+                          cornerRadius = u(60).toFloat()
+                          setColor(if (fo) Color.WHITE else Color.argb(255, 30, 32, 44))
+                          if (!fo && sel) setStroke(max(2, u(2)), Color.parseColor("#FFC107"))
+                          else if (!fo) setStroke(max(1, u(1)), Color.argb(60, 255, 255, 255))
+                      }
+                      r.animate().cancel()
+                      r.animate().scaleX(if (fo) 1.06f else 1f).scaleY(if (fo) 1.06f else 1f).setDuration(160).setInterpolator(DecelerateInterpolator()).start()
+                      r.translationZ = if (fo) u(8).toFloat() else 0f
+                  }
+                  st()
+                  r.setOnFocusChangeListener { _, _ -> st() }
+                  r.setOnClickListener { onClick() }
+                  return r
+              }
+
+              // kind 2 = Audio, kind 3 = Subtitles (same glass sheet as Quality, pill shaped options)
+              private fun openTrackSheet(kind: Int) {
+                  val p = mainPlayer ?: return
+                  if (panel != 0) return
+                  qvKind = kind
+                  qvRow.removeAllViews()
+                  var focusV: View? = null
+                  fun addP(v: View, sel: Boolean) {
+                      qvRow.addView(v, LinearLayout.LayoutParams(-2, u(58)).apply { rightMargin = u(14) })
+                      if (sel && focusV == null) focusV = v
+                  }
+                  val tracks = p.currentTracks
+                  var cur = ""
+                  if (kind == 2) {
+                      qvIcon.setImageResource(R.drawable.ic_audio)
+                      qvTitle.text = "Audio"
+                      var any = false
+                      for (ao in audioOpts) {
+                          any = true
+                          val sel = ao.code.equals(curAudio, true)
+                          if (sel) cur = ao.label
+                          addP(qvPill(ao.label, sel) { switchAudio(ao.code); closeQV(true) }, sel)
+                      }
+                      if (audioOpts.isEmpty()) for (g in tracks.groups) if (g.type == C.TRACK_TYPE_AUDIO) for (i in 0 until g.length) {
+                          if (!g.isTrackSupported(i)) continue
+                          any = true
+                          val sel = g.isTrackSelected(i)
+                          val lb = trackLabel(g.getTrackFormat(i), i)
+                          if (sel) cur = lb
+                          addP(qvPill(lb, sel) { selectAudio(g, i); rememberTrack(g.getTrackFormat(i)); closeQV(true) }, sel)
+                      }
+                      if (!any) { cur = "Default"; addP(qvPill("Default", true) { closeQV(true) }, true) }
+                      qvSub.text = "Currently: " + (if (cur.isEmpty()) "Default" else cur)
+                  } else {
+                      qvIcon.setImageResource(R.drawable.ic_cc)
+                      qvTitle.text = "Subtitles"
+                      val off = p.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+                      class TR(val g: Tracks.Group, val i: Int, val label: String, val sel: Boolean)
+                      val tl = ArrayList<TR>()
+                      for (g in tracks.groups) if (g.type == C.TRACK_TYPE_TEXT) for (i in 0 until g.length) {
+                          if (g.isTrackSupported(i)) tl.add(TR(g, i, trackLabel(g.getTrackFormat(i), tl.size), !off && g.isTrackSelected(i)))
+                      }
+                      val offSel = off || tl.none { it.sel }
+                      addP(qvPill("Off", offSel) { selectText(null, 0); closeQV(true) }, offSel)
+                      for (tr in tl) {
+                          if (tr.sel) cur = tr.label
+                          addP(qvPill(tr.label, tr.sel) { selectText(tr.g, tr.i); closeQV(true) }, tr.sel)
+                      }
+                      qvSub.text = if (tl.isEmpty()) "No subtitles available" else "Currently: " + (if (offSel) "Off" else cur)
+                  }
+                  if (focusV == null) focusV = qvRow.getChildAt(0)
+                  qvScroll.visibility = View.VISIBLE; qvSpeedBox.visibility = View.GONE
+                  qvScroll.scrollTo(0, 0)
+                  panel = 4
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
+                  hideNext()
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  qvLayer.animate().cancel()
+                  qvLayer.visibility = View.VISIBLE
+                  qvLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  qvLayer.translationY = qvH * 0.35f
+                  qvLayer.alpha = 0f
+                  qvLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                  qvLayer.animate().translationY(0f).alpha(1f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f))
+                      .withEndAction { qvLayer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()
+                  ui.postDelayed({
+                      if (inPlayer && panel == 4 && qvKind == kind) focusV?.requestFocus()
+                  }, 120)
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 10 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
