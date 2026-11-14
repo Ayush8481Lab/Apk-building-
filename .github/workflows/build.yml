@@ -6079,6 +6079,840 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 6 applied')
           PYEOF
+      # ===== PASTE THIS STEP right BEFORE "Build debug APK" (after your update 6 step) =====
+      - name: Apply update 7 (tab order, history, back/exit, speed, audio pref, scorecard, key moments, live sport master url)
+        run: |
+          set -e
+          D=app/src/main/res/drawable
+          cat > $D/ic_history.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M13,3c-4.97,0 -9,4.03 -9,9L1,12l3.89,3.89 0.07,0.14L9,12L6,12c0,-3.87 3.13,-7 7,-7s7,3.13 7,7 -3.13,7 -7,7c-1.93,0 -3.68,-0.79 -4.94,-2.06l-1.42,1.42C8.27,19.99 10.51,21 13,21c4.97,0 9,-4.03 9,-9s-4.03,-9 -9,-9zM12,8v5l4.28,2.54 0.72,-1.21 -3.5,-2.08L13.5,8L12,8z"/></vector>
+          EOF
+          cat > $D/ic_score.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M5,9.2h3V19H5zM10.6,5h2.8v14h-2.8zM16.2,13H19v6h-2.8z"/></vector>
+          EOF
+          cat > $D/ic_moments.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M12,17.27L18.18,21l-1.64,-7.03L22,9.24l-7.19,-0.61L12,2 9.19,8.63 2,9.24l5.46,4.73L5.82,21z"/></vector>
+          EOF
+
+          python3 - <<'PYEOF'
+          import sys, re, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+              t = t.replace(old, new)
+
+          def rep_re(pat, fn):
+              global t
+              n = len(re.findall(pat, t))
+              if n != 1:
+                  sys.exit('REGEX PATCH FAILED (%d): %s' % (n, pat[:100]))
+              t = re.sub(pat, fn, t, count=1)
+
+          # =====================================================================
+          # 1) TOP LEVEL: data classes, parsers, constants
+          # =====================================================================
+          TOP2 = r'''// ---------------- Update 7 : history, live sport, speed ----------------
+          class Hist(val epId: String, val showCid: String, val sub: String, val title: String, val epTitle: String, val num: Int,
+                     val season: Int, val thumb: String?, val dur: Int, val pos: Long, val ts: Long)
+          class SportInfo(val matchCode: String, val markers: Boolean, val contentId: String)
+
+          const val MOMENTS_URL = "https://apiv2.sonyliv.com/AGL/4.9/WEB/MATCH/TIMELINEMARKERS/"
+          const val SCORE_URL = "https://ls.sonyliv.com/1/"
+          val SPEEDS = listOf(1f, 1.25f, 1.5f, 1.75f, 2f)
+
+          fun speedLabel(s: Float): String = when (s) {
+              1f -> "Normal"
+              1.25f -> "1.25x"
+              1.5f -> "1.5x"
+              1.75f -> "1.75x"
+              else -> "2x"
+          }
+
+          // "06:54:00" -> seconds (-1 when missing)
+          fun timeSec(s: String): Int {
+              val p = s.trim().split(":")
+              if (p.size < 2) return -1
+              var r = 0
+              for (x in p) r = r * 60 + (x.trim().toIntOrNull() ?: 0)
+              return r
+          }
+
+          // content detail response: objectSubtype LIVE_SPORT => match code (matchid before the first ':') + key moments flag
+          fun parseSportInfo(j: JSONObject?): SportInfo? {
+              val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return null
+              val m = c.optJSONObject("metadata") ?: return null
+              val st = (m.optString("objectSubtype") + "|" + m.optString("contentSubtype")).uppercase()
+              if (!st.contains("LIVE_SPORT")) return null
+              val e = m.optJSONObject("emfAttributes")
+              val mid = (e?.str("matchid") ?: "").substringBefore(":")
+              val tl = e?.opt("isTimeLineMarker_new")?.toString().equals("true", true)
+              return SportInfo(mid, tl, m.optString("contentId"))
+          }
+
+          // .../std_mdd-600300010.m3u8?hdnea=...  ->  .../master.m3u8?hdnea=...   (null when not applicable)
+          fun masterUrl(u: String): String? {
+              val q = u.indexOf('?')
+              val base = if (q >= 0) u.substring(0, q) else u
+              val rest = if (q >= 0) u.substring(q) else ""
+              if (!base.lowercase().endsWith(".m3u8")) return null
+              val slash = base.lastIndexOf('/')
+              if (slash < 0) return null
+              if (base.substring(slash + 1).equals("master.m3u8", true)) return null
+              return base.substring(0, slash + 1) + "master.m3u8" + rest
+          }
+
+          object Net {'''
+          rep('object Net {', TOP2)
+
+          # =====================================================================
+          # 2) AppSettings: remembered audio language (2 separate formats)
+          # =====================================================================
+          rep('@Volatile var highQuality = false',
+              '@Volatile var highQuality = false\n    @Volatile var prefApi = ""          // api audio code (ENG / HIN ...) used with ?audio=\n    @Volatile var prefTrackLang = ""    // embedded audio track language (hi / en ...)\n    @Volatile var prefTrackLabel = ""   // embedded audio track label')
+          rep('sp().getBoolean("hq", false)',
+              'sp().getBoolean("hq", false); prefApi = sp().getString("pref_api", "") ?: ""; prefTrackLang = sp().getString("pref_tl", "") ?: ""; prefTrackLabel = sp().getString("pref_tlab", "") ?: ""')
+          rep('.putBoolean("hq", highQuality).apply()',
+              '.putBoolean("hq", highQuality).putString("pref_api", prefApi).putString("pref_tl", prefTrackLang).putString("pref_tlab", prefTrackLabel).apply()')
+
+          # =====================================================================
+          # 3) Store: watch history
+          # =====================================================================
+          rep('fun clearResume(k: String) {', r'''fun history(): ArrayList<Hist> {
+                  val out = ArrayList<Hist>()
+                  try {
+                      val a = JSONArray(sp().getString("hist", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.optJSONObject(i) ?: continue
+                          out.add(Hist(o.optString("epId"), o.optString("showCid"), o.optString("sub"), o.optString("title"), o.optString("epTitle"),
+                              o.optInt("num"), o.optInt("season"), o.str("thumb"), o.optInt("dur"), o.optLong("pos"), o.optLong("ts")))
+                      }
+                  } catch (e: Exception) { }
+                  return out
+              }
+
+              fun addHistory(h: Hist) {
+                  try {
+                      val l = history()
+                      l.removeAll { it.epId == h.epId }
+                      l.add(0, h)
+                      while (l.size > 300) l.removeAt(l.size - 1)
+                      val a = JSONArray()
+                      for (x in l) a.put(JSONObject().apply {
+                          put("epId", x.epId); put("showCid", x.showCid); put("sub", x.sub); put("title", x.title); put("epTitle", x.epTitle)
+                          put("num", x.num); put("season", x.season); put("thumb", x.thumb ?: JSONObject.NULL)
+                          put("dur", x.dur); put("pos", x.pos); put("ts", x.ts)
+                      })
+                      sp().edit().putString("hist", a.toString()).apply()
+                  } catch (e: Exception) { }
+              }
+
+              fun clearHistory() { try { sp().edit().remove("hist").apply() } catch (e: Exception) { } }
+
+              fun clearResume(k: String) {''')
+
+          # =====================================================================
+          # 4) TAB ORDER: Search, Home, Movies, TV Shows, Sports, Live TV, History, My List, Settings
+          #    index: 0 1 2 3 4 5 6 7 8
+          # =====================================================================
+          rep('private val tabNames = listOf("Search", "Home", "My List", "TV Shows", "Sports", "Movies", "Live TV", "Settings")',
+              'private val tabNames = listOf("Search", "Home", "Movies", "TV Shows", "Sports", "Live TV", "History", "My List", "Settings")')
+          rep_re(r'val icons = intArrayOf\([^)]*\)',
+                 lambda m: 'val icons = intArrayOf(R.drawable.ic_search, R.drawable.ic_home, R.drawable.ic_movie, R.drawable.ic_tv, R.drawable.ic_sports, R.drawable.ic_livetv, R.drawable.ic_history, R.drawable.ic_add, R.drawable.ic_settings)')
+          rep('homeTabs[2] = TabData(2, "")', 'homeTabs[7] = TabData(7, "")')
+          rep('homeTabs[5] = TabData(5, MOVIES_URL)', 'homeTabs[2] = TabData(2, MOVIES_URL)')
+          rep('shownTd !== td || i == 2)', 'shownTd !== td || i == 7)')
+          rep('if (i == 2) refreshMyList(td)', 'if (i == 7) refreshMyList(td)')
+          rep('td.idx == 2', 'td.idx == 7')
+          rep('if (k == 2) continue', 'if (k == 7) continue')
+          rep('if (i == 6) { openLive(); return }', 'if (i == 5) { openLive(); return }')
+          rep('if (i == 7) { openSettings(); return }', 'if (i == 8) { openSettings(); return }\n        if (i == 6) { openHistory(); return }')
+          rep('liveLayer.visibility = View.GONE; settingsLayer.visibility = View.GONE',
+              'liveLayer.visibility = View.GONE; settingsLayer.visibility = View.GONE; historyLayer.visibility = View.GONE')
+          rep('buildLive(); buildSettings()', 'buildLive(); buildSettings(); buildHistory()')
+          rep('tab == 0 || tab >= 6)', 'tab == 0 || tab >= 5)')
+          rep('if (tab == 6 && !inDetail && !inPlayer) liveGrid', 'if (tab == 5 && !inDetail && !inPlayer) liveGrid')
+          rep('if (tab == 6 && !inPlayer) {', 'if (tab == 5 && !inPlayer) {')
+          rep('if (tab == 7 && !inDetail && !inPlayer) settingsRow1', 'if (tab == 8 && !inDetail && !inPlayer) settingsRow1')
+          rep('tab == 6 && liveLayer.visibility == View.VISIBLE', 'tab == 5 && liveLayer.visibility == View.VISIBLE')
+          rep('tabViews[6].requestFocus(); return true', 'tabViews[5].requestFocus(); return true')
+          rep('tab == 7 && settingsLayer.visibility == View.VISIBLE', 'tab == 8 && settingsLayer.visibility == View.VISIBLE')
+          rep('tabViews[7].requestFocus(); return true', 'tabViews[8].requestFocus(); return true')
+          rep('private fun extraLeft(): Boolean {',
+              'private fun extraLeft(): Boolean {\n        if (tab == 6 && !inDetail && !inPlayer && historyLayer.visibility == View.VISIBLE) {\n            val f0 = currentFocus\n            if (f0 != null && tabViews.none { it === f0 }) { tabViews[6].requestFocus(); return true }\n        }')
+
+          # =====================================================================
+          # 5) BACK in player: controls visible -> hide them, controls hidden -> leave (info page). Exit popup on home.
+          # =====================================================================
+          rep('else -> closePlayer()',
+              'else -> if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()')
+          rep('else super.onBackPressed()', 'else showExitDialog()')
+          rep('1 -> closeDrawer(true)', '1 -> closeDrawer(true)\n                3 -> closeScore(true)')
+          rep('if (panel == 2) closePlayerEps(false)', 'if (panel == 2) closePlayerEps(false)\n            if (panel == 3) closeScore(false)')
+
+          # =====================================================================
+          # 6) Settings drawer: less lag (opaque panel + hardware layer while sliding) + speed controls
+          # =====================================================================
+          rep('setBackgroundColor(Color.argb(244, 14, 14, 16))', 'setBackgroundColor(Color.argb(255, 14, 14, 16))')
+          rep('drawer.animate().translationX(0f).setDuration(220).setInterpolator(DecelerateInterpolator()).start()',
+              'drawer.setLayerType(View.LAYER_TYPE_HARDWARE, null)\n        drawer.animate().translationX(0f).setDuration(200).setInterpolator(DecelerateInterpolator())\n            .withEndAction { drawer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()')
+          SPEED_PAT = re.escape('add(drawerRow(o.h.toString() + "p", qualitySel == o.h) { selectQuality(o); closeDrawer(true) }, qualitySel == o.h)') + r'\s*\}'
+          rep_re(SPEED_PAT, lambda m: m.group(0) + r'''
+                      if (!liveMode && !liveSport) {
+                          drawerCol.addView(drawerHeader("Playback speed"))
+                          for (spd in SPEEDS) {
+                              val selS = abs(playSpeed - spd) < 0.01f
+                              add(drawerRow(speedLabel(spd), selS) { setSpeed(spd); closeDrawer(true) }, selS)
+                          }
+                      }''')
+          rep('p.setVideoSurfaceView(pSurface)', 'p.setVideoSurfaceView(pSurface)\n        p.setPlaybackSpeed(playSpeed)')
+
+          # =====================================================================
+          # 7) Audio preference (api format and embedded-track format are kept separate)
+          # =====================================================================
+          rep('private var prefAudio = ""', '''private var prefAudio: String
+                  get() = AppSettings.prefApi
+                  set(v) { AppSettings.prefApi = v; AppSettings.save() }''')
+          rep('{ selectAudio(g, i); closeDrawer(true) }', '{ selectAudio(g, i); rememberTrack(g.getTrackFormat(i)); closeDrawer(true) }')
+          rep('override fun onIsPlayingChanged(isPlaying: Boolean) { if (isPlaying) pStatus.visibility = View.GONE }',
+              r'''override fun onIsPlayingChanged(isPlaying: Boolean) { if (isPlaying) pStatus.visibility = View.GONE }
+                  override fun onTracksChanged(tracks: Tracks) {
+                      if (audioPrefApplied || audioOpts.isNotEmpty()) return
+                      val lang = AppSettings.prefTrackLang
+                      val label = AppSettings.prefTrackLabel
+                      if (lang.isEmpty() && label.isEmpty()) return
+                      var cnt = 0
+                      for (g in tracks.groups) {
+                          if (g.type != C.TRACK_TYPE_AUDIO) continue
+                          cnt++
+                          for (i in 0 until g.length) {
+                              if (!g.isTrackSupported(i)) continue
+                              if (matchTrack(g.getTrackFormat(i), lang, label)) {
+                                  audioPrefApplied = true
+                                  if (!g.isTrackSelected(i)) selectAudio(g, i)
+                                  return
+                              }
+                          }
+                      }
+                      if (cnt > 0) audioPrefApplied = true      // preferred language not in this content: keep the default track
+                  }''')
+          rep('audioOpts = s.audios; curAudio = s.selAudio', 'audioOpts = s.audios; curAudio = s.selAudio; audioPrefApplied = false')
+
+          # =====================================================================
+          # 8) Live sport: master.m3u8 rewrite (+ fallback to the original url) and live-edge start
+          # =====================================================================
+          rep('val url = playableUrl(s.url)',
+              'var url = playableUrl(s.url)\n        fallbackSi = null\n        if (liveSport && !noMaster) { val mu = masterUrl(url); if (mu != null) { fallbackSi = s; url = mu } }')
+          rep('val st = pendingStart', 'val st = if (pendingStart > 0L) pendingStart else if (liveSport) C.TIME_UNSET else 0L')
+          rep_re(r'(override fun onPlayerError\(error: PlaybackException\) \{)(\s*)(pSpin\.visibility = View\.GONE)',
+                lambda m: m.group(1) + '\n            val fb = fallbackSi\n            if (fb != null) { fallbackSi = null; noMaster = true; startPlayback(fb); return }\n            ' + m.group(3))
+
+          # openPlayer: reset per playback, history flags, sport detection from the content detail response
+          rep('val tok = ++playToken; hidePlayerError()',
+              'val tok = ++playToken; hidePlayerError(); playSpeed = 1f; noMaster = false; fallbackSi = null; audioPrefApplied = false; applySport(null)')
+          rep('playTrack = directUrl == null && !fromHome && detailItem != null',
+              'playTrack = directUrl == null && !fromHome && detailItem != null\n        histTrack = directUrl == null && !liveMode && !histSkipNext\n        histSkipNext = false\n        histCid = if (fromHome) "" else (detailItem?.cid ?: "")\n        histSubT = if (fromHome) "" else (detailItem?.sub ?: "")')
+          rep('val ex = parseEpExtra(try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null })',
+              'val dj = try { df?.get(4, TimeUnit.SECONDS) } catch (e: Exception) { null }\n                      val ex = parseEpExtra(dj)\n                      val sportI = parseSportInfo(dj)')
+          rep('if (ex != null && ex.en > 0) {', 'applySport(sportI)\n                          if (ex != null && ex.en > 0) {')
+
+          # =====================================================================
+          # 9) History saving + restore + click
+          # =====================================================================
+          rep('if (!playTrack || playShowCid.isBlank()) return', 'saveHistory()\n        if (!playTrack || playShowCid.isBlank()) return')
+          rep('if (liveMode) { restoreLive(); return }', 'if (liveMode) { restoreLive(); return }\n        if (tab == 6) { restoreHist(); return }')
+          rep('val fs = detailFromSearch', 'val fh = detailFromHist\n        detailFromHist = false\n        val fs = detailFromSearch')
+          rep('closeDetailInner(refocus && !fs)', '''closeDetailInner(refocus && !fs && !fh)
+                  if (fh) {
+                      content.visibility = View.GONE
+                      historyLayer.visibility = View.VISIBLE
+                      refreshHistory()
+                      if (refocus) ui.postDelayed({ if (tab == 6 && !inDetail && !inPlayer) focusHistFirst() }, 100)
+                  }''')
+
+          # =====================================================================
+          # 10) Player pills: Scorecard + Key Moments (live sport only), focus rules
+          # =====================================================================
+          rep('private lateinit var pillEps: LinearLayout',
+              'private lateinit var pillEps: LinearLayout\n    private lateinit var pillScore: LinearLayout\n    private lateinit var pillMoments: LinearLayout')
+          rep('row2.addView(pillEps, LinearLayout.LayoutParams(-2, -2))', r'''pillScore = pill("Scorecard", R.drawable.ic_score) { openScore() }
+                  pillMoments = pill("Key Moments", R.drawable.ic_moments) { openMoments() }
+                  pillScore.visibility = View.GONE; pillMoments.visibility = View.GONE
+                  row2.addView(pillScore, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
+                  row2.addView(pillMoments, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })
+                  row2.addView(pillEps, LinearLayout.LayoutParams(-2, -2))''')
+          rep('val onPill = f === pillSub || f === pillSet || f === pillEps',
+              'val onPill = f === pillSub || f === pillSet || f === pillEps || f === pillScore || f === pillMoments')
+          rep('if (f === pillEps || f === pBack || (noEpsBtn && f === pillSet)) return true',
+              'if (f === pBack || f === lastPill()) return true')
+          rep('playerLayer.addView(drawer, lp(drawerW, -1, Gravity.END))', 'playerLayer.addView(drawer, lp(drawerW, -1, Gravity.END))\n        buildScore()')
+          rep_re(r'private fun playerKey\(code: Int, repeat: Int\): Boolean \{', lambda m: m.group(0) + r'''
+                  if (panel == 3) {                                  // scorecard panel
+                      when (code) {
+                          KeyEvent.KEYCODE_DPAD_LEFT -> { closeScore(true); return true }
+                          KeyEvent.KEYCODE_DPAD_UP -> { scoreScroll.smoothScrollBy(0, -u(240)); return true }
+                          KeyEvent.KEYCODE_DPAD_DOWN -> { scoreScroll.smoothScrollBy(0, u(240)); return true }
+                      }
+                      return true
+                  }''')
+          rep('drawer.animate().cancel(); drawer.visibility = View.GONE; drawer.translationX = drawerW.toFloat()',
+              'drawer.animate().cancel(); drawer.visibility = View.GONE; drawer.translationX = drawerW.toFloat()\n        scoreLayer.animate().cancel(); scoreLayer.visibility = View.GONE; scoreLayer.translationX = scoreW.toFloat(); ui.removeCallbacks(scoreRun); resetMoments()')
+
+          # key moments list reuses the episodes panel
+          rep('pillEps.requestFocus()', '(if (momentsMode && pillMoments.visibility == View.VISIBLE) pillMoments else pillEps).requestFocus()')
+          rep('if (chips.size <= 1 || curSeason !in chips.indices) return false', 'if (momentsMode || chips.size <= 1 || curSeason !in chips.indices) return false')
+          rep('if (liveMode) { playCatchup(ep); return }', 'if (liveMode) { playCatchup(ep); return }\n        if (momentsMode) { playMoment(ep); return }')
+          rep('h.t2.text = bits.joinToString(" \u2022 ")', 'h.t2.text = if (momentsMode) (momentMarks[ep.id] ?: "") else bits.joinToString(" \u2022 ")')
+          rep('else if (pos == 0 && curSeason == 0) {', 'else if (!momentsMode && pos == 0 && curSeason == 0) {')
+
+          # =====================================================================
+          # 11) MEMBERS
+          # =====================================================================
+          MEM = r'''// ---------------------------------------------------------------- Update 7
+              private var histTrack = false
+              private var histSkipNext = false
+              private var histCid = ""
+              private var histSubT = ""
+              private var detailFromHist = false
+              private lateinit var historyLayer: FrameLayout
+              private lateinit var histList: RecyclerView
+              private lateinit var histEmpty: TextView
+              private val histRows = ArrayList<Any>()
+              private var histImgW = 0
+              private var histImgH = 0
+              private var playSpeed = 1f
+              private var liveSport = false
+              private var sportInfo: SportInfo? = null
+              private var fallbackSi: StreamInfo? = null
+              private var noMaster = false
+              private var momentsMode = false
+              private val momentMarks = HashMap<String, String>()
+              private val savedEps = ArrayList<Ep>()
+              private var savedSVis = View.GONE
+              private var audioPrefApplied = false
+              private var exitDlg: android.app.Dialog? = null
+              private lateinit var scoreLayer: FrameLayout
+              private lateinit var scoreScroll: ScrollView
+              private lateinit var scoreCol: LinearLayout
+              private var scoreW = 0
+              private var scoreFetching = false
+              private val scoreRun: Runnable = object : Runnable {
+                  override fun run() {
+                      if (inPlayer && panel == 3) { loadScore(); ui.postDelayed(this, 15000) }
+                  }
+              }
+
+              // ---------------- exit popup
+              private fun showExitDialog() {
+                  if (exitDlg?.isShowing == true) return
+                  val d = android.app.Dialog(this)
+                  d.requestWindowFeature(Window.FEATURE_NO_TITLE)
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                      setPadding(u(44), u(32), u(44), u(32))
+                      background = GradientDrawable().apply { cornerRadius = u(18).toFloat(); setColor(Color.argb(255, 22, 25, 38)) }
+                  }
+                  val tt = TextView(this).apply { text = "Exit app?"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+                  tx(tt, 26f)
+                  val mm = TextView(this).apply { text = "Do you want to exit the app?"; setTextColor(Color.parseColor("#B4B8C8")); gravity = Gravity.CENTER }
+                  tx(mm, 17f)
+                  val no = softBtn("No") { d.dismiss() }
+                  val yes = softBtn("Yes") { d.dismiss(); finish() }
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+                  row.addView(no, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(16) })
+                  row.addView(yes, LinearLayout.LayoutParams(-2, -2))
+                  box.addView(tt, LinearLayout.LayoutParams(-2, -2))
+                  box.addView(mm, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(10) })
+                  box.addView(row, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(26) })
+                  d.setContentView(box)
+                  d.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+                  d.setOnShowListener { no.requestFocus() }
+                  exitDlg = d
+                  d.show()
+              }
+
+              // ---------------- speed
+              private fun setSpeed(s: Float) { playSpeed = s; mainPlayer?.setPlaybackSpeed(s) }
+
+              // ---------------- remembered audio (embedded tracks)
+              private fun matchTrack(f: Format, lang: String, label: String): Boolean {
+                  val fl = (f.language ?: "").lowercase()
+                  if (lang.isNotEmpty() && fl.isNotEmpty() && fl != "und" && (fl == lang || fl.substringBefore('-') == lang.substringBefore('-'))) return true
+                  val fb = (f.label ?: "").lowercase()
+                  return label.isNotEmpty() && fb.isNotEmpty() && fb == label.lowercase()
+              }
+
+              private fun rememberTrack(f: Format) {
+                  val l = (f.language ?: "").lowercase()
+                  AppSettings.prefTrackLang = if (l == "und") "" else l
+                  AppSettings.prefTrackLabel = f.label ?: ""
+                  AppSettings.save()
+              }
+
+              // ---------------- watch history
+              private fun saveHistory() {
+                  if (!histTrack || liveSport || liveMode) return
+                  val p = mainPlayer ?: return
+                  val ep = curPlayEp ?: return
+                  if (ep.id.isBlank()) return
+                  val dur = if (p.duration > 0) p.duration else ep.dur * 1000L
+                  val pos = p.currentPosition
+                  if (pos < 5000L) return
+                  Store.addHistory(Hist(ep.id, histCid, histSubT, showTitle, ep.title, ep.num, curPlaySeason, ep.thumb,
+                      (dur / 1000L).toInt(), pos, System.currentTimeMillis()))
+              }
+
+              inner class HistVH(val row: LinearLayout, val thumb: FrameLayout, val iv: ImageView, val bar: BarView, val border: View,
+                                 val t1: TextView, val t2: TextView, val t3: TextView) : RecyclerView.ViewHolder(row)
+              inner class HistHeadVH(val tv: TextView) : RecyclerView.ViewHolder(tv)
+
+              inner class HistAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+                  override fun getItemCount() = histRows.size
+                  override fun getItemViewType(position: Int) = if (histRows[position] is String) 0 else 1
+
+                  override fun onCreateViewHolder(p: ViewGroup, t: Int): RecyclerView.ViewHolder {
+                      if (t == 0) {
+                          val tv = TextView(this@MainActivity).apply {
+                              setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                              setPadding(u(12), u(18), u(8), u(8))
+                              layoutParams = RecyclerView.LayoutParams(-1, -2)
+                          }
+                          tx(tv, 20f)
+                          return HistHeadVH(tv)
+                      }
+                      val row = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                          layoutParams = RecyclerView.LayoutParams(-1, histImgH + u(32))
+                          setPadding(u(8), u(8), u(8), u(8))
+                          clipChildren = false; clipToPadding = false
+                          isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      }
+                      val thumb = FrameLayout(this@MainActivity).apply { clipChildren = false }
+                      val iv = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.CENTER_CROP
+                          setBackgroundColor(Color.rgb(26, 28, 42))
+                          outlineProvider = roundOutline; clipToOutline = true
+                      }
+                      val bar = BarView(this@MainActivity)
+                      val border = View(this@MainActivity).apply {
+                          background = GradientDrawable().apply {
+                              setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat()
+                          }
+                          alpha = 0f
+                      }
+                      thumb.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                      thumb.addView(bar, FrameLayout.LayoutParams(-1, max(3, u(4)), Gravity.BOTTOM).apply { setMargins(u(10), 0, u(10), u(8)) })
+                      thumb.addView(border, FrameLayout.LayoutParams(-1, -1))
+                      val texts = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
+                      val t1 = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                      }
+                      tx(t1, 24f)
+                      val t2 = TextView(this@MainActivity).apply { setTextColor(Color.parseColor("#C8C8D0")); maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+                      tx(t2, 17f)
+                      val t3 = TextView(this@MainActivity).apply { setTextColor(Color.parseColor("#9AA0B4")); maxLines = 1 }
+                      tx(t3, 15f)
+                      texts.addView(t1, LinearLayout.LayoutParams(-1, -2))
+                      texts.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+                      texts.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+                      row.addView(thumb, LinearLayout.LayoutParams(histImgW, histImgH))
+                      row.addView(texts, LinearLayout.LayoutParams(0, histImgH, 1f).apply { leftMargin = u(22) })
+                      return HistVH(row, thumb, iv, bar, border, t1, t2, t3)
+                  }
+
+                  override fun onBindViewHolder(h: RecyclerView.ViewHolder, pos: Int) {
+                      val o = histRows[pos]
+                      if (h is HistHeadVH) { h.tv.text = o as String; return }
+                      val v = h as HistVH
+                      val e = o as Hist
+                      cardReq(img(e.thumb, W_EP), histImgW, histImgH).priority(Priority.HIGH).into(v.iv)
+                      v.t1.text = e.title
+                      val pre = ((if (e.season > 0) "S${e.season} " else "") + (if (e.num > 0) "E${e.num}" else "")).trim()
+                      val sub = listOf(pre, e.epTitle).filter { it.isNotBlank() }.joinToString(" \u2022 ")
+                      v.t2.text = if (sub.isEmpty()) "Movie" else sub
+                      val dm = e.dur * 1000L
+                      val done = dm > 0L && e.pos >= (dm * RESUME_MAX).toLong()
+                      val left = if (dm <= 0L) "" else if (done) "Watched" else fmtMinLeft(e.pos, dm)
+                      val at = SimpleDateFormat("hh:mm a", Locale.ENGLISH).format(Date(e.ts))
+                      v.t3.text = if (left.isEmpty()) at else "$left \u2022 $at"
+                      v.bar.frac = if (dm > 0L) (e.pos.toFloat() / dm).coerceIn(0f, 1f) else 0f
+                      v.bar.invalidate()
+                      v.thumb.scaleX = 1f; v.thumb.scaleY = 1f; v.border.alpha = 0f
+                      v.row.setOnFocusChangeListener { _, has ->
+                          v.thumb.animate().scaleX(if (has) 1.05f else 1f).scaleY(if (has) 1.05f else 1f).setDuration(150).start()
+                          v.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
+                      }
+                      v.row.setOnClickListener { openHistItem(e, v.row) }
+                  }
+              }
+
+              private fun buildHistory() {
+                  historyLayer = FrameLayout(this).apply { setBackgroundColor(Color.argb(255, 5, 6, 12)); visibility = View.GONE }
+                  val head = TextView(this).apply { text = "History"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+                  tx(head, 24f)
+                  historyLayer.addView(head, lp(-2, -2, Gravity.TOP or Gravity.START).apply { leftMargin = u(110); topMargin = (H * 0.07f).toInt() })
+                  val clear = softBtn("Clear history") { Store.clearHistory(); refreshHistory() }
+                  historyLayer.addView(clear, lp(-2, -2, Gravity.TOP or Gravity.END).apply { rightMargin = u(48); topMargin = (H * 0.05f).toInt() })
+                  histImgW = (W * 0.2f).toInt(); histImgH = histImgW * 9 / 16
+                  histList = RecyclerView(this).apply {
+                      layoutManager = LinearLayoutManager(this@MainActivity)
+                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; isFocusableInTouchMode = false
+                      setPadding(u(8), u(4), u(8), u(40))
+                  }
+                  histList.adapter = HistAdapter()
+                  historyLayer.addView(histList, lp(-1, -1).apply { leftMargin = u(110); topMargin = (H * 0.16f).toInt(); rightMargin = u(48) })
+                  histEmpty = TextView(this).apply {
+                      text = "No watch history yet\n\nEpisodes and movies you watch will show up here"
+                      setTextColor(Color.parseColor("#B4B8C8")); gravity = Gravity.CENTER; visibility = View.GONE
+                  }
+                  tx(histEmpty, 17f)
+                  historyLayer.addView(histEmpty, lp(-2, -2, Gravity.CENTER).apply { leftMargin = u(110) })
+                  root.addView(historyLayer, lp(-1, -1))
+              }
+
+              private fun refreshHistory() {
+                  histRows.clear()
+                  val l = Store.history()
+                  val tz = java.util.TimeZone.getDefault()
+                  val now = System.currentTimeMillis()
+                  val today = (now + tz.getOffset(now)) / 86400000L
+                  var last = ""
+                  for (e in l) {
+                      val d = (e.ts + tz.getOffset(e.ts)) / 86400000L
+                      val label = if (d == today) "Today" else if (d == today - 1) "Yesterday" else fmtDate(e.ts, true)
+                      if (label != last) { histRows.add(label); last = label }
+                      histRows.add(e)
+                  }
+                  histList.adapter?.notifyDataSetChanged()
+                  histEmpty.visibility = if (l.isEmpty()) View.VISIBLE else View.GONE
+                  if (l.isNotEmpty()) histList.scrollToPosition(0)
+              }
+
+              private fun focusHistFirst() {
+                  for (i in 0 until histList.childCount) {
+                      val c = histList.getChildAt(i)
+                      if (c.isFocusable) { c.requestFocus(); return }
+                  }
+                  ui.postDelayed({
+                      if (tab == 6 && !inDetail && !inPlayer && historyLayer.visibility == View.VISIBLE) {
+                          for (i in 0 until histList.childCount) {
+                              val c = histList.getChildAt(i)
+                              if (c.isFocusable) { c.requestFocus(); break }
+                          }
+                      }
+                  }, 150)
+              }
+
+              private fun openHistory() {
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  content.visibility = View.GONE
+                  status.visibility = View.GONE
+                  refreshHistory()
+                  historyLayer.visibility = View.VISIBLE
+                  ui.postDelayed({ if (tab == 6 && !inDetail && !inPlayer) focusHistFirst() }, 120)
+              }
+
+              private fun restoreHist() {
+                  side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
+                  content.visibility = View.GONE
+                  historyLayer.visibility = View.VISIBLE
+                  refreshHistory()
+                  ui.postDelayed({ if (tab == 6 && !inPlayer && !inDetail) focusHistFirst() }, 100)
+              }
+
+              // show / movie known => its detail page, otherwise play the episode / movie directly (resumes where it stopped)
+              private fun openHistItem(h: Hist, card: View) {
+                  lastCard = card
+                  if (h.showCid.isNotBlank() && (h.sub == SUB_SHOW || h.sub == SUB_MOVIE_BUNDLE)) {
+                      detailFromHist = true
+                      historyLayer.visibility = View.GONE
+                      openDetail(Item(h.showCid, h.title, null, h.thumb, null, null, "", "", null, null, h.showCid, h.sub,
+                          OBJ_VOD, 0, 0, "", 0, 0L), card)
+                  } else {
+                      showTitle = h.title
+                      val ep = Ep(h.epId, h.epTitle, h.num, "", h.thumb, h.dur, 0L)
+                      val resume = if (h.dur > 0 && h.pos < (h.dur * 1000L * RESUME_MAX).toLong()) h.pos else 0L
+                      openPlayer(ep, h.season, true, true, null, resume)
+                  }
+              }
+
+              // ---------------- live sport: pills, scorecard, key moments
+              private fun applySport(s: SportInfo?) {
+                  sportInfo = s
+                  liveSport = s != null
+                  pillScore.visibility = if (s != null && s.matchCode.isNotEmpty()) View.VISIBLE else View.GONE
+                  pillMoments.visibility = if (s != null && s.markers) View.VISIBLE else View.GONE
+              }
+
+              private fun lastPill(): View = when {
+                  pillEps.visibility == View.VISIBLE -> pillEps
+                  pillMoments.visibility == View.VISIBLE -> pillMoments
+                  pillScore.visibility == View.VISIBLE -> pillScore
+                  else -> pillSet
+              }
+
+              private fun buildScore() {
+                  scoreW = (W * 0.62f).toInt()
+                  scoreLayer = FrameLayout(this).apply {
+                      setBackgroundColor(Color.argb(255, 14, 14, 18)); visibility = View.GONE; translationX = scoreW.toFloat()
+                  }
+                  scoreScroll = ScrollView(this).apply {
+                      isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = true; isFocusableInTouchMode = true
+                  }
+                  scoreCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(u(28), u(30), u(28), u(40)) }
+                  scoreScroll.addView(scoreCol, FrameLayout.LayoutParams(-1, -2))
+                  scoreLayer.addView(scoreScroll, lp(-1, -1))
+                  playerLayer.addView(scoreLayer, lp(scoreW, -1, Gravity.END))
+              }
+
+              private fun scoreText(t: String, size: Float, color: String, bold: Boolean): TextView {
+                  val v = TextView(this).apply {
+                      text = t; setTextColor(Color.parseColor(color))
+                      if (bold) typeface = Typeface.DEFAULT_BOLD
+                  }
+                  tx(v, size)
+                  return v
+              }
+
+              private fun scoreRow(cells: List<String>, wts: List<Float>, color: String, bold: Boolean, sub: String? = null): LinearLayout {
+                  val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, u(6), 0, u(6)) }
+                  for (i in cells.indices) {
+                      if (i == 0 && sub != null) {
+                          val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                          c.addView(scoreText(cells[0], 15f, color, bold))
+                          c.addView(scoreText(sub, 12f, "#8F95AB", false))
+                          r.addView(c, LinearLayout.LayoutParams(0, -2, wts[0]))
+                      } else {
+                          val tv = scoreText(cells[i], 15f, color, bold)
+                          if (i > 0) tv.gravity = Gravity.END
+                          r.addView(tv, LinearLayout.LayoutParams(0, -2, wts[i]))
+                      }
+                  }
+                  return r
+              }
+
+              private fun openScore() {
+                  if (panel != 0 || sportInfo == null) return
+                  panel = 3
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  scoreCol.removeAllViews()
+                  scoreCol.addView(scoreText("Loading scorecard...", 16f, "#B4B8C8", false))
+                  scoreLayer.animate().cancel()
+                  scoreLayer.visibility = View.VISIBLE
+                  scoreLayer.translationX = scoreW.toFloat()
+                  scoreLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                  scoreLayer.animate().translationX(0f).setDuration(220).setInterpolator(DecelerateInterpolator())
+                      .withEndAction { scoreLayer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()
+                  scoreScroll.scrollTo(0, 0)
+                  scoreScroll.requestFocus()
+                  ui.removeCallbacks(scoreRun)
+                  loadScore()
+                  ui.postDelayed(scoreRun, 15000)
+              }
+
+              private fun closeScore(refocus: Boolean) {
+                  if (panel != 3) return
+                  panel = 0
+                  ui.removeCallbacks(scoreRun)
+                  scoreLayer.animate().cancel()
+                  scoreLayer.animate().translationX(scoreW.toFloat()).setDuration(200)
+                      .withEndAction { if (panel != 3) scoreLayer.visibility = View.GONE }.start()
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  if (refocus) { showControls(); pillScore.requestFocus() }
+              }
+
+              private fun loadScore() {
+                  val s = sportInfo ?: return
+                  if (s.matchCode.isEmpty() || scoreFetching) return
+                  scoreFetching = true
+                  Thread {
+                      val j = Api.get(SCORE_URL + s.matchCode + ".json")
+                      ui.post {
+                          scoreFetching = false
+                          if (panel != 3 || !inPlayer) return@post
+                          if (j == null) {
+                              if (scoreCol.childCount <= 1) {
+                                  scoreCol.removeAllViews()
+                                  scoreCol.addView(scoreText("Scorecard not available right now", 16f, "#B4B8C8", false))
+                              }
+                              return@post
+                          }
+                          try { renderScore(j) } catch (e: Exception) { }
+                      }
+                  }.start()
+              }
+
+              private fun renderScore(j: JSONObject) {
+                  scoreCol.removeAllViews()
+                  fun add(v: View, top: Int) { scoreCol.addView(v, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(top) }) }
+                  fun line() {
+                      val d = View(this)
+                      d.setBackgroundColor(Color.argb(40, 255, 255, 255))
+                      scoreCol.addView(d, LinearLayout.LayoutParams(-1, max(1, u(1))))
+                  }
+                  val md = j.optJSONObject("Matchdetail")
+                  val names = HashMap<String, String>()
+                  val teamName = HashMap<String, String>()
+                  val tarr = j.optJSONArray("Teams")
+                  if (tarr != null) for (i in 0 until tarr.length()) {
+                      val tm = tarr.optJSONObject(i) ?: continue
+                      teamName[tm.optString("Team_Id")] = tm.str("Name_Full") ?: tm.optString("Name_Short")
+                      val pl = tm.optJSONArray("Players") ?: continue
+                      for (k in 0 until pl.length()) {
+                          val p = pl.optJSONObject(k) ?: continue
+                          var n = p.optString("Name_Short")
+                          if (p.optBoolean("Iscaptain", false)) n += " (c)"
+                          if (p.optBoolean("Iskeeper", false)) n += " \u2020"
+                          names[p.optString("Player_Id")] = n
+                      }
+                  }
+                  add(scoreText("Scorecard", 24f, "#FFFFFF", true), 0)
+                  md?.optJSONObject("Match")?.str("Match_ordinal")?.let { add(scoreText(it, 15f, "#B4B8C8", false), 6) }
+                  j.optJSONObject("Matchequation")?.str("Equation")?.let { add(scoreText(it, 18f, "#FFC107", true), 8) }
+                  md?.str("Toss_status_long_msg")?.let { add(scoreText(it, 14f, "#B4B8C8", false), 6) }
+
+                  val wB = listOf(3.4f, 0.8f, 0.8f, 0.7f, 0.7f, 1.1f)
+                  val wW = listOf(3.4f, 0.8f, 0.8f, 0.8f, 0.8f, 1.1f)
+                  val inn = j.optJSONArray("Innings")
+                  if (inn != null) for (ix in inn.length() - 1 downTo 0) {
+                      val o = inn.optJSONObject(ix) ?: continue
+                      val tn = teamName[o.optString("Battingteam")] ?: "Innings"
+                      add(scoreText(tn + "   " + o.optString("Total") + "/" + o.optString("Wickets") + "  (" + o.optString("Overs") + " ov)", 20f, "#FFFFFF", true), 24)
+                      add(scoreRow(listOf("Batter", "R", "B", "4s", "6s", "SR"), wB, "#8F95AB", true), 8)
+                      line()
+                      val bats = o.optJSONArray("Batsmen")
+                      val yet = ArrayList<String>()
+                      if (bats != null) for (k in 0 until bats.length()) {
+                          val b = bats.optJSONObject(k) ?: continue
+                          val nm = names[b.optString("Batsman")] ?: b.optString("Batsman")
+                          val runs = b.optString("Runs")
+                          val out = b.optString("Howout_short")
+                          if (runs.isBlank() && out.isBlank()) { yet.add(nm); continue }
+                          val live = b.optBoolean("Isbatting", false) || out.equals("Batting", true) || out.equals("not out", true)
+                          val star = if (b.optBoolean("Isonstrike", false)) "*" else ""
+                          add(scoreRow(listOf(nm + star, runs, b.optString("Balls"), b.optString("Fours"), b.optString("Sixes"), b.optString("Strikerate")),
+                              wB, if (live) "#FFFFFF" else "#E4E4EA", live, if (out.isBlank()) null else out), 0)
+                          line()
+                      }
+                      val extras = listOf("Byes", "Legbyes", "Wides", "Noballs", "Penalty").sumOf { o.optString(it).toIntOrNull() ?: 0 }
+                      add(scoreText("Extras   " + extras + "   (b " + o.optString("Byes") + ", lb " + o.optString("Legbyes") +
+                          ", w " + o.optString("Wides") + ", nb " + o.optString("Noballs") + ")", 14f, "#C8C8D0", false), 8)
+                      if (yet.isNotEmpty()) add(scoreText("Yet to bat: " + yet.joinToString(", "), 13f, "#9AA0B4", false), 6)
+                      o.str("FallofWickets")?.let { add(scoreText("Fall of wickets: $it", 12f, "#9AA0B4", false), 6) }
+
+                      add(scoreRow(listOf("Bowler", "O", "M", "R", "W", "Econ"), wW, "#8F95AB", true), 14)
+                      line()
+                      val bw = o.optJSONArray("Bowlers")
+                      if (bw != null) for (k in 0 until bw.length()) {
+                          val b = bw.optJSONObject(k) ?: continue
+                          val nm = names[b.optString("Bowler")] ?: b.optString("Bowler")
+                          val balls = b.optString("Balls_Bowled").toIntOrNull() ?: 0
+                          val rr = b.optString("Runs").toIntOrNull() ?: 0
+                          val eco = if (balls > 0) String.format(Locale.ENGLISH, "%.2f", rr * 6.0 / balls) else "-"
+                          val now = b.optBoolean("Isbowlingnow", false)
+                          add(scoreRow(listOf(nm, b.optString("Overs"), b.optString("Maidens"), b.optString("Runs"), b.optString("Wickets"), eco),
+                              wW, if (now) "#FFFFFF" else "#E4E4EA", now), 0)
+                          line()
+                      }
+                  }
+              }
+
+              // ---------------- key moments (reuses the episodes panel, single list, no season column)
+              private fun openMoments() {
+                  val s = sportInfo ?: return
+                  if (panel != 0 || !s.markers) return
+                  momentsMode = true
+                  savedEps.clear(); savedEps.addAll(eps)
+                  savedSVis = sScroll.visibility
+                  eps.clear(); epAdapter.notifyDataSetChanged()
+                  sScroll.visibility = View.GONE
+                  epTab.text = "Key Moments"
+                  epStatus.visibility = View.GONE
+                  showEpSkel(true)
+                  panel = 2
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  moveEpLayerToPlayer()
+                  epLayer.setBackgroundColor(Color.argb(205, 8, 9, 14))
+                  epLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  epLayer.visibility = View.VISIBLE
+                  epLayer.animate().cancel()
+                  epLayer.translationY = H.toFloat()
+                  epLayer.animate().translationY(0f).setDuration(300).setInterpolator(DecelerateInterpolator()).start()
+                  ui.postDelayed({ if (inPlayer && panel == 2 && momentsMode && eps.isEmpty()) epTab.requestFocus() }, 250)
+                  val tok = ++epToken
+                  Thread {
+                      val j = Api.get(MOMENTS_URL + s.contentId)
+                      val arr = j?.optJSONObject("resultObj")?.optJSONArray("containers")
+                      val list = ArrayList<Ep>()
+                      val marks = HashMap<String, String>()
+                      if (arr != null) for (k in 0 until arr.length()) {
+                          val o = arr.optJSONObject(k) ?: continue
+                          val ep = parseEp(o) ?: continue
+                          if (ep.id.isBlank()) continue
+                          list.add(ep)
+                          o.optJSONObject("metadata")?.optJSONObject("emfAttributes")?.str("tl_marker")?.let { marks[ep.id] = it.substringAfterLast('|') }
+                      }
+                      list.sortByDescending { timeSec(marks[it.id] ?: "") }      // latest moment first
+                      ui.post {
+                          if (tok != epToken || !momentsMode) return@post
+                          showEpSkel(false)
+                          if (j == null || list.isEmpty()) {
+                              epStatus.text = if (j == null) "Could not load key moments" else "No key moments yet"
+                              epStatus.visibility = View.VISIBLE
+                              return@post
+                          }
+                          momentMarks.putAll(marks)
+                          eps.addAll(list)
+                          epAdapter.notifyDataSetChanged()
+                          epStatus.visibility = View.GONE
+                          focusFirstEp(12)
+                      }
+                  }.start()
+              }
+
+              // plays the clip (does not go into history / resume)
+              private fun playMoment(ep: Ep) {
+                  histSkipNext = true
+                  openPlayer(Ep(ep.id, ep.title, 0, ep.desc, ep.thumb, ep.dur, 0L), 0, true, true)
+                  resetMoments()
+              }
+
+              private fun resetMoments() {
+                  if (!momentsMode) return
+                  momentsMode = false
+                  epToken++
+                  epTab.text = "Episodes"
+                  eps.clear(); eps.addAll(savedEps); savedEps.clear()
+                  epAdapter.notifyDataSetChanged()
+                  sScroll.visibility = savedSVis
+                  showEpSkel(false)
+                  epStatus.visibility = View.GONE
+                  if (epLayer.parent !== detail) moveEpLayerToDetail()
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 7 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
