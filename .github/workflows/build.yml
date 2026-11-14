@@ -7262,20 +7262,19 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 8 applied')
           PYEOF
-   # ===== PASTE THIS STEP right BEFORE "Build debug APK" (after your update 8 step) =====
-      - name: Apply update 9 (Quality / Speed sheets, episodes for home-played shows, autoplay next, sidebar focus)
+      - name: Apply update 9 (Quality + Speed premium sheets, home-played episodes list, Netflix next episode, left to sidebar, portrait to=100)
         run: |
           set -e
           D=app/src/main/res/drawable
           cat > $D/ic_quality.xml <<'EOF'
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M3,17v2h6v-2H3zM3,5v2h10V5H3zM13,21v-2h8v-2h-8v-2h-2v6h2zM7,9v2H3v2h4v2h2V9H7zM21,13v-2H11v2h10zM15,9h2V7h4V5h-4V3h-2v6z"/></vector>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineJoin="round" android:pathData="M5,4h14a2,2 0 0 1 2,2v12a2,2 0 0 1 -2,2H5a2,2 0 0 1 -2,-2V6a2,2 0 0 1 2,-2z"/><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M7,9v6M7,12h3M10,9v6M13,9v6h1a3,3 0 0 0 0,-6z"/></vector>
           EOF
           cat > $D/ic_speed.xml <<'EOF'
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M20.38,8.57l-1.23,1.85a8,8 0 0 1 -0.22,7.58H5.07A8,8 0 0 1 15.58,6.85l1.85,-1.23A10,10 0 0 0 3.35,19a2,2 0 0 0 1.72,1h13.85a2,2 0 0 0 1.74,-1 10,10 0 0 0 -0.27,-10.44zM10.59,15.41a2,2 0 0 0 2.83,0l5.66,-8.49 -8.49,5.66a2,2 0 0 0 0,2.83z"/></vector>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round" android:pathData="M4.5,17a8.5,8.5 0 1 1 15,0"/><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:pathData="M12,13l4,-4"/><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round" android:pathData="M12,13l0,0"/></vector>
           EOF
 
           python3 - <<'PYEOF'
-          import sys, re, pathlib
+          import sys, pathlib
           P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
           t = P.read_text(encoding='utf-8')
 
@@ -7286,39 +7285,15 @@ jobs:
                   sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
               t = t.replace(old, new)
 
-          def rep_re(pat, fn):
-              global t
-              n = len(re.findall(pat, t))
-              if n != 1:
-                  sys.exit('REGEX PATCH FAILED (%d): %s' % (n, pat[:100]))
-              t = re.sub(pat, fn, t, count=1)
-
           # =====================================================================
-          # 1) TOP LEVEL
+          # 1) TOP LEVEL helpers
           # =====================================================================
-          TOP9 = r'''// ---------------- Update 9 ----------------
-          class EpCtx(val showId: String, val seasonId: String, val seasonNum: Int, val num: Int)
+          TOP9 = r'''// ---------------- Update 9 : parents, speed dial, quality labels ----------------
+          val SPEEDS2 = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
-          // episode content detail response: parents[] holds the SEASON bundle id and the SHOW id
-          fun parseEpCtx(j: JSONObject?): EpCtx? {
-              val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return null
-              val m = c.optJSONObject("metadata") ?: return null
-              if (!m.optString("objectSubtype").equals("EPISODE", true)) return null
-              var show = ""
-              var season = ""
-              val ps = c.optJSONArray("parents")
-              if (ps != null) for (i in 0 until ps.length()) {
-                  val p = ps.optJSONObject(i) ?: continue
-                  val id = p.optString("parentId")
-                  if (id.isBlank() || id == "0") continue
-                  val st = p.optString("parentSubType")
-                  if (st.equals("SHOW", true)) show = id else if (st.equals("SEASON", true)) season = id
-              }
-              if (show.isEmpty()) return null
-              return EpCtx(show, season, m.optInt("season"), m.optInt("episodeNumber"))
-          }
+          fun spdText(s: Float): String = if (s == s.toInt().toFloat()) "${s.toInt()}x" else "${s}x"
 
-          fun qualityTag(h: Int): String = when {
+          fun qlabelH(h: Int): String = when {
               h >= 2160 -> "4K Ultra HD"
               h >= 1080 -> "Full HD"
               h >= 720 -> "HD"
@@ -7326,389 +7301,457 @@ jobs:
               else -> "Data saver"
           }
 
-          fun speedTag(s: Float): String = when (s) {
-              1f -> "Default"
-              1.25f -> "Brisk"
-              1.5f -> "Fast"
-              1.75f -> "Faster"
-              else -> "Double"
+          // content DETAIL-V2 response: container.parents[] => show id (parentSubType SHOW) + season bundle id (SEASON)
+          fun parseParents(j: JSONObject?): Pair<String, String>? {
+              val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return null
+              val ps = c.optJSONArray("parents") ?: return null
+              var show = ""
+              var season = ""
+              for (i in 0 until ps.length()) {
+                  val p = ps.optJSONObject(i) ?: continue
+                  val id = p.optString("parentId")
+                  if (id.isBlank() || id == "0") continue
+                  val st = p.optString("parentSubType").uppercase()
+                  if (st == "SHOW") show = id else if (st == "SEASON") season = id
+              }
+              return if (show.isEmpty()) null else Pair(show, season)
+          }
+
+          // speed slider: track with stops, the chosen stop glows (everything is drawn relative to the view height)
+          class SpeedDial(c: Context) : View(c) {
+              var items: List<String> = emptyList()
+              var idx = 0
+              private val pt = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD }
+              override fun onDraw(c: Canvas) {
+                  val n = items.size
+                  if (n < 2) return
+                  val k = height / 96f
+                  val l = 40f * k
+                  val r = width - 40f * k
+                  val cy = height * 0.34f
+                  val step = (r - l) / (n - 1)
+                  val th = 6f * k
+                  pt.style = Paint.Style.FILL
+                  pt.shader = null
+                  pt.color = Color.argb(70, 255, 255, 255)
+                  c.drawRoundRect(l, cy - th / 2, r, cy + th / 2, th, th, pt)
+                  val sx = l + step * idx
+                  pt.shader = LinearGradient(l, 0f, max(l + 1f, sx), 0f, Color.parseColor("#FF3D9A"), Color.parseColor("#FFC107"), Shader.TileMode.CLAMP)
+                  c.drawRoundRect(l, cy - th / 2, sx, cy + th / 2, th, th, pt)
+                  pt.shader = null
+                  for (i in 0 until n) {
+                      val x = l + step * i
+                      val sel = i == idx
+                      if (sel) {
+                          pt.color = Color.argb(70, 255, 193, 7); c.drawCircle(x, cy, 22f * k, pt)
+                          pt.color = Color.parseColor("#FFC107"); c.drawCircle(x, cy, 13f * k, pt)
+                          pt.color = Color.WHITE; c.drawCircle(x, cy, 5f * k, pt)
+                      } else {
+                          pt.color = if (i < idx) Color.parseColor("#FFC107") else Color.argb(200, 255, 255, 255)
+                          c.drawCircle(x, cy, 5f * k, pt)
+                      }
+                      tp.textSize = (if (sel) 17f else 14f) * k
+                      tp.color = if (sel) Color.parseColor("#FFC107") else Color.argb(190, 255, 255, 255)
+                      c.drawText(items[i], x, cy + 44f * k, tp)
+                  }
+              }
           }
 
           object Net {'''
           rep('object Net {', TOP9)
 
           # =====================================================================
-          # 2) Player pills: Settings -> Quality + Speed (svg icons)
+          # 2) Player pills: Settings removed -> Quality + Speed
           # =====================================================================
+          rep('private lateinit var pillSet: LinearLayout',
+              'private lateinit var pillSet: LinearLayout\n    private lateinit var pillSpeed: LinearLayout')
           rep('pillSet = pill("Settings", R.drawable.ic_settings) { openDrawer(2) }',
-              'pillSet = pill("Quality", R.drawable.ic_quality) { openSheet(1) }\n                  pillSpeed = pill("Speed", R.drawable.ic_speed) { openSheet(2) }')
+              'pillSet = pill("Quality", R.drawable.ic_quality) { openQV(0) }\n        pillSpeed = pill("Speed", R.drawable.ic_speed) { openQV(1) }')
           rep('row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })',
-              'row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })\n                  row2.addView(pillSpeed, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })')
-          rep('f === pillScore || f === pillMoments', 'f === pillScore || f === pillMoments || f === pillSpeed')
-          rep('else -> pillSet', 'else -> pillSpeed')
+              'row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })\n        row2.addView(pillSpeed, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })')
+          rep('val onPill = f === pillSub || f === pillSet || f === pillEps || f === pillScore || f === pillMoments',
+              'val onPill = f === pillSub || f === pillSet || f === pillSpeed || f === pillEps || f === pillScore || f === pillMoments')
+          rep('else -> pillSet', 'else -> if (pillSpeed.visibility == View.VISIBLE) pillSpeed else pillSet')
+          rep('liveSport = s != null',
+              'liveSport = s != null\n        pillSpeed.visibility = if (s != null || liveMode) View.GONE else View.VISIBLE')
 
-          # sheet + next card get built with the player
-          rep_re(r'(playerLayer\.addView\(drawer, lp\(drawerW, -1, Gravity\.END\)\)\s*buildScore\(\))',
-                 lambda m: m.group(1) + '\n        buildSheet()')
+          # build the new sheets + next-episode card together with the player
+          rep('playerLayer.addView(drawer, lp(drawerW, -1, Gravity.END))',
+              'playerLayer.addView(drawer, lp(drawerW, -1, Gravity.END))\n        buildNext(); buildQV()')
 
-          # panels: 4 = quality / speed sheet
-          rep('3 -> closeScore(true)', '3 -> closeScore(true)\n                4 -> closeSheet(true)')
-          rep('if (panel == 3) closeScore(false)', 'if (panel == 3) closeScore(false)\n            if (panel == 4) closeSheet(false)')
-          rep('ui.removeCallbacks(scoreRun); resetMoments()',
-              'ui.removeCallbacks(scoreRun); sheetLayer.animate().cancel(); sheetLayer.visibility = View.GONE; resetNext(); resetMoments()\n        if (epLayer.parent !== detail) moveEpLayerToDetail()')
-          rep_re(r'private fun playerKey\(code: Int, repeat: Int\): Boolean \{', lambda m: m.group(0) + r'''
-                  if (nextShown && panel == 0 && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
-                      playNextNow(); return true
-                  }
-                  if (panel == 4) {                                  // quality / speed sheet: left / right / OK use normal focus
-                      if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN) { closeSheet(true); return true }
-                      return false
-                  }''')
+          # keys / back / touch for the new panel (panel = 4)
+          rep('private fun playerKey(code: Int, repeat: Int): Boolean {',
+              'private fun playerKey(code: Int, repeat: Int): Boolean {\n        if (panel == 4) return qvKey(code)')
+          rep('3 -> closeScore(true)', '3 -> closeScore(true)\n                4 -> closeQV(true)')
+          rep('if (panel == 3) closeScore(false)', 'if (panel == 3) closeScore(false)\n            if (panel == 4) closeQV(false)')
+          rep('private fun okPress(touch: Boolean) {',
+              'private fun okPress(touch: Boolean) {\n        if (inPlayer && panel == 4 && qvKind == 1) { closeQV(true); return }')
+          rep('MotionEvent.ACTION_UP -> if (!swiped) okPress(true)',
+              'MotionEvent.ACTION_UP -> if (!swiped) { if (inPlayer && nextShown && hit(nextCard, ev)) playNextNow() else okPress(true) }')
 
           # =====================================================================
-          # 3) Episodes for episodes opened from home / spotlight (show + season come from the content details response)
+          # 3) Episodes list for episodes played straight from home / spotlight
           # =====================================================================
-          rep('val sportI = parseSportInfo(dj)', 'val sportI = parseSportInfo(dj)\n                      val epCtxI = parseEpCtx(dj)')
-          rep('applySport(sportI)', 'applySport(sportI)\n                          applyEpCtx(epCtxI, fromHome, ep)')
+          rep('lastRetry = { openPlayer(ep, seasonNum, fromHome, noEps, directUrl, startMs) }',
+              'lastRetry = { openPlayer(ep, seasonNum, fromHome, noEps, directUrl, startMs) }; curNoEps = noEps')
+          rep('val sportI = parseSportInfo(dj)', 'val sportI = parseSportInfo(dj)\n                      val par = parseParents(dj)')
+          rep('applySport(sportI)', 'applySport(sportI)\n                          homeEpSetup(par, tok)')
           rep('openPlayer(ep, sn)', 'openPlayer(ep, sn, playFromHome)')
+          rep('// opened from a listing card: go back to that page (same card focused, trailer resumes)',
+              '// opened from a listing card: go back to that page (same card focused, trailer resumes)\n                      moveEpLayerToDetail()')
 
           # =====================================================================
-          # 4) Autoplay next episode (last 15 seconds card)
+          # 4) Next episode (last 15s card + autoplay)
           # =====================================================================
-          rep('hidePlayerError(); pGoLive.visibility = View.GONE; setLiveSlot(0); playSpeed = 1f;',
-              'hidePlayerError(); pGoLive.visibility = View.GONE; setLiveSlot(0); resetNext(); nextOk = !fromHome && !detailMovie && seasons.isNotEmpty() && directUrl == null; playSpeed = 1f;')
-          rep('pSeek.buf = p?.bufferedPosition ?: 0L', 'pSeek.buf = p?.bufferedPosition ?: 0L\n                  checkNext(p, dur)')
-          rep('else -> if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()',
-              'else -> if (nextShown) cancelNext() else if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()')
-          rep('if (playFromHome) { closePlayer(); return }', 'if (nextCancelled || (playFromHome && !nextOk)) { closePlayer(); return }')
+          rep('private fun updateProgress() {', 'private fun updateProgress() {\n        checkNext()')
+          rep('setLiveSlot(0); playSpeed = 1f;', 'setLiveSlot(0); autoCancelled = false; hideNext(); playSpeed = 1f;')
+          rep('private fun closePlayer() {', 'private fun closePlayer() {\n        hideNext(); hideQVNow()')
+          rep('if (playFromHome) { closePlayer(); return }',
+              'if (liveMode || liveSport || momentsMode || autoCancelled || (playFromHome && eps.none { it.id == cur.id })) { closePlayer(); return }')
           rep('if (i > 0) openPlayer(eps[i - 1], curPlaySeason) else closePlayer()',
               'if (i > 0) openPlayer(eps[i - 1], curPlaySeason, playFromHome) else closePlayer()')
+          rep('else -> if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()',
+              'else -> if (nextShown) cancelNext() else if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()')
+          rep('val step = if (repeat > 3) 30000L else 10000L',
+              'val step = if (repeat > 3) 30000L else 10000L\n        if (nextShown && !ctrlVisible && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) { playNextNow(); return true }')
 
           # =====================================================================
-          # 5) Sidebar: left from the first card lands on the CURRENT category, up / down change category (auto-opens after a short pause), right enters the page
+          # 5) LEFT from the first card of any row -> sidebar tab of the current category (up / down there = change category)
           # =====================================================================
-          rep('searchLeft() || extraLeft())', 'searchLeft() || extraLeft() || homeLeft())')
-          rep('row.setOnFocusChangeListener { _, _ -> styleTab(i); ui.post { updateSide() } }',
-              'row.setOnFocusChangeListener { _, has -> styleTab(i); ui.post { updateSide() }; if (has) onSideFocus(i) }')
-          rep('row.setOnClickListener { selectTab(i) }',
-              'row.setOnClickListener { sideKeep = false; sideSelRun?.let { ui.removeCallbacks(it) }; if (i == tab && !inDetail) enterContent() else selectTab(i) }')
-          rep('setContentView(root)', 'setContentView(root)\n        installSideGuard()')
-          rep_re(r'override fun dispatchKeyEvent\(ev: KeyEvent\): Boolean \{', lambda m: m.group(0) + '''
-                  if (!splashOn && !inPlayer && ev.action == KeyEvent.ACTION_DOWN && ev.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && leaveSide()) return true''')
-          rep_re(r'private fun move\(dir: Int\) \{', lambda m: m.group(0) + '''
-                  if (dir == View.FOCUS_RIGHT && !inPlayer && !inDetail && leaveSide()) return''')
+          rep('searchLeft() || extraLeft()', 'searchLeft() || extraLeft() || listLeft()')
 
           # =====================================================================
-          # 6) MEMBERS
+          # 6) portrait rows load 100 items
+          # =====================================================================
+          rep('(if (kind == "spot") "" else "&from=0&to=15")',
+              '(if (kind == "spot") "" else if (kind == "portrait") "&from=0&to=100" else "&from=0&to=15")')
+
+          # =====================================================================
+          # 7) MEMBERS
           # =====================================================================
           MEM = r'''// ---------------------------------------------------------------- Update 9
-              private var sideKeep = false
-              private var sideSelRun: Runnable? = null
-              private var nextOk = false
+              private lateinit var qvLayer: FrameLayout
+              private lateinit var qvIcon: ImageView
+              private lateinit var qvTitle: TextView
+              private lateinit var qvSub: TextView
+              private lateinit var qvScroll: HorizontalScrollView
+              private lateinit var qvRow: LinearLayout
+              private lateinit var qvSpeedBox: LinearLayout
+              private lateinit var qvBig: TextView
+              private lateinit var qvDial: SpeedDial
+              private var qvKind = 0
+              private var qvH = 0
+              private var curNoEps = false
+              private var homeShowId = ""
               private var nextShown = false
-              private var nextCancelled = false
-              private var nextEpId = ""
-              private var epCtxShow = ""
-              private var sheetKind = 0
-              private var sheetH = 0
-              private lateinit var pillSpeed: LinearLayout
-              private lateinit var sheetLayer: FrameLayout
-              private lateinit var sheetIcon: ImageView
-              private lateinit var sheetTitle: TextView
-              private lateinit var sheetSub: TextView
-              private lateinit var sheetRow: LinearLayout
-              private lateinit var sheetScroll: HorizontalScrollView
+              private var autoCancelled = false
+              private var nextTarget: Ep? = null
               private lateinit var nextCard: LinearLayout
-              private lateinit var nextThumb: ImageView
+              private lateinit var nextImg: ImageView
               private lateinit var nextTitle: TextView
               private lateinit var nextCount: TextView
+              private lateinit var nextBar: BarView
 
-              // ---------------- sidebar behaviour
-              private fun installSideGuard() {
-                  root.viewTreeObserver.addOnGlobalFocusChangeListener { oldF, newF ->
-                      // while the user browses the sidebar, pages that finish loading must not pull the focus away
-                      if (sideKeep && oldF != null && newF != null && tabViews.any { it === oldF } && tabViews.none { it === newF }) {
-                          ui.post { if (sideKeep && !inPlayer && !inDetail) oldF.requestFocus() }
-                      }
-                  }
-              }
-
-              // a tab got focus: stay on it, and open that category after a short pause (like the season list)
-              private fun onSideFocus(i: Int) {
-                  sideKeep = true
-                  sideSelRun?.let { ui.removeCallbacks(it) }
-                  if (i == tab || inDetail || inPlayer || splashOn) return
-                  val r = Runnable { if (sideKeep && tabViews[i].isFocused && i != tab && !inDetail && !inPlayer) selectTab(i) }
-                  sideSelRun = r
-                  ui.postDelayed(r, 500)
-              }
-
-              // RIGHT on a tab: open the focused category (if it is not open yet) and go into the page
-              private fun leaveSide(): Boolean {
-                  val cf = currentFocus ?: return false
-                  if (!sideKeep) return false
-                  val fi = tabViews.indexOfFirst { it === cf }
-                  if (fi < 0) return false
-                  sideKeep = false
-                  sideSelRun?.let { ui.removeCallbacks(it) }
-                  if (fi != tab) selectTab(fi) else enterContent()
-                  return true
-              }
-
-              private fun enterContent() {
-                  if (noNetOn()) {
-                      val col = noNetLayer?.getChildAt(0) as? LinearLayout
-                      col?.getChildAt(col.childCount - 1)?.requestFocus()
-                      return
-                  }
-                  when {
-                      tab == 0 -> { if (keyViews.size > 2) keyViews[2].requestFocus() else keyViews.firstOrNull()?.requestFocus() }
-                      tab == 5 -> liveGrid.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
-                      tab == 6 -> focusHistFirst()
-                      tab == 8 -> settingsRow1?.requestFocus()
-                      isHomeTab() -> focusFirst(12)
-                  }
-              }
-
-              // LEFT on the first card of any row => the CURRENT category of the sidebar (Home ...)
-              private fun homeLeft(): Boolean {
-                  if (!isHomeTab() || inDetail || inPlayer || content.visibility != View.VISIBLE) return false
+              // left from the first card of a row => sidebar (current category), up / down there moves between categories
+              private fun listLeft(): Boolean {
+                  if (inDetail || inPlayer || !isHomeTab() || content.visibility != View.VISIBLE) return false
                   val f = currentFocus ?: return false
                   if (tabViews.any { it === f }) return false
                   val rv = f.parent as? RecyclerView ?: return false
-                  if (rv === rowRv) return false
                   if (rv.getChildAdapterPosition(f) != 0) return false
                   tabViews[tab].requestFocus()
                   return true
               }
 
-              // ---------------- episodes list for an episode that was opened straight from home / spotlight
-              private fun applyEpCtx(c: EpCtx?, fromHome: Boolean, ep: Ep) {
-                  if (c == null || !fromHome || liveMode) return
-                  nextOk = true
-                  if (histTrack) {                               // history + resume point belong to the show
-                      histCid = c.showId; histSubT = SUB_SHOW
-                      playTrack = true; playShowCid = c.showId; playShowSub = SUB_SHOW
-                  }
-                  if (epCtxShow == c.showId && seasons.isNotEmpty() && curSeason in seasons.indices &&
-                      (c.seasonId.isEmpty() || seasons[curSeason].id == c.seasonId)) {
-                      pillEps.visibility = View.VISIBLE
+              // ---------------- episodes list for episodes opened straight from a listing (parents of the content detail => show + season)
+              private fun homeEpSetup(par: Pair<String, String>?, tok: Int) {
+                  if (!playFromHome || liveMode || liveSport || momentsMode || curNoEps) return
+                  if (par == null) {
+                      seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+                      sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
+                      curSeason = -1; epToken++; homeShowId = ""
+                      pillEps.visibility = View.GONE
                       return
                   }
-                  epCtxShow = c.showId
-                  val tok = playToken
+                  if (par.first == homeShowId && seasons.isNotEmpty()) {
+                      pillEps.visibility = View.VISIBLE
+                      val ix = seasons.indexOfFirst { it.id == par.second }
+                      if (ix >= 0 && ix != curSeason) selectSeason(ix, false)
+                      return
+                  }
+                  seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+                  sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
+                  curSeason = -1; epFrom = 0; epHasMore = true; epLoading = false; epToken++
+                  homeShowId = par.first
+                  pillEps.visibility = View.GONE
                   Thread {
-                      val j = fetchDetail(c.showId, false)
+                      val j = fetchDetail(par.first)
                       val show = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
                       val data = if (show != null) parseSeasons(show) else null
-                      val st = show?.optJSONObject("metadata")?.str("title")
                       ui.post {
                           if (tok != playToken || !inPlayer || data == null || data.seasons.isEmpty()) return@post
-                          if (st != null) { showTitle = st; setPlayerTitles() }
                           seasons.clear(); seasons.addAll(data.seasons)
                           buildSeasonCol()
-                          var idx = data.seasons.indexOfFirst { it.id == c.seasonId }
-                          if (idx < 0 && c.seasonNum > 0) idx = data.seasons.indexOfFirst { it.num == c.seasonNum }
-                          if (idx < 0) idx = 0
-                          selectSeason(idx, false)
+                          var ix = seasons.indexOfFirst { it.id == par.second }
+                          if (ix < 0) ix = 0
                           pillEps.visibility = View.VISIBLE
+                          selectSeason(ix, false)
                       }
                   }.start()
               }
 
-              // ---------------- autoplay next episode (Netflix style card in the last 15 seconds)
-              private fun buildNextCard() {
+              // ---------------- next episode card (Netflix style, last 15 seconds)
+              private fun buildNext() {
                   nextCard = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                      setPadding(u(12), u(12), u(22), u(12))
+                      setPadding(u(12), u(12), u(18), u(12))
                       background = GradientDrawable().apply {
-                          cornerRadius = u(14).toFloat(); setColor(Color.argb(244, 18, 19, 28)); setStroke(max(1, u(1)), Color.argb(90, 255, 255, 255))
+                          cornerRadius = u(14).toFloat(); setColor(Color.argb(238, 20, 22, 32))
+                          setStroke(max(1, u(1)), Color.argb(70, 255, 255, 255))
                       }
                       visibility = View.GONE
                       elevation = u(8).toFloat()
                   }
-                  nextThumb = ImageView(this).apply {
+                  nextImg = ImageView(this).apply {
                       scaleType = ImageView.ScaleType.CENTER_CROP
                       setBackgroundColor(Color.rgb(26, 28, 42))
                       outlineProvider = roundOutline; clipToOutline = true
                   }
-                  val tc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  val l1 = scoreText("Autoplaying next episode", 13f, "#FFC107", true)
-                  nextTitle = scoreText("", 18f, "#FFFFFF", true)
-                  nextTitle.maxLines = 1; nextTitle.ellipsize = TextUtils.TruncateAt.END
-                  nextCount = scoreText("", 14f, "#C8C8D0", false)
-                  val hint = scoreText("OK  play now   \u2022   Back  cancel", 12f, "#8F95AB", false)
-                  tc.addView(l1, LinearLayout.LayoutParams(-2, -2))
-                  tc.addView(nextTitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
-                  tc.addView(nextCount, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(4) })
-                  tc.addView(hint, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
-                  nextCard.addView(nextThumb, LinearLayout.LayoutParams(u(176), u(99)))
-                  nextCard.addView(tc, LinearLayout.LayoutParams(u(300), -2).apply { leftMargin = u(16) })
-                  playerLayer.addView(nextCard, lp(-2, -2, Gravity.BOTTOM or Gravity.END).apply { rightMargin = u(56); bottomMargin = u(210) })
-              }
-
-              private fun checkNext(p: ExoPlayer?, dur: Long) {
-                  val cur = curPlayEp
-                  if (p == null || cur == null || !nextOk || liveMode || liveSport || dur <= 0L || p.isCurrentMediaItemLive) {
-                      if (nextShown) hideNext()
-                      return
-                  }
-                  val i = eps.indexOfFirst { it.id == cur.id }
-                  if (i < 0) {                                  // current episode is on a later page of the list: keep loading pages
-                      if (epHasMore && !epLoading && curSeason in seasons.indices) loadEpisodes()
-                      if (nextShown) hideNext()
-                      return
-                  }
-                  val left = dur - p.currentPosition
-                  val nx = if (i > 0) eps[i - 1] else null
-                  if (nx == null || nextCancelled || panel != 0 || scrubPos >= 0L || left <= 0L || left > 15000L) {
-                      if (nextShown) hideNext()
-                      return
-                  }
-                  showNext(nx, ((left + 999L) / 1000L).toInt())
-              }
-
-              private fun showNext(nx: Ep, secs: Int) {
-                  if (nextEpId != nx.id) {
-                      nextEpId = nx.id
-                      val pre = if (nx.num > 0) "E${nx.num}  \u2022  " else ""
-                      nextTitle.text = pre + nx.title
-                      Glide.with(this).load(img(nx.thumb, W_EP)).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(nextThumb)
-                  }
-                  nextCount.text = "Playing in ${secs}s"
-                  if (!nextShown) {
-                      nextShown = true
-                      nextCard.animate().cancel()
-                      nextCard.alpha = 0f; nextCard.translationX = u(60).toFloat(); nextCard.visibility = View.VISIBLE
-                      nextCard.animate().alpha(1f).translationX(0f).setDuration(280).setInterpolator(DecelerateInterpolator()).start()
-                  }
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val head = TextView(this).apply { text = "UP NEXT"; setTextColor(Color.parseColor("#FFC107")); typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.1f }
+                  tx(head, 12f)
+                  nextTitle = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+                  tx(nextTitle, 18f)
+                  nextCount = TextView(this).apply { setTextColor(Color.parseColor("#E4E4EA")) }
+                  tx(nextCount, 14f)
+                  nextBar = BarView(this)
+                  val hint = TextView(this).apply { text = "OK  Play now   \u2022   Back  Cancel"; setTextColor(Color.parseColor("#8F95AB")) }
+                  tx(hint, 11f)
+                  col.addView(head, LinearLayout.LayoutParams(-2, -2))
+                  col.addView(nextTitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(4) })
+                  col.addView(nextCount, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(4) })
+                  col.addView(nextBar, LinearLayout.LayoutParams(-1, max(3, u(4))).apply { topMargin = u(8) })
+                  col.addView(hint, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
+                  nextCard.addView(nextImg, LinearLayout.LayoutParams(u(190), u(107)))
+                  nextCard.addView(col, LinearLayout.LayoutParams(u(270), -2).apply { leftMargin = u(16) })
+                  playerLayer.addView(nextCard, lp(-2, -2, Gravity.BOTTOM or Gravity.END).apply { rightMargin = u(56); bottomMargin = u(190) })
               }
 
               private fun hideNext() {
-                  if (!nextShown) return
+                  if (!::nextCard.isInitialized || !nextShown) return
                   nextShown = false
+                  nextTarget = null
                   nextCard.animate().cancel()
-                  nextCard.animate().alpha(0f).setDuration(180).withEndAction { if (!nextShown) nextCard.visibility = View.GONE }.start()
+                  nextCard.animate().alpha(0f).setDuration(150).withEndAction { if (!nextShown) nextCard.visibility = View.GONE }.start()
               }
 
-              private fun cancelNext() { nextCancelled = true; hideNext() }
-
-              private fun resetNext() {
-                  nextCancelled = false; nextEpId = ""; nextShown = false
-                  nextCard.animate().cancel(); nextCard.visibility = View.GONE
+              private fun showNext(n: Ep, left: Long) {
+                  if (!nextShown || nextTarget?.id != n.id) {
+                      nextTarget = n
+                      Glide.with(this).clear(nextImg)
+                      cardReq(img(n.thumb, W_EP), u(190), u(107)).into(nextImg)
+                      val tt = if (n.title.isNotBlank()) n.title else showTitle
+                      nextTitle.text = (if (n.num > 0) "E${n.num} \u2022 " else "") + tt
+                      if (!nextShown) {
+                          nextCard.animate().cancel()
+                          nextCard.alpha = 0f; nextCard.translationX = u(40).toFloat(); nextCard.visibility = View.VISIBLE
+                          nextCard.animate().alpha(1f).translationX(0f).setDuration(260).setInterpolator(DecelerateInterpolator()).start()
+                      }
+                      nextShown = true
+                  }
+                  nextCount.text = "Playing in " + ((left + 999L) / 1000L) + "s"
+                  nextBar.frac = ((15000L - left).toFloat() / 15000f).coerceIn(0f, 1f)
+                  nextBar.invalidate()
               }
+
+              private fun cancelNext() { autoCancelled = true; hideNext() }
 
               private fun playNextNow() {
-                  val cur = curPlayEp ?: return
-                  val i = eps.indexOfFirst { it.id == cur.id }
-                  if (i > 0) { hideNext(); openPlayer(eps[i - 1], curPlaySeason, playFromHome) }
+                  val e = nextTarget ?: return
+                  hideNext()
+                  openPlayer(e, curPlaySeason, playFromHome)
               }
 
-              // ---------------- Quality / Speed: bottom sheet with big tiles (slides up, fades, hardware layer for smoothness)
-              private fun buildSheet() {
-                  sheetH = (H * 0.5f).toInt()
-                  sheetLayer = FrameLayout(this).apply { visibility = View.GONE; clipChildren = false }
-                  val scrim = View(this).apply {
+              // called every 500ms from the progress tick: card only when a NEXT episode exists in the loaded list
+              private fun checkNext() {
+                  val p = mainPlayer
+                  val ep = curPlayEp
+                  if (p == null || ep == null || !inPlayer || panel != 0 || liveMode || liveSport || momentsMode || autoCancelled) { hideNext(); return }
+                  val dur = p.duration
+                  if (dur <= 0L || dur == C.TIME_UNSET || p.playbackState == Player.STATE_IDLE) { hideNext(); return }
+                  val i = eps.indexOfFirst { it.id == ep.id }
+                  if (i < 0) {
+                      // current episode is on a page that is not loaded yet: keep loading pages until it shows up
+                      if (ep.num > 0 && seasons.isNotEmpty() && epHasMore && !epLoading && curSeason in seasons.indices) loadEpisodes()
+                      hideNext(); return
+                  }
+                  if (i == 0) { hideNext(); return }                    // newest episode of the list: no next
+                  val left = dur - p.currentPosition
+                  if (left <= 0L || left > 15000L) { hideNext(); return }
+                  showNext(eps[i - 1], left)
+              }
+
+              // ---------------- Quality / Speed premium sheets (bottom glass sheet, tiles for quality, slider for speed)
+              private fun buildQV() {
+                  qvH = (H * 0.52f).toInt()
+                  qvLayer = FrameLayout(this).apply {
+                      visibility = View.GONE; alpha = 0f
+                      descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                       background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
-                          intArrayOf(Color.argb(252, 8, 9, 14), Color.argb(236, 8, 9, 14), Color.argb(0, 8, 9, 14)))
+                          intArrayOf(Color.argb(252, 8, 9, 14), Color.argb(238, 8, 9, 14), Color.argb(0, 8, 9, 14)))
                   }
-                  sheetLayer.addView(scrim, lp(-1, -1))
-                  val col = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL; clipChildren = false
-                      setPadding(u(56), u(10), u(56), u(36))
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val head = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(56), 0, u(56), 0)
                   }
-                  val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                  sheetIcon = ImageView(this).apply { setColorFilter(Color.parseColor("#FFC107")) }
+                  val circle = FrameLayout(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                          intArrayOf(Color.parseColor("#FFD54F"), Color.parseColor("#FF8F00"))).apply { shape = GradientDrawable.OVAL }
+                  }
+                  qvIcon = ImageView(this).apply { setColorFilter(Color.BLACK) }
+                  circle.addView(qvIcon, lp(u(26), u(26), Gravity.CENTER))
+                  qvTitle = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+                  tx(qvTitle, 26f)
+                  qvSub = TextView(this).apply { setTextColor(Color.parseColor("#B4B8C8")) }
+                  tx(qvSub, 15f)
                   val tc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  sheetTitle = scoreText("", 26f, "#FFFFFF", true)
-                  sheetSub = scoreText("", 15f, "#9AA0B4", false)
-                  tc.addView(sheetTitle, LinearLayout.LayoutParams(-2, -2))
-                  tc.addView(sheetSub, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(3) })
-                  head.addView(sheetIcon, LinearLayout.LayoutParams(u(40), u(40)))
+                  tc.addView(qvTitle, LinearLayout.LayoutParams(-2, -2))
+                  tc.addView(qvSub, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(2) })
+                  head.addView(circle, LinearLayout.LayoutParams(u(52), u(52)))
                   head.addView(tc, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(16) })
-                  sheetScroll = HorizontalScrollView(this).apply {
-                      isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
-                      isFocusable = false; clipChildren = false; clipToPadding = false
-                  }
-                  sheetRow = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL; clipChildren = false
-                      setPadding(u(8), u(22), u(8), u(8))
-                  }
-                  sheetScroll.addView(sheetRow, FrameLayout.LayoutParams(-2, -2))
                   col.addView(head, LinearLayout.LayoutParams(-1, -2))
-                  col.addView(sheetScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
-                  sheetLayer.addView(col, lp(-1, -2, Gravity.BOTTOM))
-                  playerLayer.addView(sheetLayer, lp(-1, sheetH, Gravity.BOTTOM))
-                  buildNextCard()
+
+                  qvRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; clipChildren = false; clipToPadding = false }
+                  qvScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false
+                      clipChildren = false; clipToPadding = false
+                      setPadding(u(56), u(16), u(56), u(16))
+                  }
+                  qvScroll.addView(qvRow, FrameLayout.LayoutParams(-2, -2))
+                  col.addView(qvScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(14) })
+
+                  qvSpeedBox = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+                      visibility = View.GONE
+                      setPadding(u(56), 0, u(56), 0)
+                  }
+                  qvBig = TextView(this).apply { setTextColor(Color.parseColor("#FFC107")); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }
+                  tx(qvBig, 54f)
+                  qvDial = SpeedDial(this)
+                  val hint = TextView(this).apply { text = "\u25C0  \u25B6   adjust        OK   apply"; setTextColor(Color.parseColor("#8F95AB")) }
+                  tx(hint, 14f)
+                  qvSpeedBox.addView(qvBig, LinearLayout.LayoutParams(-2, -2))
+                  qvSpeedBox.addView(qvDial, LinearLayout.LayoutParams(-1, u(96)))
+                  qvSpeedBox.addView(hint, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(2) })
+                  col.addView(qvSpeedBox, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(10) })
+
+                  qvLayer.addView(col, lp(-1, -2, Gravity.BOTTOM).apply { bottomMargin = u(44) })
+                  playerLayer.addView(qvLayer, lp(-1, qvH, Gravity.BOTTOM))
               }
 
-              private fun sheetTile(big: String, small: String, selected: Boolean, onClick: () -> Unit): FrameLayout {
-                  val t = FrameLayout(this).apply {
-                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
-                      clipChildren = false
+              private fun qvTile(big: String, small: String, sel: Boolean, onClick: () -> Unit): FrameLayout {
+                  val f = FrameLayout(this).apply { isFocusable = true; isFocusableInTouchMode = true; isClickable = true }
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                      setPadding(u(12), u(10), u(12), u(10))
                   }
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
-                  val a = TextView(this).apply { text = big; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }
+                  val a = TextView(this).apply { text = big; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; maxLines = 1 }
                   tx(a, 30f)
-                  val b = TextView(this).apply { text = small; gravity = Gravity.CENTER }
-                  tx(b, 14f)
+                  val b = TextView(this).apply { text = small; gravity = Gravity.CENTER; maxLines = 2 }
+                  tx(b, 12f)
                   col.addView(a, LinearLayout.LayoutParams(-2, -2))
                   col.addView(b, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(6) })
-                  t.addView(col, FrameLayout.LayoutParams(-1, -1))
-                  val ck = ImageView(this).apply {
-                      setImageResource(R.drawable.ic_check)
-                      visibility = if (selected) View.VISIBLE else View.GONE
-                  }
-                  t.addView(ck, FrameLayout.LayoutParams(u(24), u(24), Gravity.TOP or Gravity.END).apply { setMargins(0, u(10), u(10), 0) })
+                  val ck = ImageView(this).apply { setImageResource(R.drawable.ic_check); visibility = if (sel) View.VISIBLE else View.GONE }
+                  f.addView(col, lp(-1, -1))
+                  f.addView(ck, lp(u(22), u(22), Gravity.TOP or Gravity.END).apply { setMargins(0, u(8), u(8), 0) })
                   fun st() {
-                      val f = t.isFocused
-                      a.setTextColor(if (f) Color.BLACK else Color.WHITE)
-                      b.setTextColor(if (f) Color.parseColor("#555555") else Color.parseColor("#9AA0B4"))
-                      ck.setColorFilter(if (f) Color.parseColor("#B07F00") else Color.parseColor("#FFC107"))
-                      t.background = GradientDrawable().apply {
-                          cornerRadius = u(18).toFloat()
-                          setColor(if (f) Color.WHITE else Color.argb(255, 30, 32, 44))
-                          if (!f && selected) setStroke(max(2, u(2)), Color.parseColor("#FFC107"))
+                      val fo = f.isFocused
+                      a.setTextColor(if (fo) Color.BLACK else if (sel) Color.parseColor("#FFC107") else Color.WHITE)
+                      b.setTextColor(if (fo) Color.parseColor("#444444") else Color.parseColor("#9AA0B4"))
+                      ck.setColorFilter(if (fo) Color.BLACK else Color.parseColor("#FFC107"))
+                      f.background = GradientDrawable().apply {
+                          cornerRadius = u(16).toFloat()
+                          setColor(if (fo) Color.WHITE else Color.argb(255, 30, 32, 44))
+                          if (!fo && sel) setStroke(max(2, u(2)), Color.parseColor("#FFC107"))
+                          else if (!fo) setStroke(max(1, u(1)), Color.argb(60, 255, 255, 255))
                       }
+                      f.animate().cancel()
+                      f.animate().scaleX(if (fo) 1.07f else 1f).scaleY(if (fo) 1.07f else 1f).setDuration(160).setInterpolator(DecelerateInterpolator()).start()
+                      f.translationZ = if (fo) u(8).toFloat() else 0f
                   }
                   st()
-                  t.setOnFocusChangeListener { _, has ->
-                      st()
-                      t.animate().scaleX(if (has) 1.07f else 1f).scaleY(if (has) 1.07f else 1f).setDuration(160).start()
-                  }
-                  t.setOnClickListener { onClick() }
-                  t.layoutParams = LinearLayout.LayoutParams(u(168), u(138)).apply { rightMargin = u(16) }
-                  return t
+                  f.setOnFocusChangeListener { _, _ -> st() }
+                  f.setOnClickListener { onClick() }
+                  return f
               }
 
-              private fun openSheet(kind: Int) {
+              private fun updateSpeedUi(pop: Boolean) {
+                  val s = SPEEDS2[qvDial.idx]
+                  qvBig.text = spdText(s)
+                  qvSub.text = "Currently: " + (if (abs(s - 1f) < 0.01f) "Normal" else spdText(s))
+                  qvDial.invalidate()
+                  if (pop) {
+                      qvBig.animate().cancel()
+                      qvBig.scaleX = 0.88f; qvBig.scaleY = 0.88f
+                      qvBig.animate().scaleX(1f).scaleY(1f).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
+                  }
+              }
+
+              private fun stepSpeed(d: Int) {
+                  val ni = (qvDial.idx + d).coerceIn(0, SPEEDS2.size - 1)
+                  if (ni == qvDial.idx) return
+                  qvDial.idx = ni
+                  setSpeed(SPEEDS2[ni])
+                  updateSpeedUi(true)
+              }
+
+              private fun qvKey(code: Int): Boolean {
+                  if (qvKind == 1) {
+                      when (code) {
+                          KeyEvent.KEYCODE_DPAD_LEFT -> { stepSpeed(-1); return true }
+                          KeyEvent.KEYCODE_DPAD_RIGHT -> { stepSpeed(1); return true }
+                          KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> { closeQV(true); return true }
+                          KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> return true
+                      }
+                      return false
+                  }
+                  return code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN
+              }
+
+              private fun openQV(kind: Int) {
                   val p = mainPlayer ?: return
                   if (panel != 0) return
-                  if (kind == 2 && (liveMode || liveSport || p.isCurrentMediaItemLive)) { toast("Speed is not available for live streams"); return }
-                  sheetKind = kind
-                  sheetRow.removeAllViews()
+                  qvKind = kind
+                  qvRow.removeAllViews()
                   var focusV: View? = null
-                  fun add(v: FrameLayout, sel: Boolean) {
-                      sheetRow.addView(v)
-                      if (sel && focusV == null) focusV = v
-                  }
-                  if (kind == 1) {
-                      sheetIcon.setImageResource(R.drawable.ic_quality)
-                      sheetTitle.text = "Video quality"
-                      val ch = p.videoFormat?.height ?: 0
-                      sheetSub.text = if (qualitySel == 0) (if (ch > 0) "Auto  \u2022  now playing ${ch}p" else "Auto") else "Fixed at ${qualitySel}p"
-                      add(sheetTile("Auto", "Adaptive", qualitySel == 0) { selectQuality(null); closeSheet(true) }, qualitySel == 0)
+                  if (kind == 0) {
+                      qvIcon.setImageResource(R.drawable.ic_quality)
+                      qvTitle.text = "Video Quality"
+                      qvSub.text = "Currently: " + (if (qualitySel == 0) "Auto" else qualitySel.toString() + "p")
+                      qvScroll.visibility = View.VISIBLE; qvSpeedBox.visibility = View.GONE
+                      fun addT(tl: FrameLayout, sel: Boolean) {
+                          qvRow.addView(tl, LinearLayout.LayoutParams(u(190), u(120)).apply { rightMargin = u(16) })
+                          if (sel && focusV == null) focusV = tl
+                      }
+                      addT(qvTile("Auto", "Best for your network", qualitySel == 0) { selectQuality(null); closeQV(true) }, qualitySel == 0)
                       for (o in qualityOptions()) {
-                          add(sheetTile(o.h.toString() + "p", qualityTag(o.h), qualitySel == o.h) { selectQuality(o); closeSheet(true) }, qualitySel == o.h)
+                          val br = if (o.br > 0) "  \u2022  " + String.format(Locale.ENGLISH, "%.1f Mbps", o.br / 1000000.0) else ""
+                          addT(qvTile(o.h.toString() + "p", qlabelH(o.h) + br, qualitySel == o.h) { selectQuality(o); closeQV(true) }, qualitySel == o.h)
                       }
+                      if (focusV == null) focusV = qvRow.getChildAt(0)
+                      qvScroll.scrollTo(0, 0)
                   } else {
-                      sheetIcon.setImageResource(R.drawable.ic_speed)
-                      sheetTitle.text = "Playback speed"
-                      sheetSub.text = "Currently " + speedLabel(playSpeed)
-                      for (spd in SPEEDS) {
-                          val sel = abs(playSpeed - spd) < 0.01f
-                          add(sheetTile(speedLabel(spd), speedTag(spd), sel) { setSpeed(spd); closeSheet(true) }, sel)
-                      }
+                      qvIcon.setImageResource(R.drawable.ic_speed)
+                      qvTitle.text = "Playback Speed"
+                      qvScroll.visibility = View.GONE; qvSpeedBox.visibility = View.VISIBLE
+                      qvDial.items = SPEEDS2.map { spdText(it) }
+                      var bi = 0
+                      for (i in SPEEDS2.indices) if (abs(SPEEDS2[i] - playSpeed) < abs(SPEEDS2[bi] - playSpeed)) bi = i
+                      qvDial.idx = bi
+                      updateSpeedUi(false)
                   }
                   panel = 4
                   ui.removeCallbacks(hideRun)
@@ -7716,37 +7759,47 @@ jobs:
                   cancelScrub()
                   cueLift(false)
                   hideNext()
-                  ctrl.animate().cancel()
-                  ctrl.animate().alpha(0f).setDuration(140).withEndAction { if (panel == 4) ctrl.visibility = View.INVISIBLE }.start()
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
                   ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                  sheetLayer.animate().cancel()
-                  sheetLayer.visibility = View.VISIBLE
-                  sheetLayer.translationY = sheetH.toFloat()
-                  sheetLayer.alpha = 0f
-                  sheetLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                  sheetLayer.animate().translationY(0f).alpha(1f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f))
-                      .withEndAction { sheetLayer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()
-                  ui.post { (focusV ?: sheetRow.getChildAt(0))?.requestFocus() }
+                  qvLayer.animate().cancel()
+                  qvLayer.visibility = View.VISIBLE
+                  qvLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  qvLayer.translationY = qvH * 0.35f
+                  qvLayer.alpha = 0f
+                  qvLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                  qvLayer.animate().translationY(0f).alpha(1f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f))
+                      .withEndAction { qvLayer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()
+                  ui.postDelayed({
+                      if (inPlayer && panel == 4 && qvKind == 0) focusV?.requestFocus()
+                  }, 120)
               }
 
-              private fun closeSheet(refocus: Boolean) {
+              private fun closeQV(refocus: Boolean) {
                   if (panel != 4) return
                   panel = 0
-                  sheetLayer.animate().cancel()
-                  sheetLayer.animate().translationY(sheetH.toFloat()).alpha(0f).setDuration(200)
-                      .setInterpolator(android.view.animation.AccelerateInterpolator())
-                      .withEndAction { if (panel != 4) { sheetLayer.visibility = View.GONE; sheetLayer.setLayerType(View.LAYER_TYPE_NONE, null) } }.start()
+                  qvLayer.animate().cancel()
+                  qvLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                  qvLayer.animate().translationY(qvH * 0.35f).alpha(0f).setDuration(200).setInterpolator(DecelerateInterpolator())
+                      .withEndAction {
+                          qvLayer.setLayerType(View.LAYER_TYPE_NONE, null)
+                          if (panel != 4) { qvLayer.visibility = View.GONE; qvLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS }
+                      }.start()
                   ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
-                  if (refocus) {
-                      showControls()
-                      (if (sheetKind == 1) pillSet else pillSpeed).requestFocus()
-                  }
+                  if (refocus) showControls(if (qvKind == 0) pillSet else pillSpeed)
+              }
+
+              private fun hideQVNow() {
+                  if (!::qvLayer.isInitialized) return
+                  qvLayer.animate().cancel()
+                  qvLayer.visibility = View.GONE
+                  qvLayer.alpha = 0f
+                  qvLayer.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
               }'''
           rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
 
           P.write_text(t, encoding='utf-8')
           print('update 9 applied')
-          PYEOF 
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
