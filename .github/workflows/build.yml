@@ -6913,6 +6913,355 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 7 applied')
           PYEOF
+    # ===== PASTE THIS STEP right BEFORE "Build debug APK" (after your update 7 step) =====
+      - name: Apply update 8 (scorecard redesign, Go live for key moments, LIVE / GO LIVE slot)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import sys, re, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+              t = t.replace(old, new)
+
+          # ---------------------------------------------------------------- scorecard hooks
+          rep('try { renderScore(j) } catch (e: Exception) { }',
+              r'''try {
+                                  val sy = scoreScroll.scrollY
+                                  scoreJson = j
+                                  renderScore2()
+                                  scoreScroll.post { scoreScroll.scrollTo(0, sy) }
+                              } catch (e: Exception) { }''')
+          rep('scoreCol.addView(scoreText("Loading scorecard...", 16f, "#B4B8C8", false))',
+              'scoreInn = -1; scoreJson = null\n                  scoreCol.addView(scoreText("Loading scorecard...", 16f, "#B4B8C8", false))')
+          # left / right = switch team tab (left on the first tab closes), up / down = scroll
+          rep('KeyEvent.KEYCODE_DPAD_LEFT -> { closeScore(true); return true }',
+              'KeyEvent.KEYCODE_DPAD_LEFT -> { if (scoreInn > 0) selectScoreInn(scoreInn - 1) else closeScore(true); return true }')
+          rep('KeyEvent.KEYCODE_DPAD_UP -> { scoreScroll.smoothScrollBy(0, -u(240)); return true }',
+              'KeyEvent.KEYCODE_DPAD_RIGHT -> { selectScoreInn(scoreInn + 1); return true }\n                          KeyEvent.KEYCODE_DPAD_UP -> { scoreScroll.smoothScrollBy(0, -u(240)); return true }')
+
+          # ---------------------------------------------------------------- Go live button (above the time, shown while a key moment plays)
+          rep('bottomCol.addView(row1, LinearLayout.LayoutParams(-1, -2))',
+              r'''pGoLive = makeGoLive()
+                  val row0 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
+                  row0.addView(pGoLive, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(2); bottomMargin = u(4) })
+                  bottomCol.addView(row0, LinearLayout.LayoutParams(-1, -2))
+                  bottomCol.addView(row1, LinearLayout.LayoutParams(-1, -2))''')
+          rep('lp(prevW(), -2, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = u(134) }',
+              'lp(prevW(), -2, Gravity.BOTTOM or Gravity.START).apply { bottomMargin = u(186) }')
+          rep('hidePlayerError(); playSpeed = 1f;', 'hidePlayerError(); pGoLive.visibility = View.GONE; setLiveSlot(0); playSpeed = 1f;')
+          rep('savedEps.clear(); savedEps.addAll(eps)', 'liveEpSaved = curPlayEp\n                  savedEps.clear(); savedEps.addAll(eps)')
+          rep('openPlayer(Ep(ep.id, ep.title, 0, ep.desc, ep.thumb, ep.dur, 0L), 0, true, true)',
+              'openPlayer(Ep(ep.id, ep.title, 0, ep.desc, ep.thumb, ep.dur, 0L), 0, true, true)\n                  pGoLive.visibility = View.VISIBLE')
+
+          # focus rules for the Go live button and the GO LIVE time slot
+          rep('if (f === pSeek) pPause.requestFocus()', 'if (f === pSeek) (goLiveTarget() ?: pPause).requestFocus()')
+          rep('else if (f === pPause) pBack.requestFocus()', 'else if (f === pPause || f === pGoLive || f === pTime) pBack.requestFocus()')
+          rep('else if (f === pSeek || f === pPause) pillSub.requestFocus()',
+              'else if (f === pGoLive) pSeek.requestFocus()\n                          else if (f === pSeek || f === pPause || f === pTime) pillSub.requestFocus()')
+          rep('if (f === pillSub || f === pPause || f === pBack) return true',
+              'if (f === pTime) { pSeek.requestFocus(); return true }\n                          if (f === pillSub || f === pPause || f === pBack || f === pGoLive) return true')
+          rep('if (f === pBack || f === lastPill()) return true', 'if (f === pBack || f === lastPill() || f === pGoLive || f === pTime) return true')
+
+          # ---------------------------------------------------------------- LIVE / GO LIVE in place of the time left
+          rep('pTime.text = fmtLeft(pos, dur)', 'if (!showLiveSlot(p)) pTime.text = fmtLeft(pos, dur)')
+
+          # ---------------------------------------------------------------- members
+          MEM = r'''// ---------------------------------------------------------------- Update 8
+              private lateinit var pGoLive: TextView
+              private var liveEpSaved: Ep? = null
+              private var liveSlot = 0                  // 0 = time left, 1 = LIVE, 2 = GO LIVE
+              private var scoreJson: JSONObject? = null
+              private var scoreInn = -1
+              private val scoreTabViews = ArrayList<TextView>()
+
+              private fun makeGoLive(): TextView {
+                  val b = TextView(this).apply {
+                      text = "\u25CF  Go live"; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; maxLines = 1
+                      setPadding(u(22), u(8), u(22), u(8))
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      visibility = View.GONE
+                  }
+                  tx(b, 15f)
+                  fun st() {
+                      val f = b.isFocused
+                      b.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      b.background = GradientDrawable().apply { cornerRadius = u(20).toFloat(); setColor(if (f) Color.WHITE else Color.parseColor("#E53935")) }
+                  }
+                  st()
+                  b.setOnFocusChangeListener { _, _ -> st() }
+                  b.setOnClickListener { goLive() }
+                  return b
+              }
+
+              // back to the live match stream after watching a key moment
+              private fun goLive() {
+                  val e = liveEpSaved ?: return
+                  histSkipNext = true
+                  openPlayer(Ep(e.id, e.title, 0, e.desc, e.thumb, 0, 0L), 0, true, true)
+              }
+
+              private fun goLiveTarget(): View? =
+                  if (pGoLive.visibility == View.VISIBLE) pGoLive else if (liveSlot == 2) pTime else null
+
+              // every live stream: "LIVE" (red) at the live edge, "GO LIVE" (button) when more than 1 minute behind
+              private fun showLiveSlot(p: ExoPlayer?): Boolean {
+                  if (p == null || !p.isCurrentMediaItemLive) {
+                      if (liveSlot != 0) setLiveSlot(0)
+                      return false
+                  }
+                  val off = p.currentLiveOffset
+                  val behind = off != C.TIME_UNSET && off > 60000L
+                  setLiveSlot(if (behind) 2 else 1)
+                  return true
+              }
+
+              private fun setLiveSlot(k: Int) {
+                  if (liveSlot == k) return
+                  liveSlot = k
+                  pTime.setOnFocusChangeListener(null)
+                  pTime.setOnClickListener(null)
+                  when (k) {
+                      0 -> {
+                          pTime.setTextColor(Color.WHITE); pTime.background = null; pTime.setPadding(0, 0, 0, 0)
+                          pTime.isFocusable = false; pTime.isFocusableInTouchMode = false; pTime.isClickable = false
+                      }
+                      1 -> {
+                          pTime.text = "\u25CF LIVE"; pTime.setTextColor(Color.parseColor("#FF4D4D")); pTime.background = null
+                          pTime.setPadding(0, 0, 0, 0)
+                          pTime.isFocusable = false; pTime.isFocusableInTouchMode = false; pTime.isClickable = false
+                      }
+                      else -> {
+                          pTime.text = "GO LIVE"
+                          pTime.setPadding(u(16), u(6), u(16), u(6))
+                          pTime.isFocusable = true; pTime.isFocusableInTouchMode = true; pTime.isClickable = true
+                          fun st() {
+                              val f = pTime.isFocused
+                              pTime.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                              pTime.background = GradientDrawable().apply { cornerRadius = u(18).toFloat(); setColor(if (f) Color.WHITE else Color.parseColor("#E53935")) }
+                          }
+                          st()
+                          pTime.setOnFocusChangeListener { _, _ -> st() }
+                          pTime.setOnClickListener { mainPlayer?.seekToDefaultPosition() }
+                      }
+                  }
+              }
+
+              // ---------------- scorecard v2: team tabs, section bars, aligned columns
+              private fun selectScoreInn(i: Int) {
+                  val n = scoreJson?.optJSONArray("Innings")?.length() ?: 0
+                  if (i < 0 || i >= n || i == scoreInn) return
+                  scoreInn = i
+                  renderScore2()
+                  scoreScroll.scrollTo(0, 0)
+              }
+
+              private fun styleScoreTab(i: Int) {
+                  val v = scoreTabViews.getOrNull(i) ?: return
+                  val sel = i == scoreInn
+                  v.setTextColor(if (sel) Color.BLACK else Color.WHITE)
+                  v.background = GradientDrawable().apply {
+                      cornerRadius = u(26).toFloat()
+                      if (sel) setColor(Color.WHITE) else { setColor(Color.TRANSPARENT); setStroke(max(1, u(2)), Color.argb(200, 255, 255, 255)) }
+                  }
+              }
+
+              private fun scHead(label: String, cols: List<String>, wts: List<Float>): LinearLayout {
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(14), u(10), u(14), u(10))
+                      background = GradientDrawable().apply { cornerRadius = u(8).toFloat(); setColor(Color.argb(255, 38, 38, 42)) }
+                  }
+                  r.addView(scoreText(label, 14f, "#FFC107", false), LinearLayout.LayoutParams(0, -2, wts[0]))
+                  for (i in cols.indices) {
+                      val c = scoreText(cols[i], 14f, "#9AA0B4", false)
+                      c.gravity = Gravity.END
+                      r.addView(c, LinearLayout.LayoutParams(0, -2, wts[i + 1]))
+                  }
+                  return r
+              }
+
+              private fun scLine(name: String, sub: String?, vals: List<String>, wts: List<Float>, boldIdx: Int): LinearLayout {
+                  val r = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(14), u(10), u(14), u(10))
+                  }
+                  val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  c.addView(scoreText(name, 18f, "#FFFFFF", false))
+                  if (!sub.isNullOrBlank()) c.addView(scoreText(sub, 13f, "#8F95AB", false))
+                  r.addView(c, LinearLayout.LayoutParams(0, -2, wts[0]))
+                  for (i in vals.indices) {
+                      val bold = i == boldIdx
+                      val v = scoreText(vals[i], 16f, if (bold) "#FFFFFF" else "#9AA0B4", bold)
+                      v.gravity = Gravity.END
+                      r.addView(v, LinearLayout.LayoutParams(0, -2, wts[i + 1]))
+                  }
+                  return r
+              }
+
+              private fun scKv(label: String, value: String, size: Float): TextView {
+                  val sb = SpannableStringBuilder(label + value)
+                  sb.setSpan(ForegroundColorSpan(Color.parseColor("#9AA0B4")), 0, label.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                  sb.setSpan(ForegroundColorSpan(Color.WHITE), label.length, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                  sb.setSpan(StyleSpan(Typeface.BOLD), label.length, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                  val t = TextView(this)
+                  t.text = sb
+                  tx(t, size)
+                  return t
+              }
+
+              private fun renderScore2() {
+                  val j = scoreJson ?: return
+                  scoreCol.removeAllViews(); scoreTabViews.clear()
+                  fun add(v: View, top: Int) { scoreCol.addView(v, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(top) }) }
+                  fun line(top: Int) {
+                      val d = View(this)
+                      d.setBackgroundColor(Color.argb(45, 255, 255, 255))
+                      scoreCol.addView(d, LinearLayout.LayoutParams(-1, max(1, u(1))).apply { topMargin = u(top) })
+                  }
+                  fun centered(s: String, size: Float, color: String, bold: Boolean): TextView {
+                      val v = scoreText(s, size, color, bold)
+                      v.gravity = Gravity.CENTER_HORIZONTAL
+                      return v
+                  }
+                  val md = j.optJSONObject("Matchdetail")
+                  val names = HashMap<String, String>()
+                  val teamName = HashMap<String, String>()
+                  val tarr = j.optJSONArray("Teams")
+                  if (tarr != null) for (i in 0 until tarr.length()) {
+                      val tm = tarr.optJSONObject(i) ?: continue
+                      teamName[tm.optString("Team_Id")] = tm.str("Name_Full") ?: tm.optString("Name_Short")
+                      val pl = tm.optJSONArray("Players") ?: continue
+                      for (k in 0 until pl.length()) {
+                          val p = pl.optJSONObject(k) ?: continue
+                          var n = p.optString("Name_Short")
+                          if (p.optBoolean("Iscaptain", false)) n += " (c)"
+                          if (p.optBoolean("Iskeeper", false)) n += " \u2020"
+                          names[p.optString("Player_Id")] = n
+                      }
+                  }
+
+                  // title + status + equation
+                  val tr = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  tr.addView(scoreText("Scorecard", 26f, "#FFFFFF", true), LinearLayout.LayoutParams(0, -2, 1f))
+                  tr.addView(scoreText("\u2715", 24f, "#FFFFFF", false), LinearLayout.LayoutParams(-2, -2))
+                  add(tr, 0)
+                  md?.str("Status")?.let { add(centered(it, 20f, "#FFC107", true), 14) }
+                  j.optJSONObject("Matchequation")?.str("Equation")?.let { add(centered(it, 17f, "#FFFFFF", false), 6) }
+
+                  val inn = j.optJSONArray("Innings") ?: JSONArray()
+                  val n = inn.length()
+                  if (n == 0) { add(centered("Scorecard will appear when play starts", 16f, "#B4B8C8", false), 30); return }
+                  if (scoreInn < 0 || scoreInn >= n) scoreInn = n - 1
+
+                  // team tabs
+                  val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  for (i in 0 until n) {
+                      val io = inn.optJSONObject(i)
+                      val nm = (teamName[io?.optString("Battingteam") ?: ""] ?: "Innings ${i + 1}").uppercase()
+                      val tv = TextView(this).apply {
+                          text = nm; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                          maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                          letterSpacing = 0.06f
+                          setPadding(u(12), u(11), u(12), u(11))
+                          isClickable = true
+                      }
+                      tx(tv, 15f)
+                      tv.setOnClickListener { selectScoreInn(i) }
+                      scoreTabViews.add(tv)
+                      tabs.addView(tv, LinearLayout.LayoutParams(0, -2, 1f).apply { if (i > 0) leftMargin = u(12) })
+                  }
+                  add(tabs, 18)
+                  for (i in scoreTabViews.indices) styleScoreTab(i)
+
+                  val o = inn.optJSONObject(scoreInn) ?: return
+
+                  // batting
+                  val wB = listOf(3.6f, 0.9f, 0.9f, 0.8f, 0.8f, 1.3f)
+                  add(scHead("BATTING", listOf("R", "B", "4s", "6s", "SR"), wB), 18)
+                  val bats = o.optJSONArray("Batsmen")
+                  val yet = ArrayList<String>()
+                  if (bats != null) for (k in 0 until bats.length()) {
+                      val b = bats.optJSONObject(k) ?: continue
+                      val nm = names[b.optString("Batsman")] ?: b.optString("Batsman")
+                      val runs = b.optString("Runs")
+                      val out = b.optString("Howout_short")
+                      if (runs.isBlank() && out.isBlank()) { yet.add(nm); continue }
+                      val star = if (b.optBoolean("Isonstrike", false)) "*" else ""
+                      add(scLine(nm + star, if (out.isBlank()) null else out,
+                          listOf(runs, b.optString("Balls"), b.optString("Fours"), b.optString("Sixes"), b.optString("Strikerate")), wB, 0), 2)
+                  }
+
+                  // extras + score / overs
+                  line(12)
+                  val extras = listOf("Byes", "Legbyes", "Wides", "Noballs", "Penalty").sumOf { o.optString(it).toIntOrNull() ?: 0 }
+                  val exRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(u(14), u(12), u(14), u(12)) }
+                  val exL = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  exL.addView(scKv("Extras: ", "$extras Runs", 17f))
+                  exL.addView(scoreText("(B:" + o.optString("Byes") + ", LB:" + o.optString("Legbyes") + ", NB:" + o.optString("Noballs") +
+                      ", WD:" + o.optString("Wides") + ")", 14f, "#9AA0B4", false), LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(6) })
+                  val exR = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.END }
+                  exR.addView(scKv("Score: ", o.optString("Total") + "/" + o.optString("Wickets"), 17f))
+                  exR.addView(scKv("Overs: ", o.optString("Overs"), 14f), LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(6) })
+                  exRow.addView(exL, LinearLayout.LayoutParams(0, -2, 1f))
+                  exRow.addView(exR, LinearLayout.LayoutParams(-2, -2))
+                  add(exRow, 0)
+                  line(0)
+
+                  if (yet.isNotEmpty()) {
+                      val sb = SpannableStringBuilder("Yet To Bat: " + yet.joinToString(", "))
+                      sb.setSpan(ForegroundColorSpan(Color.parseColor("#9AA0B4")), 0, 12, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                      sb.setSpan(ForegroundColorSpan(Color.WHITE), 12, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                      val yv = TextView(this)
+                      yv.text = sb
+                      yv.setPadding(u(14), u(12), u(14), u(12))
+                      tx(yv, 15f)
+                      add(yv, 0)
+                  }
+
+                  // bowling
+                  val wW = listOf(3.6f, 0.9f, 0.9f, 0.9f, 0.9f, 1.1f)
+                  add(scHead("BOWLING", listOf("O", "M", "R", "W", "ER"), wW), 16)
+                  val bw = o.optJSONArray("Bowlers")
+                  if (bw != null) for (k in 0 until bw.length()) {
+                      val b = bw.optJSONObject(k) ?: continue
+                      val nm = names[b.optString("Bowler")] ?: b.optString("Bowler")
+                      val balls = b.optString("Balls_Bowled").toIntOrNull() ?: 0
+                      val rr = b.optString("Runs").toIntOrNull() ?: 0
+                      val eco = if (balls > 0) String.format(Locale.ENGLISH, "%.2f", rr * 6.0 / balls) else "-"
+                      add(scLine(nm, if (b.optBoolean("Isbowlingnow", false)) "Bowling" else null,
+                          listOf(b.optString("Overs"), b.optString("Maidens"), b.optString("Runs"), b.optString("Wickets"), eco), wW, 3), 2)
+                  }
+
+                  // fall of wickets
+                  val fow = o.str("FallofWickets")
+                  if (fow != null) {
+                      add(scHead("FALL OF WICKETS", listOf("BATSMAN"), listOf(1f, 1f)), 18)
+                      val rx = Regex("""^(\d+/\d+)\s*\(([^)]*)\)\s*(.*)$""")
+                      for (seg in fow.split(", ")) {
+                          val m = rx.find(seg.trim())
+                          val left = if (m != null) m.groupValues[1] + " (" + m.groupValues[2] + ")" else seg.trim()
+                          val right = if (m != null) m.groupValues[3] else ""
+                          val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(u(14), u(10), u(14), u(10)) }
+                          r.addView(scoreText(left, 16f, "#FFFFFF", false), LinearLayout.LayoutParams(0, -2, 1f))
+                          val rv = scoreText(right, 16f, "#FFFFFF", false)
+                          rv.gravity = Gravity.END
+                          r.addView(rv, LinearLayout.LayoutParams(0, -2, 1f))
+                          add(r, 0)
+                      }
+                  }
+                  add(View(this), 30)
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 8 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
