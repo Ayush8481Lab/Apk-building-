@@ -7262,6 +7262,491 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 8 applied')
           PYEOF
+   # ===== PASTE THIS STEP right BEFORE "Build debug APK" (after your update 8 step) =====
+      - name: Apply update 9 (Quality / Speed sheets, episodes for home-played shows, autoplay next, sidebar focus)
+        run: |
+          set -e
+          D=app/src/main/res/drawable
+          cat > $D/ic_quality.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M3,17v2h6v-2H3zM3,5v2h10V5H3zM13,21v-2h8v-2h-8v-2h-2v6h2zM7,9v2H3v2h4v2h2V9H7zM21,13v-2H11v2h10zM15,9h2V7h4V5h-4V3h-2v6z"/></vector>
+          EOF
+          cat > $D/ic_speed.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M20.38,8.57l-1.23,1.85a8,8 0 0 1 -0.22,7.58H5.07A8,8 0 0 1 15.58,6.85l1.85,-1.23A10,10 0 0 0 3.35,19a2,2 0 0 0 1.72,1h13.85a2,2 0 0 0 1.74,-1 10,10 0 0 0 -0.27,-10.44zM10.59,15.41a2,2 0 0 0 2.83,0l5.66,-8.49 -8.49,5.66a2,2 0 0 0 0,2.83z"/></vector>
+          EOF
+
+          python3 - <<'PYEOF'
+          import sys, re, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+              t = t.replace(old, new)
+
+          def rep_re(pat, fn):
+              global t
+              n = len(re.findall(pat, t))
+              if n != 1:
+                  sys.exit('REGEX PATCH FAILED (%d): %s' % (n, pat[:100]))
+              t = re.sub(pat, fn, t, count=1)
+
+          # =====================================================================
+          # 1) TOP LEVEL
+          # =====================================================================
+          TOP9 = r'''// ---------------- Update 9 ----------------
+          class EpCtx(val showId: String, val seasonId: String, val seasonNum: Int, val num: Int)
+
+          // episode content detail response: parents[] holds the SEASON bundle id and the SHOW id
+          fun parseEpCtx(j: JSONObject?): EpCtx? {
+              val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0) ?: return null
+              val m = c.optJSONObject("metadata") ?: return null
+              if (!m.optString("objectSubtype").equals("EPISODE", true)) return null
+              var show = ""
+              var season = ""
+              val ps = c.optJSONArray("parents")
+              if (ps != null) for (i in 0 until ps.length()) {
+                  val p = ps.optJSONObject(i) ?: continue
+                  val id = p.optString("parentId")
+                  if (id.isBlank() || id == "0") continue
+                  val st = p.optString("parentSubType")
+                  if (st.equals("SHOW", true)) show = id else if (st.equals("SEASON", true)) season = id
+              }
+              if (show.isEmpty()) return null
+              return EpCtx(show, season, m.optInt("season"), m.optInt("episodeNumber"))
+          }
+
+          fun qualityTag(h: Int): String = when {
+              h >= 2160 -> "4K Ultra HD"
+              h >= 1080 -> "Full HD"
+              h >= 720 -> "HD"
+              h >= 480 -> "Standard"
+              else -> "Data saver"
+          }
+
+          fun speedTag(s: Float): String = when (s) {
+              1f -> "Default"
+              1.25f -> "Brisk"
+              1.5f -> "Fast"
+              1.75f -> "Faster"
+              else -> "Double"
+          }
+
+          object Net {'''
+          rep('object Net {', TOP9)
+
+          # =====================================================================
+          # 2) Player pills: Settings -> Quality + Speed (svg icons)
+          # =====================================================================
+          rep('pillSet = pill("Settings", R.drawable.ic_settings) { openDrawer(2) }',
+              'pillSet = pill("Quality", R.drawable.ic_quality) { openSheet(1) }\n                  pillSpeed = pill("Speed", R.drawable.ic_speed) { openSheet(2) }')
+          rep('row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })',
+              'row2.addView(pillSet, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })\n                  row2.addView(pillSpeed, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = u(10) })')
+          rep('f === pillScore || f === pillMoments', 'f === pillScore || f === pillMoments || f === pillSpeed')
+          rep('else -> pillSet', 'else -> pillSpeed')
+
+          # sheet + next card get built with the player
+          rep_re(r'(playerLayer\.addView\(drawer, lp\(drawerW, -1, Gravity\.END\)\)\s*buildScore\(\))',
+                 lambda m: m.group(1) + '\n        buildSheet()')
+
+          # panels: 4 = quality / speed sheet
+          rep('3 -> closeScore(true)', '3 -> closeScore(true)\n                4 -> closeSheet(true)')
+          rep('if (panel == 3) closeScore(false)', 'if (panel == 3) closeScore(false)\n            if (panel == 4) closeSheet(false)')
+          rep('ui.removeCallbacks(scoreRun); resetMoments()',
+              'ui.removeCallbacks(scoreRun); sheetLayer.animate().cancel(); sheetLayer.visibility = View.GONE; resetNext(); resetMoments()\n        if (epLayer.parent !== detail) moveEpLayerToDetail()')
+          rep_re(r'private fun playerKey\(code: Int, repeat: Int\): Boolean \{', lambda m: m.group(0) + r'''
+                  if (nextShown && panel == 0 && (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                      playNextNow(); return true
+                  }
+                  if (panel == 4) {                                  // quality / speed sheet: left / right / OK use normal focus
+                      if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN) { closeSheet(true); return true }
+                      return false
+                  }''')
+
+          # =====================================================================
+          # 3) Episodes for episodes opened from home / spotlight (show + season come from the content details response)
+          # =====================================================================
+          rep('val sportI = parseSportInfo(dj)', 'val sportI = parseSportInfo(dj)\n                      val epCtxI = parseEpCtx(dj)')
+          rep('applySport(sportI)', 'applySport(sportI)\n                          applyEpCtx(epCtxI, fromHome, ep)')
+          rep('openPlayer(ep, sn)', 'openPlayer(ep, sn, playFromHome)')
+
+          # =====================================================================
+          # 4) Autoplay next episode (last 15 seconds card)
+          # =====================================================================
+          rep('hidePlayerError(); pGoLive.visibility = View.GONE; setLiveSlot(0); playSpeed = 1f;',
+              'hidePlayerError(); pGoLive.visibility = View.GONE; setLiveSlot(0); resetNext(); nextOk = !fromHome && !detailMovie && seasons.isNotEmpty() && directUrl == null; playSpeed = 1f;')
+          rep('pSeek.buf = p?.bufferedPosition ?: 0L', 'pSeek.buf = p?.bufferedPosition ?: 0L\n                  checkNext(p, dur)')
+          rep('else -> if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()',
+              'else -> if (nextShown) cancelNext() else if (ctrlVisible && pErr?.visibility != View.VISIBLE) hideControls() else closePlayer()')
+          rep('if (playFromHome) { closePlayer(); return }', 'if (nextCancelled || (playFromHome && !nextOk)) { closePlayer(); return }')
+          rep('if (i > 0) openPlayer(eps[i - 1], curPlaySeason) else closePlayer()',
+              'if (i > 0) openPlayer(eps[i - 1], curPlaySeason, playFromHome) else closePlayer()')
+
+          # =====================================================================
+          # 5) Sidebar: left from the first card lands on the CURRENT category, up / down change category (auto-opens after a short pause), right enters the page
+          # =====================================================================
+          rep('searchLeft() || extraLeft())', 'searchLeft() || extraLeft() || homeLeft())')
+          rep('row.setOnFocusChangeListener { _, _ -> styleTab(i); ui.post { updateSide() } }',
+              'row.setOnFocusChangeListener { _, has -> styleTab(i); ui.post { updateSide() }; if (has) onSideFocus(i) }')
+          rep('row.setOnClickListener { selectTab(i) }',
+              'row.setOnClickListener { sideKeep = false; sideSelRun?.let { ui.removeCallbacks(it) }; if (i == tab && !inDetail) enterContent() else selectTab(i) }')
+          rep('setContentView(root)', 'setContentView(root)\n        installSideGuard()')
+          rep_re(r'override fun dispatchKeyEvent\(ev: KeyEvent\): Boolean \{', lambda m: m.group(0) + '''
+                  if (!splashOn && !inPlayer && ev.action == KeyEvent.ACTION_DOWN && ev.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && leaveSide()) return true''')
+          rep_re(r'private fun move\(dir: Int\) \{', lambda m: m.group(0) + '''
+                  if (dir == View.FOCUS_RIGHT && !inPlayer && !inDetail && leaveSide()) return''')
+
+          # =====================================================================
+          # 6) MEMBERS
+          # =====================================================================
+          MEM = r'''// ---------------------------------------------------------------- Update 9
+              private var sideKeep = false
+              private var sideSelRun: Runnable? = null
+              private var nextOk = false
+              private var nextShown = false
+              private var nextCancelled = false
+              private var nextEpId = ""
+              private var epCtxShow = ""
+              private var sheetKind = 0
+              private var sheetH = 0
+              private lateinit var pillSpeed: LinearLayout
+              private lateinit var sheetLayer: FrameLayout
+              private lateinit var sheetIcon: ImageView
+              private lateinit var sheetTitle: TextView
+              private lateinit var sheetSub: TextView
+              private lateinit var sheetRow: LinearLayout
+              private lateinit var sheetScroll: HorizontalScrollView
+              private lateinit var nextCard: LinearLayout
+              private lateinit var nextThumb: ImageView
+              private lateinit var nextTitle: TextView
+              private lateinit var nextCount: TextView
+
+              // ---------------- sidebar behaviour
+              private fun installSideGuard() {
+                  root.viewTreeObserver.addOnGlobalFocusChangeListener { oldF, newF ->
+                      // while the user browses the sidebar, pages that finish loading must not pull the focus away
+                      if (sideKeep && oldF != null && newF != null && tabViews.any { it === oldF } && tabViews.none { it === newF }) {
+                          ui.post { if (sideKeep && !inPlayer && !inDetail) oldF.requestFocus() }
+                      }
+                  }
+              }
+
+              // a tab got focus: stay on it, and open that category after a short pause (like the season list)
+              private fun onSideFocus(i: Int) {
+                  sideKeep = true
+                  sideSelRun?.let { ui.removeCallbacks(it) }
+                  if (i == tab || inDetail || inPlayer || splashOn) return
+                  val r = Runnable { if (sideKeep && tabViews[i].isFocused && i != tab && !inDetail && !inPlayer) selectTab(i) }
+                  sideSelRun = r
+                  ui.postDelayed(r, 500)
+              }
+
+              // RIGHT on a tab: open the focused category (if it is not open yet) and go into the page
+              private fun leaveSide(): Boolean {
+                  val cf = currentFocus ?: return false
+                  if (!sideKeep) return false
+                  val fi = tabViews.indexOfFirst { it === cf }
+                  if (fi < 0) return false
+                  sideKeep = false
+                  sideSelRun?.let { ui.removeCallbacks(it) }
+                  if (fi != tab) selectTab(fi) else enterContent()
+                  return true
+              }
+
+              private fun enterContent() {
+                  if (noNetOn()) {
+                      val col = noNetLayer?.getChildAt(0) as? LinearLayout
+                      col?.getChildAt(col.childCount - 1)?.requestFocus()
+                      return
+                  }
+                  when {
+                      tab == 0 -> { if (keyViews.size > 2) keyViews[2].requestFocus() else keyViews.firstOrNull()?.requestFocus() }
+                      tab == 5 -> liveGrid.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+                      tab == 6 -> focusHistFirst()
+                      tab == 8 -> settingsRow1?.requestFocus()
+                      isHomeTab() -> focusFirst(12)
+                  }
+              }
+
+              // LEFT on the first card of any row => the CURRENT category of the sidebar (Home ...)
+              private fun homeLeft(): Boolean {
+                  if (!isHomeTab() || inDetail || inPlayer || content.visibility != View.VISIBLE) return false
+                  val f = currentFocus ?: return false
+                  if (tabViews.any { it === f }) return false
+                  val rv = f.parent as? RecyclerView ?: return false
+                  if (rv === rowRv) return false
+                  if (rv.getChildAdapterPosition(f) != 0) return false
+                  tabViews[tab].requestFocus()
+                  return true
+              }
+
+              // ---------------- episodes list for an episode that was opened straight from home / spotlight
+              private fun applyEpCtx(c: EpCtx?, fromHome: Boolean, ep: Ep) {
+                  if (c == null || !fromHome || liveMode) return
+                  nextOk = true
+                  if (histTrack) {                               // history + resume point belong to the show
+                      histCid = c.showId; histSubT = SUB_SHOW
+                      playTrack = true; playShowCid = c.showId; playShowSub = SUB_SHOW
+                  }
+                  if (epCtxShow == c.showId && seasons.isNotEmpty() && curSeason in seasons.indices &&
+                      (c.seasonId.isEmpty() || seasons[curSeason].id == c.seasonId)) {
+                      pillEps.visibility = View.VISIBLE
+                      return
+                  }
+                  epCtxShow = c.showId
+                  val tok = playToken
+                  Thread {
+                      val j = fetchDetail(c.showId, false)
+                      val show = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
+                      val data = if (show != null) parseSeasons(show) else null
+                      val st = show?.optJSONObject("metadata")?.str("title")
+                      ui.post {
+                          if (tok != playToken || !inPlayer || data == null || data.seasons.isEmpty()) return@post
+                          if (st != null) { showTitle = st; setPlayerTitles() }
+                          seasons.clear(); seasons.addAll(data.seasons)
+                          buildSeasonCol()
+                          var idx = data.seasons.indexOfFirst { it.id == c.seasonId }
+                          if (idx < 0 && c.seasonNum > 0) idx = data.seasons.indexOfFirst { it.num == c.seasonNum }
+                          if (idx < 0) idx = 0
+                          selectSeason(idx, false)
+                          pillEps.visibility = View.VISIBLE
+                      }
+                  }.start()
+              }
+
+              // ---------------- autoplay next episode (Netflix style card in the last 15 seconds)
+              private fun buildNextCard() {
+                  nextCard = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                      setPadding(u(12), u(12), u(22), u(12))
+                      background = GradientDrawable().apply {
+                          cornerRadius = u(14).toFloat(); setColor(Color.argb(244, 18, 19, 28)); setStroke(max(1, u(1)), Color.argb(90, 255, 255, 255))
+                      }
+                      visibility = View.GONE
+                      elevation = u(8).toFloat()
+                  }
+                  nextThumb = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.CENTER_CROP
+                      setBackgroundColor(Color.rgb(26, 28, 42))
+                      outlineProvider = roundOutline; clipToOutline = true
+                  }
+                  val tc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  val l1 = scoreText("Autoplaying next episode", 13f, "#FFC107", true)
+                  nextTitle = scoreText("", 18f, "#FFFFFF", true)
+                  nextTitle.maxLines = 1; nextTitle.ellipsize = TextUtils.TruncateAt.END
+                  nextCount = scoreText("", 14f, "#C8C8D0", false)
+                  val hint = scoreText("OK  play now   \u2022   Back  cancel", 12f, "#8F95AB", false)
+                  tc.addView(l1, LinearLayout.LayoutParams(-2, -2))
+                  tc.addView(nextTitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
+                  tc.addView(nextCount, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(4) })
+                  tc.addView(hint, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(8) })
+                  nextCard.addView(nextThumb, LinearLayout.LayoutParams(u(176), u(99)))
+                  nextCard.addView(tc, LinearLayout.LayoutParams(u(300), -2).apply { leftMargin = u(16) })
+                  playerLayer.addView(nextCard, lp(-2, -2, Gravity.BOTTOM or Gravity.END).apply { rightMargin = u(56); bottomMargin = u(210) })
+              }
+
+              private fun checkNext(p: ExoPlayer?, dur: Long) {
+                  val cur = curPlayEp
+                  if (p == null || cur == null || !nextOk || liveMode || liveSport || dur <= 0L || p.isCurrentMediaItemLive) {
+                      if (nextShown) hideNext()
+                      return
+                  }
+                  val i = eps.indexOfFirst { it.id == cur.id }
+                  if (i < 0) {                                  // current episode is on a later page of the list: keep loading pages
+                      if (epHasMore && !epLoading && curSeason in seasons.indices) loadEpisodes()
+                      if (nextShown) hideNext()
+                      return
+                  }
+                  val left = dur - p.currentPosition
+                  val nx = if (i > 0) eps[i - 1] else null
+                  if (nx == null || nextCancelled || panel != 0 || scrubPos >= 0L || left <= 0L || left > 15000L) {
+                      if (nextShown) hideNext()
+                      return
+                  }
+                  showNext(nx, ((left + 999L) / 1000L).toInt())
+              }
+
+              private fun showNext(nx: Ep, secs: Int) {
+                  if (nextEpId != nx.id) {
+                      nextEpId = nx.id
+                      val pre = if (nx.num > 0) "E${nx.num}  \u2022  " else ""
+                      nextTitle.text = pre + nx.title
+                      Glide.with(this).load(img(nx.thumb, W_EP)).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(nextThumb)
+                  }
+                  nextCount.text = "Playing in ${secs}s"
+                  if (!nextShown) {
+                      nextShown = true
+                      nextCard.animate().cancel()
+                      nextCard.alpha = 0f; nextCard.translationX = u(60).toFloat(); nextCard.visibility = View.VISIBLE
+                      nextCard.animate().alpha(1f).translationX(0f).setDuration(280).setInterpolator(DecelerateInterpolator()).start()
+                  }
+              }
+
+              private fun hideNext() {
+                  if (!nextShown) return
+                  nextShown = false
+                  nextCard.animate().cancel()
+                  nextCard.animate().alpha(0f).setDuration(180).withEndAction { if (!nextShown) nextCard.visibility = View.GONE }.start()
+              }
+
+              private fun cancelNext() { nextCancelled = true; hideNext() }
+
+              private fun resetNext() {
+                  nextCancelled = false; nextEpId = ""; nextShown = false
+                  nextCard.animate().cancel(); nextCard.visibility = View.GONE
+              }
+
+              private fun playNextNow() {
+                  val cur = curPlayEp ?: return
+                  val i = eps.indexOfFirst { it.id == cur.id }
+                  if (i > 0) { hideNext(); openPlayer(eps[i - 1], curPlaySeason, playFromHome) }
+              }
+
+              // ---------------- Quality / Speed: bottom sheet with big tiles (slides up, fades, hardware layer for smoothness)
+              private fun buildSheet() {
+                  sheetH = (H * 0.5f).toInt()
+                  sheetLayer = FrameLayout(this).apply { visibility = View.GONE; clipChildren = false }
+                  val scrim = View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
+                          intArrayOf(Color.argb(252, 8, 9, 14), Color.argb(236, 8, 9, 14), Color.argb(0, 8, 9, 14)))
+                  }
+                  sheetLayer.addView(scrim, lp(-1, -1))
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL; clipChildren = false
+                      setPadding(u(56), u(10), u(56), u(36))
+                  }
+                  val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  sheetIcon = ImageView(this).apply { setColorFilter(Color.parseColor("#FFC107")) }
+                  val tc = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  sheetTitle = scoreText("", 26f, "#FFFFFF", true)
+                  sheetSub = scoreText("", 15f, "#9AA0B4", false)
+                  tc.addView(sheetTitle, LinearLayout.LayoutParams(-2, -2))
+                  tc.addView(sheetSub, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(3) })
+                  head.addView(sheetIcon, LinearLayout.LayoutParams(u(40), u(40)))
+                  head.addView(tc, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = u(16) })
+                  sheetScroll = HorizontalScrollView(this).apply {
+                      isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; clipChildren = false; clipToPadding = false
+                  }
+                  sheetRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL; clipChildren = false
+                      setPadding(u(8), u(22), u(8), u(8))
+                  }
+                  sheetScroll.addView(sheetRow, FrameLayout.LayoutParams(-2, -2))
+                  col.addView(head, LinearLayout.LayoutParams(-1, -2))
+                  col.addView(sheetScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
+                  sheetLayer.addView(col, lp(-1, -2, Gravity.BOTTOM))
+                  playerLayer.addView(sheetLayer, lp(-1, sheetH, Gravity.BOTTOM))
+                  buildNextCard()
+              }
+
+              private fun sheetTile(big: String, small: String, selected: Boolean, onClick: () -> Unit): FrameLayout {
+                  val t = FrameLayout(this).apply {
+                      isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      clipChildren = false
+                  }
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+                  val a = TextView(this).apply { text = big; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER }
+                  tx(a, 30f)
+                  val b = TextView(this).apply { text = small; gravity = Gravity.CENTER }
+                  tx(b, 14f)
+                  col.addView(a, LinearLayout.LayoutParams(-2, -2))
+                  col.addView(b, LinearLayout.LayoutParams(-2, -2).apply { topMargin = u(6) })
+                  t.addView(col, FrameLayout.LayoutParams(-1, -1))
+                  val ck = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_check)
+                      visibility = if (selected) View.VISIBLE else View.GONE
+                  }
+                  t.addView(ck, FrameLayout.LayoutParams(u(24), u(24), Gravity.TOP or Gravity.END).apply { setMargins(0, u(10), u(10), 0) })
+                  fun st() {
+                      val f = t.isFocused
+                      a.setTextColor(if (f) Color.BLACK else Color.WHITE)
+                      b.setTextColor(if (f) Color.parseColor("#555555") else Color.parseColor("#9AA0B4"))
+                      ck.setColorFilter(if (f) Color.parseColor("#B07F00") else Color.parseColor("#FFC107"))
+                      t.background = GradientDrawable().apply {
+                          cornerRadius = u(18).toFloat()
+                          setColor(if (f) Color.WHITE else Color.argb(255, 30, 32, 44))
+                          if (!f && selected) setStroke(max(2, u(2)), Color.parseColor("#FFC107"))
+                      }
+                  }
+                  st()
+                  t.setOnFocusChangeListener { _, has ->
+                      st()
+                      t.animate().scaleX(if (has) 1.07f else 1f).scaleY(if (has) 1.07f else 1f).setDuration(160).start()
+                  }
+                  t.setOnClickListener { onClick() }
+                  t.layoutParams = LinearLayout.LayoutParams(u(168), u(138)).apply { rightMargin = u(16) }
+                  return t
+              }
+
+              private fun openSheet(kind: Int) {
+                  val p = mainPlayer ?: return
+                  if (panel != 0) return
+                  if (kind == 2 && (liveMode || liveSport || p.isCurrentMediaItemLive)) { toast("Speed is not available for live streams"); return }
+                  sheetKind = kind
+                  sheetRow.removeAllViews()
+                  var focusV: View? = null
+                  fun add(v: FrameLayout, sel: Boolean) {
+                      sheetRow.addView(v)
+                      if (sel && focusV == null) focusV = v
+                  }
+                  if (kind == 1) {
+                      sheetIcon.setImageResource(R.drawable.ic_quality)
+                      sheetTitle.text = "Video quality"
+                      val ch = p.videoFormat?.height ?: 0
+                      sheetSub.text = if (qualitySel == 0) (if (ch > 0) "Auto  \u2022  now playing ${ch}p" else "Auto") else "Fixed at ${qualitySel}p"
+                      add(sheetTile("Auto", "Adaptive", qualitySel == 0) { selectQuality(null); closeSheet(true) }, qualitySel == 0)
+                      for (o in qualityOptions()) {
+                          add(sheetTile(o.h.toString() + "p", qualityTag(o.h), qualitySel == o.h) { selectQuality(o); closeSheet(true) }, qualitySel == o.h)
+                      }
+                  } else {
+                      sheetIcon.setImageResource(R.drawable.ic_speed)
+                      sheetTitle.text = "Playback speed"
+                      sheetSub.text = "Currently " + speedLabel(playSpeed)
+                      for (spd in SPEEDS) {
+                          val sel = abs(playSpeed - spd) < 0.01f
+                          add(sheetTile(speedLabel(spd), speedTag(spd), sel) { setSpeed(spd); closeSheet(true) }, sel)
+                      }
+                  }
+                  panel = 4
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
+                  hideNext()
+                  ctrl.animate().cancel()
+                  ctrl.animate().alpha(0f).setDuration(140).withEndAction { if (panel == 4) ctrl.visibility = View.INVISIBLE }.start()
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  sheetLayer.animate().cancel()
+                  sheetLayer.visibility = View.VISIBLE
+                  sheetLayer.translationY = sheetH.toFloat()
+                  sheetLayer.alpha = 0f
+                  sheetLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                  sheetLayer.animate().translationY(0f).alpha(1f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f))
+                      .withEndAction { sheetLayer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()
+                  ui.post { (focusV ?: sheetRow.getChildAt(0))?.requestFocus() }
+              }
+
+              private fun closeSheet(refocus: Boolean) {
+                  if (panel != 4) return
+                  panel = 0
+                  sheetLayer.animate().cancel()
+                  sheetLayer.animate().translationY(sheetH.toFloat()).alpha(0f).setDuration(200)
+                      .setInterpolator(android.view.animation.AccelerateInterpolator())
+                      .withEndAction { if (panel != 4) { sheetLayer.visibility = View.GONE; sheetLayer.setLayerType(View.LAYER_TYPE_NONE, null) } }.start()
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  if (refocus) {
+                      showControls()
+                      (if (sheetKind == 1) pillSet else pillSpeed).requestFocus()
+                  }
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 9 applied')
+          PYEOF 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
