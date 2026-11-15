@@ -1,8 +1,8 @@
-          import sys, pathlib
-          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
-          t = P.read_text(encoding='utf-8')
+import sys, pathlib
+P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+t = P.read_text(encoding='utf-8')
 
-          def rep(old, new):
+def rep(old, new):
               global t
               n = t.count(old)
               if n != 1:
