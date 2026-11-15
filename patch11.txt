@@ -14,8 +14,10 @@ def rep(old, new):
 # =====================================================================
 TOP11 = r'''// ---------------- Update 11 : Live TV ----------------
 const val LV_URL = "https://weathered-hall-381c.a14638521.workers.dev/"
+const val LV_CATCH_URL = "https://catchup.a14638521.workers.dev/"
 const val LV_IMG = "https://jiotvimages.cdn.jio.com/dare_images/shows"
 const val LV_UA = "okhttp/4.12.13"
+const val LV_CATCH_EXTRA_MS = 10 * 60000L      // every catchup program is played 10 minutes longer (late finishing movies etc)
 
 class LvCh(val id: String, var name: String, var cat: String, var url: String, var keyId: String, var key: String,
            var license: String, var licUrl: String, var logo: String)
@@ -35,6 +37,29 @@ object LvCookies {
 
 // licenses already fetched from a license url (key = url)
 object LvLic { val cache = ConcurrentHashMap<String, String>() }
+
+// catchup channel list (own api, own token). Refreshed 10 minutes before it expires.
+object LvCatch {
+    private var exp = 0L
+    private var map: Map<String, LvCh> = emptyMap()
+    @Synchronized fun get(id: String): LvCh? {
+        val now = System.currentTimeMillis()
+        if (map.isEmpty() || (exp > 0L && now > exp - 600000L)) {
+            val j = lvHttp(LV_CATCH_URL)
+            if (j != null) {
+                val p = lvParse(j)
+                if (p.second.isNotEmpty()) { map = p.second.associateBy { it.id }; exp = p.first }
+            }
+        }
+        return map[id]
+    }
+}
+
+// begin / end of the catchup url are UTC: YYYYMMDDHHMM00
+fun lvCatchUrl(tpl: String, st: Long, en: Long): String {
+    val f = SimpleDateFormat("yyyyMMddHHmm'00'", Locale.ENGLISH).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+    return tpl.replace("begin=YYYYMMDDHHMM00", "begin=" + f.format(Date(st))).replace("end=YYYYMMDDHHMM00", "end=" + f.format(Date(en)))
+}
 
 fun lvHexToB64(h: String): String {
     val s = h.trim()
@@ -220,7 +245,12 @@ rep('if (sideNav(dir)) return true', 'if (sideNav(dir)) return true\n        if 
 rep('searchLeft() || extraLeft() || listLeft()', 'searchLeft() || extraLeft() || listLeft() || lvLeft()')
 rep('private fun startPlayback(s: StreamInfo) {', 'private fun startPlayback(s: StreamInfo) {\n        if (lvFull) { startLvPlayback(); return }')
 rep('private fun restoreHome() {', 'private fun restoreHome() {\n        if (lvFull) { restoreLv(); return }')
-rep('if (directUrl != "live://") liveMode = false', 'if (directUrl != "live://") liveMode = false\n        if (directUrl != "lv://") lvFull = false')
+rep('if (directUrl != "live://") liveMode = false',
+    'if (directUrl != "live://" && directUrl != "lv://") liveMode = false\n        if (directUrl != "lv://") lvFull = false')
+rep('ep.id.isBlank() || directUrl == "live://") null else',
+    'ep.id.isBlank() || directUrl == "live://" || directUrl == "lv://") null else')
+rep('private fun playEpisode(ep: Ep) {', 'private fun playEpisode(ep: Ep) {\n        if (lvFull) { lvPlayCatchup(ep); return }')
+rep('private fun loadEpisodes() {', 'private fun loadEpisodes() {\n        if (lvFull) { if (!epLoading && eps.isEmpty()) lvLoadEpg(); return }')
 rep('override fun onStop() { super.onStop(); saveProgress(); stopTrailer(); mainPlayer?.pause() }',
     'override fun onStop() { super.onStop(); saveProgress(); stopTrailer(); mainPlayer?.pause(); lvStopPreview(true) }')
 rep('if (inDetail) { if (!epMode) detailTrailerUrl?.let { schedulePlay(it, false) } }',
@@ -240,6 +270,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
     private lateinit var lvTitle: TextView
     private lateinit var lvDesc: TextView
     private lateinit var lvGenre: TextView
+    private lateinit var lvTime: TextView
     private lateinit var lvStatus: TextView
     private lateinit var lvSkel: FrameLayout
     private lateinit var lvRv: RecyclerView
@@ -265,6 +296,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
     private var lvFull = false
     private var lvCur: LvCh? = null
     private var lvLastCard: View? = null
+    private var lvAudioFor: ExoPlayer? = null
     private val lvCardProg = HashMap<String, String>()
     private val lvEpg = ConcurrentHashMap<String, Pair<Long, List<LvProg>>>()
     private val lvBusy: MutableSet<String> = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -323,8 +355,33 @@ MEM = r'''// ---------------------------------------------------------------- Up
         if (lvFocusCh?.id == ch.id && lvActive() && !lvFull) lvRenderHero(ch, false)
     }
 
+    // highest audio bitrate inside the audio language that is currently selected (33 kbps / 99 kbps ... => 99 kbps)
+    private fun lvBestAudio(p: ExoPlayer, tracks: Tracks) {
+        var selLang: String? = null
+        for (g in tracks.groups) if (g.type == C.TRACK_TYPE_AUDIO) for (i in 0 until g.length) {
+            if (g.isTrackSelected(i)) selLang = g.getTrackFormat(i).language
+        }
+        var bg: Tracks.Group? = null
+        var bi = -1
+        var bb = -1
+        for (g in tracks.groups) {
+            if (g.type != C.TRACK_TYPE_AUDIO) continue
+            for (i in 0 until g.length) {
+                if (!g.isTrackSupported(i)) continue
+                val f = g.getTrackFormat(i)
+                val fl = f.language
+                if (selLang != null && selLang != "und" && fl != null && fl != "und" && fl != selLang) continue
+                if (f.bitrate > bb) { bb = f.bitrate; bg = g; bi = i }
+            }
+        }
+        val g = bg ?: return
+        if (bi < 0 || g.isTrackSelected(bi)) return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, bi)).build()
+    }
+
     inner class LvRowVH(val root: LinearLayout, val title: TextView, val rv: RecyclerView) : RecyclerView.ViewHolder(root)
-    inner class LvCardVH(val card: FrameLayout, val iv: ImageView, val big: ImageView, val chip: ImageView,
+    inner class LvCardVH(val card: FrameLayout, val iv: ImageView, val big: ImageView,
                          val name: TextView, val border: View) : RecyclerView.ViewHolder(card)
 
     inner class LvRowAdapter : RecyclerView.Adapter<LvRowVH>() {
@@ -379,6 +436,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
                 setBackgroundColor(Color.rgb(26, 28, 42))
                 outlineProvider = roundOutline; clipToOutline = true
             }
+            // only shown while the program poster is not loaded yet (channel logo + name)
             val big = ImageView(this@MainActivity).apply {
                 scaleType = ImageView.ScaleType.FIT_CENTER
                 setPadding(u(22), u(22), u(22), u(44))
@@ -389,8 +447,6 @@ MEM = r'''// ---------------------------------------------------------------- Up
                 setPadding(u(6), 0, u(6), u(14))
             }
             tx(name, 13f)
-            // channel logo: bottom left, png as it is (no background)
-            val chip = ImageView(this@MainActivity).apply { scaleType = ImageView.ScaleType.FIT_START }
             val border = View(this@MainActivity).apply {
                 background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat() }
                 alpha = 0f
@@ -398,9 +454,8 @@ MEM = r'''// ---------------------------------------------------------------- Up
             card.addView(iv, FrameLayout.LayoutParams(-1, -1))
             card.addView(big, FrameLayout.LayoutParams(-1, -1))
             card.addView(name, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
-            card.addView(chip, FrameLayout.LayoutParams(u(46), u(46), Gravity.BOTTOM or Gravity.START).apply { setMargins(u(8), 0, 0, u(8)) })
             card.addView(border, FrameLayout.LayoutParams(-1, -1))
-            return LvCardVH(card, iv, big, chip, name, border)
+            return LvCardVH(card, iv, big, name, border)
         }
 
         override fun onBindViewHolder(h: LvCardVH, pos: Int) {
@@ -414,11 +469,8 @@ MEM = r'''// ---------------------------------------------------------------- Up
                     .diskCacheStrategy(DiskCacheStrategy.ALL).into(h.iv)
                 g.clear(h.big); h.big.setImageDrawable(null); h.big.visibility = View.GONE
                 h.name.visibility = View.GONE
-                if (ch.logo.isNotBlank()) { h.chip.visibility = View.VISIBLE; g.load(ch.logo).diskCacheStrategy(DiskCacheStrategy.ALL).into(h.chip) }
-                else h.chip.visibility = View.GONE
             } else {
                 g.clear(h.iv); h.iv.setImageDrawable(null)
-                h.chip.visibility = View.GONE
                 h.big.visibility = View.VISIBLE
                 if (ch.logo.isNotBlank()) g.load(ch.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(h.big)
                 else h.big.setImageDrawable(null)
@@ -463,26 +515,23 @@ MEM = r'''// ---------------------------------------------------------------- Up
             background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(dark, Color.argb(240, 5, 6, 12), Color.argb(0, 5, 6, 12)))
         }, lp(-1, (H * 0.55f).toInt(), Gravity.BOTTOM))
 
-        // left column fills ALL the space above the first row: logo on top, title / description / genre sit right above the row title
+        // left column fills ALL the space above the first row: the channel logo takes every pixel that the texts do not need
+        // (title / description / genre / time sit right above the row title)
         lvInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; clipChildren = false }
-        lvLogo = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, u(18).toFloat()) }
-            }
-            clipToOutline = true
-        }
+        lvLogo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
         lvTitle = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
         tx(lvTitle, 22f)
         lvDesc = TextView(this).apply { setTextColor(Color.parseColor("#DADAE2")); maxLines = 4; ellipsize = TextUtils.TruncateAt.END }
         tx(lvDesc, 14f)
         lvGenre = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
         tx(lvGenre, 14f)
-        lvInfo.addView(lvLogo, LinearLayout.LayoutParams(u(124), u(124)))
-        lvInfo.addView(View(this), LinearLayout.LayoutParams(-1, 0, 1f))
+        lvTime = TextView(this).apply { setTextColor(Color.parseColor("#FFC107")); typeface = Typeface.DEFAULT_BOLD; maxLines = 1 }
+        tx(lvTime, 14f)
+        lvInfo.addView(lvLogo, LinearLayout.LayoutParams(-1, 0, 1f))
         lvInfo.addView(lvTitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(10) })
         lvInfo.addView(lvDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
         lvInfo.addView(lvGenre, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+        lvInfo.addView(lvTime, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(6) })
         val infoTop = u(24)
         val infoH = max(u(260), H - lvRowH - (H * 0.008f).toInt() - infoTop - u(8))
         lvLayer.addView(lvInfo, lp(W - lvBannerW - u(CONTENT_LEFT) - u(14), infoH, Gravity.TOP or Gravity.START).apply {
@@ -627,11 +676,14 @@ MEM = r'''// ---------------------------------------------------------------- Up
         val g = listOf(pr?.cat ?: "", pr?.genre ?: "").filter { it.isNotBlank() }.joinToString(" \u2022 ").ifEmpty { ch.cat }
         lvGenre.text = g
         lvGenre.visibility = if (g.isBlank()) View.GONE else View.VISIBLE
+        // program time, IST 12 hour: 07:30 PM - 08:00 PM
+        if (pr != null) { lvTime.text = fmtTimeIst(pr.start) + " - " + fmtTimeIst(pr.end); lvTime.visibility = View.VISIBLE }
+        else { lvTime.text = ""; lvTime.visibility = View.GONE }
         if (anim) {
             if (ch.logo.isNotBlank()) {
                 lvLogo.visibility = View.VISIBLE
                 Glide.with(this).load(ch.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(lvLogo)
-            } else { lvLogo.setImageDrawable(null); lvLogo.visibility = View.GONE }
+            } else { lvLogo.setImageDrawable(null); lvLogo.visibility = View.INVISIBLE }
             lvInfo.animate().cancel(); lvInfo.alpha = 0f
             lvInfo.animate().alpha(1f).setDuration(220).start()
         }
@@ -727,6 +779,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
                                 if (h < lvBannerH) { h = lvBannerH; w = (h * ar).toInt() }
                                 lvVideo.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
                             }
+                            override fun onTracksChanged(tracks: Tracks) { lvBestAudio(pl, tracks) }
                             override fun onRenderedFirstFrame() {
                                 lvBox.animate().cancel(); lvBox.animate().alpha(1f).setDuration(450).start()
                                 lvBg.animate().cancel(); lvBg.animate().alpha(0f).setDuration(450).start()
@@ -764,22 +817,86 @@ MEM = r'''// ---------------------------------------------------------------- Up
         lvPlayer = null
     }
 
-    // ---------------- full screen (existing player UI: controls, quality, audio, subtitles ...)
+    // ---------------- full screen (existing player UI) + catchup list (old tv style: dates on the left, programs on the right)
     private fun lvPlayFull(ch: LvCh, card: View) {
         lvLastCard = card
         lvCur = ch
         lvFull = true
+        liveMode = true
+        liveStartS = 0L; liveEndS = 0L
         lvStopPreview(false)
         lvReleasePreview()
         val pr = lvProgNow(ch)
         showTitle = pr?.name ?: ch.name
         lvLayer.visibility = View.GONE
-        openPlayer(Ep("", ch.name, 0, pr?.desc ?: "", pr?.banner, 0, 0L), 0, true, true, "lv://")
+        seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+        seasons.addAll(liveDays())
+        buildSeasonCol()
+        epTab.text = "Catchup"
+        (pillEps.getChildAt(1) as TextView).text = "Catchup"
+        Thread { LvCatch.get(ch.id) }.start()            // warm the catchup token
+        openPlayer(Ep("", ch.name, 0, pr?.desc ?: "", pr?.banner, 0, 0L), 0, true, false, "lv://")
+        pillEps.visibility = View.VISIBLE
+        selectSeason(0, false)
+    }
+
+    private fun lvLoadEpg() {
+        val ch = lvCur ?: return
+        if (curSeason !in seasons.indices) return
+        val tok = epToken
+        val off = seasons[curSeason].id.toIntOrNull() ?: 0
+        epLoading = true
+        Thread {
+            val list = lvFetchProgs(ch.id, off)
+            ui.post {
+                if (tok != epToken || !lvFull) return@post
+                epLoading = false
+                showEpSkel(false)
+                if (list == null) {
+                    if (eps.isEmpty()) { epStatus.text = "Could not load programs"; epStatus.visibility = View.VISIBLE }
+                    return@post
+                }
+                val now = System.currentTimeMillis()
+                eps.clear()
+                for (p in list) if (p.start <= now)                      // no upcoming programs
+                    eps.add(Ep("live" + p.start, p.name, 0, p.desc, p.banner?.replace("width=1200", "width=480"),
+                        ((p.end - p.start) / 1000L).toInt(), p.start))
+                epAdapter.notifyDataSetChanged()
+                if (eps.isEmpty()) { epStatus.text = "No programs"; epStatus.visibility = View.VISIBLE } else epStatus.visibility = View.GONE
+                if (epActive() && wantEpFocus) { wantEpFocus = false; focusFirstEp(12) }
+            }
+        }.start()
+    }
+
+    private fun lvPlayCatchup(ep: Ep) {
+        val ch = lvCur ?: return
+        val now = System.currentTimeMillis()
+        val st = ep.air
+        val en = ep.air + ep.dur * 1000L
+        if (st > now) { toast("This program has not aired yet"); return }
+        if (now < en) {                                          // airing right now => live
+            liveStartS = 0L; liveEndS = 0L
+            showTitle = ch.name
+            openPlayer(Ep("", ch.name, 0, ep.desc, ep.thumb, 0, 0L), 0, true, false, "lv://")
+            return
+        }
+        if (st < now - 7 * 86400000L) { toast("Catchup is available for the last 7 days only"); return }
+        val endCap = min(en + LV_CATCH_EXTRA_MS, now - 30000L)  // +10 minutes safety, but never later than "now"
+        if (endCap <= st) { toast("Not available yet"); return }
+        liveStartS = st / 1000L; liveEndS = endCap / 1000L
+        showTitle = ch.name
+        openPlayer(Ep(ep.id, ep.title, 0, ep.desc, ep.thumb, ((endCap - st) / 1000L).toInt(), ep.air), 0, true, false, "lv://")
     }
 
     private fun startLvPlayback() {
         val ch = lvCur ?: return
         val p0 = ensureMainPlayer()
+        if (lvAudioFor !== p0) {
+            lvAudioFor = p0
+            p0.addListener(object : Player.Listener {
+                override fun onTracksChanged(tracks: Tracks) { if (lvFull) lvBestAudio(p0, tracks) }
+            })
+        }
         p0.setVideoSurfaceView(pSurface)
         p0.setPlaybackSpeed(1f)
         p0.trackSelectionParameters = p0.trackSelectionParameters.buildUpon()
@@ -787,11 +904,21 @@ MEM = r'''// ---------------------------------------------------------------- Up
         qualitySel = 0
         audioOpts = emptyList(); curAudio = ""; audioPrefApplied = false
         pendingStart = 0L
-        pillSpeed.visibility = View.GONE
+        val catchup = liveStartS > 0L
+        pillSpeed.visibility = if (catchup) View.VISIBLE else View.GONE
         pStatus.visibility = View.GONE
         val tok = playToken
+        val s0 = liveStartS * 1000L
+        val e0 = liveEndS * 1000L
         Thread {
-            val src = try { lvBuildSource(ch) } catch (e: Exception) { null }
+            val src: MediaSource? = try {
+                if (!catchup) lvBuildSource(ch)
+                else {
+                    val cc = LvCatch.get(ch.id)
+                    if (cc == null) null
+                    else lvBuildSource(LvCh(ch.id, ch.name, ch.cat, lvCatchUrl(cc.url, s0, e0), cc.keyId, cc.key, cc.license, cc.licUrl, ch.logo))
+                }
+            } catch (e: Exception) { null }
             ui.post {
                 if (tok != playToken || !inPlayer || !lvFull) return@post
                 val p = mainPlayer ?: return@post
@@ -807,6 +934,14 @@ MEM = r'''// ---------------------------------------------------------------- Up
     private fun restoreLv() {
         lvFull = false
         lvCur = null
+        liveMode = false
+        liveStartS = 0L; liveEndS = 0L
+        moveEpLayerToDetail()
+        seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+        sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
+        curSeason = -1; epToken++
+        epTab.text = "Episodes"
+        (pillEps.getChildAt(1) as TextView).text = "Episodes"
         side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
         content.visibility = View.GONE
         lvLayer.visibility = View.VISIBLE
