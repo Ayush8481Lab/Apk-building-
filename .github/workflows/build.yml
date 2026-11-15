@@ -8034,8 +8034,6 @@ jobs:
           PYEOF
       - name: Apply update 11 (Live TV redesign - categories, EPG cards, live preview, DASH clearkey/widevine, cookies, bg refresh)
         run: python3 patch11.txt 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
       - name: Apply update 12 (?audio= only for live sports, embedded tracks for shows/movies, Auto shows current quality)
         run: |
           set -e
@@ -8085,6 +8083,8 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 12 applied')
           PYEOF
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
