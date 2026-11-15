@@ -8036,7 +8036,55 @@ jobs:
         run: python3 patch11.txt 
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Apply update 12 (?audio= only for live sports, embedded tracks for shows/movies, Auto shows current quality)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
 
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+              t = t.replace(old, new)
+
+          # 1) api audio list (?audio=) is used ONLY for live sports. Shows / movies use the tracks found in the mpd / m3u8.
+          rep('audioOpts = s.audios; curAudio = s.selAudio; audioPrefApplied = false',
+              'audioOpts = if (liveSport) s.audios else emptyList(); curAudio = if (liveSport) s.selAudio else ""; audioPrefApplied = false')
+
+          # 2) remembered ?audio= choice is requested only when the content is a live sport match
+          rep('if (prefAudio.isNotEmpty() && s.audios.isNotEmpty() && !prefAudio.equals(s.selAudio, true) &&',
+              'if (parseSportInfo(fetchDetail(id)) != null && prefAudio.isNotEmpty() && s.audios.isNotEmpty() && !prefAudio.equals(s.selAudio, true) &&')
+
+          # 3) Quality sheet: Auto tile / header show the quality that auto is playing right now
+          rep('qvSub.text = "Currently: " + (if (qualitySel == 0) "Auto" else qualitySel.toString() + "p")',
+              'qvSub.text = "Currently: " + (if (qualitySel == 0) (if (curVideoH() > 0) "Auto (" + curVideoH() + "p)" else "Auto") else qualitySel.toString() + "p")')
+          rep('addT(qvTile("Auto", "Best for your network", qualitySel == 0) { selectQuality(null); closeQV(true) }, qualitySel == 0)',
+              'addT(qvTile("Auto", if (curVideoH() > 0) "(" + curVideoH() + "p) now playing" else "Best for your network", qualitySel == 0) { selectQuality(null); closeQV(true) }, qualitySel == 0)')
+
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', r'''// height of the video track that is playing right now (0 = unknown)
+              private fun curVideoH(): Int {
+                  val p = mainPlayer ?: return 0
+                  for (g in p.currentTracks.groups) {
+                      if (g.type != C.TRACK_TYPE_VIDEO) continue
+                      for (i in 0 until g.length) {
+                          if (g.isTrackSelected(i)) {
+                              val h = g.getTrackFormat(i).height
+                              if (h > 0) return h
+                          }
+                      }
+                  }
+                  return 0
+              }
+
+              private fun isHomeTab() = homeTabs.containsKey(tab)''')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 12 applied')
+          PYEOF
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
