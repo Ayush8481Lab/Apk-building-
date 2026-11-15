@@ -8032,6 +8032,740 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 10 applied')
           PYEOF
+      - name: Apply update 11 (Live TV redesign - categories, EPG cards, live preview, DASH clearkey/widevine, cookies, bg refresh)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import sys, pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+              t = t.replace(old, new)
+
+          # =====================================================================
+          # 1) TOP LEVEL: constants, data classes, api, dash source (clearkey / widevine + cookies + okhttp ua)
+          # =====================================================================
+          TOP11 = r'''// ---------------- Update 11 : Live TV ----------------
+          const val LV_URL = "https://weathered-hall-381c.a14638521.workers.dev/"
+          const val LV_IMG = "https://jiotvimages.cdn.jio.com/dare_images/shows"
+          const val LV_UA = "okhttp/4.12.13"
+
+          class LvCh(val id: String, var name: String, var cat: String, var url: String, var keyId: String, var key: String,
+                     var license: String, var licUrl: String, var logo: String)
+          class LvProg(val name: String, val desc: String, val genre: String, val cat: String,
+                       val banner: String?, val poster: String?, val start: Long, val end: Long)
+          class LvRow(val title: String, val items: List<LvCh>) { var ad: Any? = null }
+
+          // cdn cookies (hdntl etc. set by the manifest response are sent with every segment request)
+          object LvCookies {
+              private var done = false
+              @Synchronized fun init() {
+                  if (done) return
+                  try { java.net.CookieHandler.setDefault(java.net.CookieManager(null, java.net.CookiePolicy.ACCEPT_ALL)) } catch (e: Exception) { }
+                  done = true
+              }
+          }
+
+          fun lvHexToB64(h: String): String {
+              val s = h.trim()
+              val b = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+              return android.util.Base64.encodeToString(b, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+          }
+
+          // clearkey response: "license" json as it is, or built from keyId + key (hex)
+          fun lvClearKeyJson(c: LvCh): String? {
+              if (c.license.startsWith("{")) return c.license
+              if (c.keyId.isNotBlank() && c.key.isNotBlank()) {
+                  return try {
+                      JSONObject().put("keys", JSONArray().put(JSONObject()
+                          .put("kty", "oct").put("k", lvHexToB64(c.key)).put("kid", lvHexToB64(c.keyId))))
+                          .put("type", "temporary").toString()
+                  } catch (e: Exception) { null }
+              }
+              return null
+          }
+
+          fun lvBuildSource(ch: LvCh): MediaSource {
+              LvCookies.init()
+              val dsf = DefaultHttpDataSource.Factory()
+                  .setUserAgent(LV_UA)
+                  .setAllowCrossProtocolRedirects(true)
+                  .setConnectTimeoutMs(15000)
+                  .setReadTimeoutMs(20000)
+              val mb = MediaItem.Builder().setUri(ch.url).setMimeType(MimeTypes.APPLICATION_MPD)
+              if (ch.licUrl.isNotBlank()) {
+                  mb.setDrmConfiguration(MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID).setLicenseUri(ch.licUrl).build())
+                  return androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsf).createMediaSource(mb.build())
+              }
+              val kj = lvClearKeyJson(ch)
+              if (kj != null) {
+                  val mgr = androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+                      .setUuidAndExoMediaDrmProvider(C.CLEARKEY_UUID, androidx.media3.exoplayer.drm.FrameworkMediaDrm.DEFAULT_PROVIDER)
+                      .build(androidx.media3.exoplayer.drm.LocalMediaDrmCallback(kj.toByteArray()))
+                  return androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsf)
+                      .setDrmSessionManagerProvider { mgr }
+                      .createMediaSource(mb.build())
+              }
+              return androidx.media3.exoplayer.dash.DashMediaSource.Factory(dsf).createMediaSource(mb.build())
+          }
+
+          fun lvHttp(url: String): JSONObject? = try {
+              val req = Request.Builder().url(url).header("User-Agent", STREAM_UA).header("Accept", "application/json").build()
+              Net.client.newCall(req).execute().use { r -> if (r.isSuccessful) JSONObject(r.body!!.string()) else null }
+          } catch (e: Exception) { null }
+
+          fun lvParse(j: JSONObject): Pair<Long, List<LvCh>> {
+              val out = ArrayList<LvCh>()
+              val arr = j.optJSONArray("channels")
+              if (arr != null) for (i in 0 until arr.length()) {
+                  val o = arr.optJSONObject(i) ?: continue
+                  val url = o.str("url") ?: continue
+                  val id = o.str("id") ?: continue
+                  var lic = (o.str("license") ?: "").trim()
+                  var lu = o.str("licenseurl") ?: o.str("licenseUrl") ?: ""
+                  if (lic.startsWith("http")) { lu = lic; lic = "" }
+                  out.add(LvCh(id, o.str("name") ?: id, (o.str("category") ?: "Others").trim().ifEmpty { "Others" }, url,
+                      o.str("keyId") ?: "", o.str("key") ?: "", lic, lu, o.str("logo") ?: ""))
+              }
+              return Pair(j.optLong("expires_at", 0L) * 1000L, out)
+          }
+
+          fun lvImg(p: String?): String? {
+              if (p.isNullOrBlank()) return null
+              return if (p.startsWith("http")) p else LV_IMG + "/" + p.trimStart('/')
+          }
+
+          fun lvFetchProgs(id: String, off: Int): List<LvProg>? {
+              return try {
+                  val req = Request.Builder().url(EPG_URL + id + "&offset=" + off)
+                      .header("User-Agent", STREAM_UA).header("Accept", "application/json").build()
+                  Net.client.newCall(req).execute().use { r ->
+                      if (!r.isSuccessful) null
+                      else {
+                          val arr = JSONObject(r.body!!.string()).optJSONArray("epg")
+                          val out = ArrayList<LvProg>()
+                          if (arr != null) for (i in 0 until arr.length()) {
+                              val o = arr.optJSONObject(i) ?: continue
+                              val g = o.optJSONArray("showGenre")
+                              val genre = if (g == null) "" else (0 until g.length()).map { k -> g.optString(k) }.filter { it.isNotBlank() }.joinToString(", ")
+                              val assets = o.optJSONObject("assets")
+                              fun asset(k: String): String? = assets?.optJSONObject(k)?.str("program") ?: assets?.optJSONObject(k)?.str("episode")
+                              out.add(LvProg(o.optString("showname"), o.str("description") ?: o.optString("episode_desc"), genre, o.optString("showCategory"),
+                                  lvImg(asset("16:9") ?: o.str("episodeThumbnail")), lvImg(asset("2:3") ?: o.str("episodePoster")),
+                                  o.optLong("startEpoch"), o.optLong("endEpoch")))
+                          }
+                          out.sortedBy { it.start }
+                      }
+                  }
+              } catch (e: Exception) { null }
+          }
+
+          // the day list that contains "now" (tries the likely offset first, then the neighbours)
+          fun lvFetchCurrent(id: String, base: Int): List<LvProg>? {
+              val now = System.currentTimeMillis()
+              var first: List<LvProg>? = null
+              for (o in listOf(base, 0, 1, -1).distinct()) {
+                  val l = lvFetchProgs(id, o) ?: continue
+                  if (first == null) first = l
+                  if (l.any { it.start <= now && now < it.end }) return l
+              }
+              return first
+          }
+
+          object Net {'''
+          rep('object Net {', TOP11)
+
+          # =====================================================================
+          # 2) hooks (all single line anchors)
+          # =====================================================================
+          rep('buildLive(); buildSettings(); buildHistory()', 'buildLive(); buildSettings(); buildHistory(); buildLv()')
+          rep('liveLayer.visibility = View.GONE; settingsLayer.visibility = View.GONE; historyLayer.visibility = View.GONE',
+              'liveLayer.visibility = View.GONE; settingsLayer.visibility = View.GONE; historyLayer.visibility = View.GONE; lvHide()')
+          rep('private fun openLive() {', 'private fun openLive() {\n        openLv()\n    }\n\n    private fun openLiveOld() {')
+          rep('if (sideNav(dir)) return true', 'if (sideNav(dir)) return true\n        if (lvVertical(dir)) return true')
+          rep('searchLeft() || extraLeft() || listLeft()', 'searchLeft() || extraLeft() || listLeft() || lvLeft()')
+          rep('private fun startPlayback(s: StreamInfo) {', 'private fun startPlayback(s: StreamInfo) {\n        if (lvFull) { startLvPlayback(); return }')
+          rep('private fun restoreHome() {', 'private fun restoreHome() {\n        if (lvFull) { restoreLv(); return }')
+          rep('if (directUrl != "live://") liveMode = false', 'if (directUrl != "live://") liveMode = false\n        if (directUrl != "lv://") lvFull = false')
+          rep('override fun onStop() { super.onStop(); saveProgress(); stopTrailer(); mainPlayer?.pause() }',
+              'override fun onStop() { super.onStop(); saveProgress(); stopTrailer(); mainPlayer?.pause(); lvStopPreview(true) }')
+          rep('if (inDetail) { if (!epMode) detailTrailerUrl?.let { schedulePlay(it, false) } }',
+              'if (lvActive()) { lvResumePreview() } else if (inDetail) { if (!epMode) detailTrailerUrl?.let { schedulePlay(it, false) } }')
+          rep('player?.release(); player = null', 'player?.release(); player = null; lvPlayer?.release(); lvPlayer = null')
+
+          # =====================================================================
+          # 3) MEMBERS
+          # =====================================================================
+          MEM = r'''// ---------------------------------------------------------------- Update 11 : Live TV
+              private lateinit var lvLayer: FrameLayout
+              private lateinit var lvBg: ImageView
+              private lateinit var lvBox: FrameLayout
+              private lateinit var lvVideo: TextureView
+              private lateinit var lvInfo: LinearLayout
+              private lateinit var lvLogo: ImageView
+              private lateinit var lvTitle: TextView
+              private lateinit var lvDesc: TextView
+              private lateinit var lvGenre: TextView
+              private lateinit var lvStatus: TextView
+              private lateinit var lvRv: RecyclerView
+              private val lvRows = ArrayList<LvRow>()
+              private var lvChans: List<LvCh> = emptyList()
+              private var lvLoaded = false
+              private var lvLoading = false
+              private var lvExpMs = 0L
+              private var lvBannerW = 0
+              private var lvBannerH = 0
+              private var lvCardW = 0
+              private var lvCardH = 0
+              private var lvRowH = 0
+              private var lvCurRow = -1
+              private var lvSnap = -1
+              private var lvFocusCh: LvCh? = null
+              private var lvShownProg = ""
+              private var lvShownBanner: String? = null
+              private var lvPlayer: ExoPlayer? = null
+              private var lvPrevRun: Runnable? = null
+              private var lvRefreshRun: Runnable? = null
+              private var lvFull = false
+              private var lvCur: LvCh? = null
+              private var lvLastCard: View? = null
+              private val lvEpg = ConcurrentHashMap<String, Pair<Long, List<LvProg>>>()
+              private val lvBusy: MutableSet<String> = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+              private val lvExec = Executors.newFixedThreadPool(4)
+              private val lvViewPool = RecyclerView.RecycledViewPool().apply { setMaxRecycledViews(0, 24) }
+              private val lvTickRun: Runnable = object : Runnable {
+                  override fun run() {
+                      if (!lvActive()) return
+                      val c = lvFocusCh
+                      if (c != null && !lvFull) {
+                          val pr = lvProgNow(c)
+                          if (pr == null) lvEnsureEpg(c)
+                          else if (pr.name != lvShownProg) lvEpgReady(c)
+                      }
+                      ui.postDelayed(this, 30000)
+                  }
+              }
+
+              private fun lvActive() = ::lvLayer.isInitialized && lvLayer.visibility == View.VISIBLE
+
+              private fun lvProgNow(ch: LvCh): LvProg? {
+                  val l = lvEpg[ch.id]?.second ?: return null
+                  val n = System.currentTimeMillis()
+                  return l.firstOrNull { it.start <= n && n < it.end }
+              }
+
+              private fun lvEnsureEpg(ch: LvCh) {
+                  val c = lvEpg[ch.id]
+                  val now = System.currentTimeMillis()
+                  if (c != null) {
+                      if (c.second.any { it.start <= now && now < it.end }) return
+                      if (now - c.first < 60000L) return
+                  }
+                  if (!lvBusy.add(ch.id)) return
+                  lvExec.execute {
+                      try {
+                          val l = lvFetchCurrent(ch.id, liveBaseOffset())
+                          lvEpg[ch.id] = Pair(System.currentTimeMillis(), l ?: emptyList())
+                          if (l != null) ui.post { lvEpgReady(ch) }
+                      } finally { lvBusy.remove(ch.id) }
+                  }
+              }
+
+              // program data of a channel arrived / changed: refresh its card and (if focused) the hero text + banner
+              private fun lvEpgReady(ch: LvCh) {
+                  for (ri in lvRows.indices) {
+                      val ix = lvRows[ri].items.indexOfFirst { it.id == ch.id }
+                      if (ix >= 0) {
+                          (lvRv.findViewHolderForAdapterPosition(ri) as? LvRowVH)?.rv?.adapter?.notifyItemChanged(ix)
+                          break
+                      }
+                  }
+                  if (lvFocusCh?.id == ch.id && lvActive() && !lvFull) lvRenderHero(ch, false)
+              }
+
+              inner class LvRowVH(val root: LinearLayout, val title: TextView, val rv: RecyclerView) : RecyclerView.ViewHolder(root)
+              inner class LvCardVH(val card: FrameLayout, val iv: ImageView, val big: ImageView, val chip: ImageView,
+                                   val name: TextView, val border: View) : RecyclerView.ViewHolder(card)
+
+              inner class LvRowAdapter : RecyclerView.Adapter<LvRowVH>() {
+                  override fun getItemCount() = lvRows.size
+                  override fun onCreateViewHolder(p: ViewGroup, t: Int): LvRowVH {
+                      val r = LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.VERTICAL; gravity = Gravity.BOTTOM
+                          clipChildren = false; clipToPadding = false
+                          layoutParams = RecyclerView.LayoutParams(-1, lvRowH)
+                      }
+                      val tv = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                          gravity = Gravity.CENTER_VERTICAL; setPadding(u(CONTENT_LEFT), 0, 0, 0)
+                          maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                      }
+                      tx(tv, 20f)
+                      val rv = RecyclerView(this@MainActivity).apply {
+                          layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false).apply {
+                              recycleChildrenOnDetach = true
+                          }
+                          clipChildren = false; clipToPadding = false; itemAnimator = null
+                          overScrollMode = View.OVER_SCROLL_NEVER
+                          isFocusable = false; isFocusableInTouchMode = false
+                          isNestedScrollingEnabled = false
+                          setHasFixedSize(true); setItemViewCacheSize(6)
+                          setRecycledViewPool(lvViewPool)
+                          setPadding(u(CONTENT_LEFT), padV, u(60), padV)
+                      }
+                      r.addView(tv, LinearLayout.LayoutParams(-1, titleH))
+                      r.addView(rv, LinearLayout.LayoutParams(-1, lvCardH + 2 * padV))
+                      return LvRowVH(r, tv, rv)
+                  }
+                  override fun onBindViewHolder(h: LvRowVH, pos: Int) {
+                      val r = lvRows[pos]
+                      h.title.text = r.title
+                      val ad = (r.ad as? LvCardAdapter) ?: LvCardAdapter(r, pos).also { r.ad = it }
+                      if (h.rv.adapter !== ad) h.rv.adapter = ad
+                  }
+              }
+
+              inner class LvCardAdapter(private val row: LvRow, private val rowPos: Int) : RecyclerView.Adapter<LvCardVH>() {
+                  override fun getItemCount() = row.items.size
+
+                  override fun onCreateViewHolder(p: ViewGroup, t: Int): LvCardVH {
+                      val card = FrameLayout(this@MainActivity).apply {
+                          layoutParams = RecyclerView.LayoutParams(lvCardW, lvCardH).apply { rightMargin = u(12) }
+                          clipChildren = false
+                          isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                      }
+                      val iv = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.CENTER_CROP
+                          setBackgroundColor(Color.rgb(26, 28, 42))
+                          outlineProvider = roundOutline; clipToOutline = true
+                      }
+                      val big = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.FIT_CENTER
+                          setPadding(u(22), u(22), u(22), u(44))
+                      }
+                      val name = TextView(this@MainActivity).apply {
+                          setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER
+                          maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+                          setPadding(u(6), 0, u(6), u(14))
+                      }
+                      tx(name, 13f)
+                      val chip = ImageView(this@MainActivity).apply {
+                          scaleType = ImageView.ScaleType.FIT_CENTER
+                          setPadding(u(3), u(3), u(3), u(3))
+                          background = GradientDrawable().apply { cornerRadius = u(8).toFloat(); setColor(Color.argb(190, 0, 0, 0)) }
+                      }
+                      val border = View(this@MainActivity).apply {
+                          background = GradientDrawable().apply { setColor(Color.TRANSPARENT); setStroke(u(3), Color.WHITE); cornerRadius = u(8).toFloat() }
+                          alpha = 0f
+                      }
+                      card.addView(iv, FrameLayout.LayoutParams(-1, -1))
+                      card.addView(big, FrameLayout.LayoutParams(-1, -1))
+                      card.addView(name, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+                      card.addView(chip, FrameLayout.LayoutParams(u(36), u(36), Gravity.TOP or Gravity.START).apply { setMargins(u(8), u(8), 0, 0) })
+                      card.addView(border, FrameLayout.LayoutParams(-1, -1))
+                      return LvCardVH(card, iv, big, chip, name, border)
+                  }
+
+                  override fun onBindViewHolder(h: LvCardVH, pos: Int) {
+                      val ch = row.items[pos]
+                      val poster = lvProgNow(ch)?.poster
+                      val g = Glide.with(this@MainActivity)
+                      if (poster != null) {
+                          g.load(poster).override(lvCardW, lvCardH).centerCrop().format(DecodeFormat.PREFER_RGB_565)
+                              .diskCacheStrategy(DiskCacheStrategy.ALL).into(h.iv)
+                          g.clear(h.big); h.big.setImageDrawable(null); h.big.visibility = View.GONE
+                          h.name.visibility = View.GONE
+                          if (ch.logo.isNotBlank()) { h.chip.visibility = View.VISIBLE; g.load(ch.logo).diskCacheStrategy(DiskCacheStrategy.ALL).into(h.chip) }
+                          else h.chip.visibility = View.GONE
+                      } else {
+                          g.clear(h.iv); h.iv.setImageDrawable(null)
+                          h.chip.visibility = View.GONE
+                          h.big.visibility = View.VISIBLE
+                          if (ch.logo.isNotBlank()) g.load(ch.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(h.big)
+                          else h.big.setImageDrawable(null)
+                          h.name.text = ch.name; h.name.visibility = View.VISIBLE
+                          lvEnsureEpg(ch)
+                      }
+                      if (pos == 0) for (k in 1..5) row.items.getOrNull(k)?.let { lvEnsureEpg(it) }
+                      val f = h.card.isFocused
+                      h.card.animate().cancel()
+                      h.card.scaleX = if (f) 1.1f else 1f; h.card.scaleY = if (f) 1.1f else 1f
+                      h.border.alpha = if (f) 1f else 0f
+                      h.card.translationZ = if (f) u(10).toFloat() else 0f
+                      h.card.setOnFocusChangeListener { v, has ->
+                          v.animate().scaleX(if (has) 1.1f else 1f).scaleY(if (has) 1.1f else 1f).setDuration(150).start()
+                          h.border.animate().alpha(if (has) 1f else 0f).setDuration(150).start()
+                          v.translationZ = if (has) u(10).toFloat() else 0f
+                          if (has) lvOnFocus(ch, row, pos, rowPos)
+                      }
+                      h.card.setOnClickListener { lvPlayFull(ch, h.card) }
+                  }
+              }
+
+              private fun buildLv() {
+                  val dark = Color.argb(255, 5, 6, 12)
+                  lvBannerW = (W * 0.68f).toInt(); lvBannerH = lvBannerW * 9 / 16
+                  lvCardH = (H * 0.27f * 1.3f).toInt(); lvCardW = lvCardH * 2 / 3
+                  lvRowH = titleH + lvCardH + 2 * padV
+                  lvLayer = FrameLayout(this).apply { setBackgroundColor(dark); visibility = View.GONE }
+
+                  lvBg = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                  lvLayer.addView(lvBg, lp(lvBannerW, lvBannerH, Gravity.TOP or Gravity.END))
+                  lvBox = FrameLayout(this).apply { alpha = 0f; visibility = View.GONE }
+                  lvVideo = TextureView(this)
+                  lvBox.addView(lvVideo, lp(lvBannerW, lvBannerH, Gravity.CENTER))
+                  lvLayer.addView(lvBox, lp(lvBannerW, lvBannerH, Gravity.TOP or Gravity.END))
+
+                  val fadeW = (lvBannerW * 0.3f).toInt()
+                  lvLayer.addView(View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(dark, Color.argb(200, 5, 6, 12), Color.argb(0, 5, 6, 12)))
+                  }, lp(fadeW, lvBannerH, Gravity.TOP or Gravity.START).apply { leftMargin = W - lvBannerW })
+                  lvLayer.addView(View(this).apply {
+                      background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(dark, Color.argb(240, 5, 6, 12), Color.argb(0, 5, 6, 12)))
+                  }, lp(-1, (H * 0.55f).toInt(), Gravity.BOTTOM))
+
+                  val badge = TextView(this).apply {
+                      text = "\u25CF LIVE"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                      setPadding(u(16), u(5), u(16), u(5))
+                      background = GradientDrawable().apply { cornerRadius = u(20).toFloat(); setColor(Color.parseColor("#E53935")) }
+                  }
+                  tx(badge, 15f)
+                  lvLayer.addView(badge, lp(-2, -2, Gravity.TOP or Gravity.START).apply { leftMargin = W - lvBannerW + u(14); topMargin = u(12) })
+
+                  lvInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; clipChildren = false }
+                  lvLogo = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.FIT_CENTER
+                      outlineProvider = object : ViewOutlineProvider() {
+                          override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, u(18).toFloat()) }
+                      }
+                      clipToOutline = true
+                  }
+                  lvTitle = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
+                  tx(lvTitle, 22f)
+                  lvDesc = TextView(this).apply { setTextColor(Color.parseColor("#DADAE2")); maxLines = 4; ellipsize = TextUtils.TruncateAt.END }
+                  tx(lvDesc, 14f)
+                  lvGenre = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
+                  tx(lvGenre, 14f)
+                  lvInfo.addView(lvLogo, LinearLayout.LayoutParams(u(124), u(124)))
+                  lvInfo.addView(lvTitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(14) })
+                  lvInfo.addView(lvDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+                  lvInfo.addView(lvGenre, LinearLayout.LayoutParams(-1, -2).apply { topMargin = u(8) })
+                  lvLayer.addView(lvInfo, lp(W - lvBannerW - u(CONTENT_LEFT) - u(14), -2, Gravity.TOP or Gravity.START).apply {
+                      leftMargin = u(CONTENT_LEFT); topMargin = u(24)
+                  })
+
+                  lvRv = object : RecyclerView(this@MainActivity) {
+                      override fun requestChildRectangleOnScreen(child: View, rect: Rect, immediate: Boolean): Boolean = false
+                  }.apply {
+                      layoutManager = LinearLayoutManager(this@MainActivity)
+                      clipChildren = false; clipToPadding = false; itemAnimator = null
+                      overScrollMode = View.OVER_SCROLL_NEVER
+                      isFocusable = false; isFocusableInTouchMode = false
+                      isNestedScrollingEnabled = false
+                      setItemViewCacheSize(4)
+                  }
+                  lvRv.adapter = LvRowAdapter()
+                  lvLayer.addView(lvRv, lp(-1, lvRowH, Gravity.BOTTOM).apply { bottomMargin = (H * 0.008f).toInt() })
+
+                  lvStatus = TextView(this).apply { setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE }
+                  tx(lvStatus, 18f)
+                  lvLayer.addView(lvStatus, lp(-2, -2, Gravity.CENTER))
+                  root.addView(lvLayer, lp(-1, -1))
+              }
+
+              private fun lvHide() {
+                  if (!::lvLayer.isInitialized) return
+                  ui.removeCallbacks(lvTickRun)
+                  lvStopPreview(true)
+                  lvReleasePreview()
+                  lvLayer.visibility = View.GONE
+              }
+
+              private fun openLv() {
+                  heroRun?.let { ui.removeCallbacks(it) }
+                  heroToken++
+                  stopTrailer(false)
+                  content.visibility = View.GONE
+                  status.visibility = View.GONE
+                  lvLayer.visibility = View.VISIBLE
+                  lvSnap = -1
+                  ui.removeCallbacks(lvTickRun); ui.postDelayed(lvTickRun, 30000)
+                  if (!lvLoaded || lvRows.isEmpty()) lvLoad()
+                  else ui.postDelayed({ if (tab == 5 && !inDetail && !inPlayer) lvFocusFirst(12) }, 120)
+              }
+
+              private fun lvFocusFirst(tries: Int) {
+                  ui.postDelayed({
+                      if (tab != 5 || inPlayer || inDetail) return@postDelayed
+                      val ok = lvRv.getChildAt(0)?.requestFocus() ?: false
+                      if (!ok && tries > 0) lvFocusFirst(tries - 1)
+                  }, 300)
+              }
+
+              // ---------------- channel json (refreshed in the background 10 minutes before it expires)
+              private fun lvLoad() {
+                  if (lvLoading) return
+                  lvLoading = true
+                  if (lvRows.isEmpty()) { lvStatus.text = "Loading channels..."; lvStatus.visibility = View.VISIBLE }
+                  Thread {
+                      val j = lvHttp(LV_URL)
+                      val parsed = if (j != null) lvParse(j) else null
+                      ui.post {
+                          lvLoading = false
+                          if (parsed == null || parsed.second.isEmpty()) {
+                              if (lvRows.isEmpty()) { lvStatus.text = "Could not load channels\nSelect Live TV again to retry"; lvStatus.visibility = View.VISIBLE }
+                              lvScheduleRefresh(60000L)
+                              return@post
+                          }
+                          lvApply(parsed.first, parsed.second)
+                      }
+                  }.start()
+              }
+
+              private fun lvScheduleRefresh(delay: Long) {
+                  lvRefreshRun?.let { ui.removeCallbacks(it) }
+                  val r = Runnable { lvLoad() }
+                  lvRefreshRun = r
+                  ui.postDelayed(r, delay)
+              }
+
+              private fun lvApply(exp: Long, list: List<LvCh>) {
+                  lvExpMs = exp
+                  val same = lvLoaded && lvChans.map { it.id }.toSet() == list.map { it.id }.toSet()
+                  if (same) {
+                      for (n in list) lvChans.firstOrNull { it.id == n.id }?.let { o ->
+                          o.name = n.name; o.url = n.url; o.keyId = n.keyId; o.key = n.key
+                          o.license = n.license; o.licUrl = n.licUrl; o.logo = n.logo
+                      }
+                  } else {
+                      lvChans = list
+                      val m = LinkedHashMap<String, ArrayList<LvCh>>()
+                      val titles = HashMap<String, String>()
+                      for (c in list) {
+                          val k = c.cat.lowercase()
+                          m.getOrPut(k) { ArrayList() }.add(c)
+                          if (!titles.containsKey(k)) titles[k] = c.cat
+                      }
+                      lvRows.clear()
+                      for ((k, v) in m) lvRows.add(LvRow(titles[k] ?: k, v))
+                      lvRv.adapter?.notifyDataSetChanged()
+                      lvSnap = -1
+                      if (lvActive()) lvFocusFirst(12)
+                  }
+                  lvLoaded = true
+                  lvStatus.visibility = View.GONE
+                  val d = if (exp > 0L) exp - 600000L - System.currentTimeMillis() else 1800000L
+                  lvScheduleRefresh(d.coerceIn(60000L, 6 * 3600000L))
+              }
+
+              // ---------------- focus / hero
+              private fun lvOnFocus(ch: LvCh, row: LvRow, pos: Int, rowPos: Int) {
+                  if (lvFull || inPlayer || inDetail) return
+                  lvCurRow = rowPos
+                  if (rowPos != lvSnap) { lvSnap = rowPos; lvSmooth(rowPos) }
+                  lvFocusCh = ch
+                  lvStopPreview(true)
+                  lvShownBanner = ""
+                  lvRenderHero(ch, true)
+                  lvEnsureEpg(ch)
+                  for (k in 1..4) row.items.getOrNull(pos + k)?.let { lvEnsureEpg(it) }
+                  row.items.getOrNull(pos - 1)?.let { lvEnsureEpg(it) }
+                  lvSchedulePreview(ch)
+              }
+
+              private fun lvRenderHero(ch: LvCh, anim: Boolean) {
+                  val pr = lvProgNow(ch)
+                  lvShownProg = pr?.name ?: ""
+                  lvTitle.text = pr?.name ?: ch.name
+                  val d = pr?.desc ?: ""
+                  lvDesc.text = d
+                  lvDesc.visibility = if (d.isBlank()) View.GONE else View.VISIBLE
+                  val g = listOf(pr?.cat ?: "", pr?.genre ?: "").filter { it.isNotBlank() }.joinToString(" \u2022 ").ifEmpty { ch.cat }
+                  lvGenre.text = g
+                  lvGenre.visibility = if (g.isBlank()) View.GONE else View.VISIBLE
+                  if (anim) {
+                      if (ch.logo.isNotBlank()) {
+                          lvLogo.visibility = View.VISIBLE
+                          Glide.with(this).load(ch.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(lvLogo)
+                      } else { lvLogo.setImageDrawable(null); lvLogo.visibility = View.GONE }
+                      lvInfo.animate().cancel(); lvInfo.alpha = 0f
+                      lvInfo.animate().alpha(1f).setDuration(220).start()
+                  }
+                  val b = pr?.banner
+                  if (b != lvShownBanner) {
+                      lvShownBanner = b
+                      if (b != null) Glide.with(this).load(b).override(lvBannerW, lvBannerH).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(lvBg)
+                      else { Glide.with(this).clear(lvBg); lvBg.setImageDrawable(null) }
+                  }
+              }
+
+              private fun lvSmooth(pos: Int) {
+                  lvRv.post {
+                      val s = object : LinearSmoothScroller(this) {
+                          override fun getVerticalSnapPreference() = SNAP_TO_START
+                          override fun calculateTimeForDeceleration(dx: Int): Int = 260
+                      }
+                      s.targetPosition = pos
+                      lvRv.layoutManager?.startSmoothScroll(s)
+                  }
+              }
+
+              // up / down: first card of the previous / next category row
+              private fun lvVertical(dir: Int): Boolean {
+                  if (!lvActive() || inDetail || inPlayer) return false
+                  val f = currentFocus ?: return false
+                  if (tabViews.any { it === f }) return false
+                  if (dir != View.FOCUS_UP && dir != View.FOCUS_DOWN) return false
+                  val target = lvCurRow + (if (dir == View.FOCUS_UP) -1 else 1)
+                  if (target < 0 || target >= lvRows.size) return true
+                  lvFocusRowFirst(target, 14)
+                  return true
+              }
+
+              private fun lvFocusRowFirst(target: Int, tries: Int) {
+                  val rvh = lvRv.findViewHolderForAdapterPosition(target) as? LvRowVH
+                  if (rvh == null) {
+                      if (tries == 14) lvSmooth(target)
+                      if (tries > 0) ui.postDelayed({ lvFocusRowFirst(target, tries - 1) }, 60)
+                      return
+                  }
+                  val first = rvh.rv.findViewHolderForAdapterPosition(0)?.itemView
+                  if (first != null) first.requestFocus()
+                  else {
+                      rvh.rv.scrollToPosition(0)
+                      if (tries > 0) ui.postDelayed({ lvFocusRowFirst(target, tries - 1) }, 40)
+                  }
+              }
+
+              // left from the first card of a row => sidebar (Live TV tab)
+              private fun lvLeft(): Boolean {
+                  if (!lvActive() || inDetail || inPlayer) return false
+                  val f = currentFocus ?: return false
+                  if (tabViews.any { it === f }) return false
+                  val rv = f.parent as? RecyclerView ?: return false
+                  if (rv.getChildAdapterPosition(f) != 0) return false
+                  tabViews[5].requestFocus()
+                  return true
+              }
+
+              // ---------------- live preview in the banner area (banner image hides when the first frame is drawn, like the trailer)
+              private fun lvSchedulePreview(ch: LvCh) {
+                  lvPrevRun?.let { ui.removeCallbacks(it) }
+                  if (!AppSettings.autoplay) return
+                  val r = Runnable { if (lvFocusCh?.id == ch.id) lvStartPreview(ch) }
+                  lvPrevRun = r
+                  ui.postDelayed(r, 900)
+              }
+
+              private fun lvResumePreview() { lvFocusCh?.let { lvSchedulePreview(it) } }
+
+              private fun lvStartPreview(ch: LvCh) {
+                  if (lvFull || inPlayer || inDetail || !lvActive()) return
+                  try {
+                      lvBox.animate().cancel(); lvBox.alpha = 0f; lvBox.visibility = View.VISIBLE
+                      val p = lvPlayer ?: ExoPlayer.Builder(this).build().also { pl ->
+                          lvPlayer = pl
+                          pl.setAudioAttributes(AudioAttributes.DEFAULT, true)
+                          pl.trackSelectionParameters = pl.trackSelectionParameters.buildUpon().setMaxVideoSize(1280, 720).build()
+                          pl.addListener(object : Player.Listener {
+                              override fun onVideoSizeChanged(videoSize: VideoSize) {
+                                  if (videoSize.width == 0 || videoSize.height == 0) return
+                                  val ar = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
+                                  var w = lvBannerW
+                                  var h = (w / ar).toInt()
+                                  if (h < lvBannerH) { h = lvBannerH; w = (h * ar).toInt() }
+                                  lvVideo.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+                              }
+                              override fun onRenderedFirstFrame() {
+                                  lvBox.animate().cancel(); lvBox.animate().alpha(1f).setDuration(450).start()
+                                  lvBg.animate().cancel(); lvBg.animate().alpha(0f).setDuration(450).start()
+                              }
+                              override fun onPlayerError(error: PlaybackException) {
+                                  lvBox.alpha = 0f; lvBox.visibility = View.GONE
+                                  lvBg.animate().cancel(); lvBg.animate().alpha(1f).setDuration(250).start()
+                              }
+                          })
+                      }
+                      p.volume = 1f
+                      p.setVideoTextureView(lvVideo)
+                      p.setMediaSource(lvBuildSource(ch))
+                      p.prepare()
+                      p.playWhenReady = true
+                  } catch (e: Exception) {
+                      lvBox.visibility = View.GONE
+                  }
+              }
+
+              private fun lvStopPreview(restoreBg: Boolean) {
+                  if (!::lvLayer.isInitialized) return
+                  lvPrevRun?.let { ui.removeCallbacks(it) }
+                  lvPrevRun = null
+                  lvBox.animate().cancel(); lvBox.alpha = 0f; lvBox.visibility = View.GONE
+                  if (restoreBg) { lvBg.animate().cancel(); lvBg.alpha = 1f }
+                  lvPlayer?.let { it.stop(); it.clearMediaItems() }
+              }
+
+              private fun lvReleasePreview() {
+                  lvPlayer?.release()
+                  lvPlayer = null
+              }
+
+              // ---------------- full screen (existing player UI: controls, quality, audio, subtitles ...)
+              private fun lvPlayFull(ch: LvCh, card: View) {
+                  lvLastCard = card
+                  lvCur = ch
+                  lvFull = true
+                  lvStopPreview(false)
+                  lvReleasePreview()
+                  val pr = lvProgNow(ch)
+                  showTitle = pr?.name ?: ch.name
+                  lvLayer.visibility = View.GONE
+                  openPlayer(Ep("", ch.name, 0, pr?.desc ?: "", pr?.banner, 0, 0L), 0, true, true, "lv://")
+              }
+
+              private fun startLvPlayback() {
+                  val ch = lvCur ?: return
+                  val p = ensureMainPlayer()
+                  p.setVideoSurfaceView(pSurface)
+                  p.setPlaybackSpeed(1f)
+                  p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                      .clearOverrides().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                  qualitySel = 0
+                  audioOpts = emptyList(); curAudio = ""; audioPrefApplied = false
+                  pendingStart = 0L
+                  pillSpeed.visibility = View.GONE
+                  p.setMediaSource(lvBuildSource(ch))
+                  p.prepare()
+                  p.playWhenReady = true
+                  pStatus.visibility = View.GONE
+                  refreshPlayUi()
+              }
+
+              private fun restoreLv() {
+                  lvFull = false
+                  lvCur = null
+                  side.visibility = View.VISIBLE; brand.visibility = View.VISIBLE
+                  content.visibility = View.GONE
+                  lvLayer.visibility = View.VISIBLE
+                  lvSnap = -1
+                  ui.removeCallbacks(lvTickRun); ui.postDelayed(lvTickRun, 30000)
+                  ui.postDelayed({
+                      if (tab == 5 && !inPlayer && !inDetail) {
+                          val c = lvLastCard
+                          if (c != null && c.isAttachedToWindow) c.requestFocus() else lvFocusFirst(12)
+                      }
+                  }, 100)
+              }'''
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 11 applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
