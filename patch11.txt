@@ -17,7 +17,8 @@ const val LV_URL = "https://weathered-hall-381c.a14638521.workers.dev/"
 const val LV_CATCH_URL = "https://catchup.a14638521.workers.dev/"
 const val LV_IMG = "https://jiotvimages.cdn.jio.com/dare_images/shows"
 const val LV_UA = "okhttp/4.12.13"
-const val LV_CATCH_EXTRA_MS = 10 * 60000L      // every catchup program is played 10 minutes longer (late finishing movies etc)
+const val LV_CATCH_EXTRA_MS = 5 * 60000L       // every catchup program is played 5 minutes longer (late finishing movies etc)
+const val LV_CATCH_UTC = true                  // begin / end of the catchup url are UTC (set false if the server wants IST)
 
 class LvCh(val id: String, var name: String, var cat: String, var url: String, var keyId: String, var key: String,
            var license: String, var licUrl: String, var logo: String)
@@ -38,27 +39,36 @@ object LvCookies {
 // licenses already fetched from a license url (key = url)
 object LvLic { val cache = ConcurrentHashMap<String, String>() }
 
-// catchup channel list (own api, own token). Refreshed 10 minutes before it expires.
+// catchup channel list (own api, own token + keys). ONLY channels in this list have catchup.
 object LvCatch {
-    private var exp = 0L
-    private var map: Map<String, LvCh> = emptyMap()
-    @Synchronized fun get(id: String): LvCh? {
+    @Volatile var exp = 0L
+    @Volatile var map: Map<String, LvCh> = emptyMap()
+    @Synchronized fun refresh(): Boolean {
+        val j = lvHttp(LV_CATCH_URL) ?: return false
+        val p = lvParse(j)
+        if (p.second.isEmpty()) return false
+        map = p.second.associateBy { it.id }
+        exp = p.first
+        return true
+    }
+    fun has(id: String) = map.containsKey(id)
+    fun get(id: String): LvCh? {
         val now = System.currentTimeMillis()
-        if (map.isEmpty() || (exp > 0L && now > exp - 600000L)) {
-            val j = lvHttp(LV_CATCH_URL)
-            if (j != null) {
-                val p = lvParse(j)
-                if (p.second.isNotEmpty()) { map = p.second.associateBy { it.id }; exp = p.first }
-            }
-        }
+        if (map.isEmpty() || (exp > 0L && now > exp - 600000L)) refresh()
         return map[id]
     }
 }
 
-// begin / end of the catchup url are UTC: YYYYMMDDHHMM00
+// final url: ...index.mpd?begin=20261115T183000&end=20261115T184000&__hdnea__=...
 fun lvCatchUrl(tpl: String, st: Long, en: Long): String {
-    val f = SimpleDateFormat("yyyyMMddHHmm'00'", Locale.ENGLISH).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
-    return tpl.replace("begin=YYYYMMDDHHMM00", "begin=" + f.format(Date(st))).replace("end=YYYYMMDDHHMM00", "end=" + f.format(Date(en)))
+    val f = SimpleDateFormat("yyyyMMdd'T'HHmmss", Locale.ENGLISH).apply {
+        timeZone = java.util.TimeZone.getTimeZone(if (LV_CATCH_UTC) "UTC" else "Asia/Kolkata")
+    }
+    val b = f.format(Date(st))
+    val e = f.format(Date(en))
+    var u = tpl.replace(Regex("([?&])begin=[^&]*")) { it.groupValues[1] + "begin=" + b }
+    u = u.replace(Regex("([?&])end=[^&]*")) { it.groupValues[1] + "end=" + e }
+    return u
 }
 
 fun lvHexToB64(h: String): String {
@@ -293,6 +303,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
     private var lvPrevRun: Runnable? = null
     private var lvPrevTok = 0
     private var lvRefreshRun: Runnable? = null
+    private var lvCatchRun: Runnable? = null
     private var lvFull = false
     private var lvCur: LvCh? = null
     private var lvLastCard: View? = null
@@ -353,6 +364,22 @@ MEM = r'''// ---------------------------------------------------------------- Up
             }
         }
         if (lvFocusCh?.id == ch.id && lvActive() && !lvFull) lvRenderHero(ch, false)
+    }
+
+    // catchup list in the background: loaded together with the channels, refreshed 10 minutes before its token expires
+    private fun lvCatchKick(delay: Long) {
+        lvCatchRun?.let { ui.removeCallbacks(it) }
+        val r = Runnable {
+            Thread {
+                LvCatch.refresh()
+                ui.post {
+                    val d = if (LvCatch.exp > 0L) LvCatch.exp - 600000L - System.currentTimeMillis() else 1800000L
+                    lvCatchKick(d.coerceIn(60000L, 6 * 3600000L))
+                }
+            }.start()
+        }
+        lvCatchRun = r
+        ui.postDelayed(r, delay)
     }
 
     // highest audio bitrate inside the audio language that is currently selected (33 kbps / 99 kbps ... => 99 kbps)
@@ -516,7 +543,6 @@ MEM = r'''// ---------------------------------------------------------------- Up
         }, lp(-1, (H * 0.55f).toInt(), Gravity.BOTTOM))
 
         // left column fills ALL the space above the first row: the channel logo takes every pixel that the texts do not need
-        // (title / description / genre / time sit right above the row title)
         lvInfo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; clipChildren = false }
         lvLogo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START }
         lvTitle = TextView(this).apply { setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD; maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
@@ -623,6 +649,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
 
     private fun lvApply(exp: Long, list: List<LvCh>) {
         lvExpMs = exp
+        if (lvCatchRun == null) lvCatchKick(0)
         val same = lvLoaded && lvChans.map { it.id }.toSet() == list.map { it.id }.toSet()
         if (same) {
             for (n in list) lvChans.firstOrNull { it.id == n.id }?.let { o ->
@@ -818,6 +845,17 @@ MEM = r'''// ---------------------------------------------------------------- Up
     }
 
     // ---------------- full screen (existing player UI) + catchup list (old tv style: dates on the left, programs on the right)
+    // The Catchup button exists ONLY for channels that are listed in the catchup api.
+    private fun lvEnableCatchup() {
+        seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+        seasons.addAll(liveDays())
+        buildSeasonCol()
+        epTab.text = "Catchup"
+        (pillEps.getChildAt(1) as TextView).text = "Catchup"
+        pillEps.visibility = View.VISIBLE
+        selectSeason(0, false)
+    }
+
     private fun lvPlayFull(ch: LvCh, card: View) {
         lvLastCard = card
         lvCur = ch
@@ -830,14 +868,17 @@ MEM = r'''// ---------------------------------------------------------------- Up
         showTitle = pr?.name ?: ch.name
         lvLayer.visibility = View.GONE
         seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
-        seasons.addAll(liveDays())
-        buildSeasonCol()
-        epTab.text = "Catchup"
-        (pillEps.getChildAt(1) as TextView).text = "Catchup"
-        Thread { LvCatch.get(ch.id) }.start()            // warm the catchup token
+        sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
         openPlayer(Ep("", ch.name, 0, pr?.desc ?: "", pr?.banner, 0, 0L), 0, true, false, "lv://")
-        pillEps.visibility = View.VISIBLE
-        selectSeason(0, false)
+        pillEps.visibility = View.GONE
+        if (LvCatch.has(ch.id)) lvEnableCatchup()
+        else if (LvCatch.map.isEmpty()) {
+            // catchup list not loaded yet: load it now, then show the button if this channel is in it
+            Thread {
+                LvCatch.get(ch.id)
+                ui.post { if (lvFull && inPlayer && lvCur?.id == ch.id && LvCatch.has(ch.id)) lvEnableCatchup() }
+            }.start()
+        }
     }
 
     private fun lvLoadEpg() {
@@ -881,7 +922,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
             return
         }
         if (st < now - 7 * 86400000L) { toast("Catchup is available for the last 7 days only"); return }
-        val endCap = min(en + LV_CATCH_EXTRA_MS, now - 30000L)  // +10 minutes safety, but never later than "now"
+        val endCap = min(en + LV_CATCH_EXTRA_MS, now - 30000L)  // +5 minutes safety, but never later than "now"
         if (endCap <= st) { toast("Not available yet"); return }
         liveStartS = st / 1000L; liveEndS = endCap / 1000L
         showTitle = ch.name
@@ -914,6 +955,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
             val src: MediaSource? = try {
                 if (!catchup) lvBuildSource(ch)
                 else {
+                    // url, token and keys come from the catchup api only (refreshed 10 minutes before expiry)
                     val cc = LvCatch.get(ch.id)
                     if (cc == null) null
                     else lvBuildSource(LvCh(ch.id, ch.name, ch.cat, lvCatchUrl(cc.url, s0, e0), cc.keyId, cc.key, cc.license, cc.licUrl, ch.logo))
