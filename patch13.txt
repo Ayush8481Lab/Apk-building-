@@ -1578,11 +1578,6 @@ MEM = r'''// ---------------------------------------------------------------- Up
     }'''
 rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
 
-# ---- fixes for earlier parts of this patch
-# error state only after a load was really started
-rep('var heroOn = false', 'var heroOn = false\n        var started = false')
-rep('fun ensureLoaded() {', 'fun ensureLoaded() {\n            started = true')
-rep('if (td.loading || !td.loaded) "skel" else "err"', 'if (td.loading) "skel" else if (!td.loaded && started) "err" else "skel"')
 # center play / pause button follows the progress tick
 rep('private fun updateProgress() {', 'private fun updateProgress() {\n        mobSyncCenter(mainPlayer)')
 
