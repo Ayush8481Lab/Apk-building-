@@ -8168,6 +8168,8 @@ jobs:
           P.write_text(t, encoding='utf-8')
           print('update 13b applied')
           PYEOF
+      - name: Apply update 14 (Mobile v2)
+        run: python3 patch14.txt
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload APK
