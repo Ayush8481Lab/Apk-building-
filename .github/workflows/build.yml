@@ -8034,7 +8034,7 @@ jobs:
           PYEOF
       - name: Apply update 11 (Live TV redesign - categories, EPG cards, live preview, DASH clearkey/widevine, cookies, bg refresh)
         run: python3 patch11.txt 
-      - name: Apply update 12 (?audio= only for live sports, embedded tracks for shows/movies, Auto shows current quality)
+      - name: Apply update 12 (?audio= only for live sports, accurate current quality, pill-style Quality sheet)
         run: |
           set -e
           python3 - <<'PYEOF'
@@ -8057,25 +8057,79 @@ jobs:
           rep('if (prefAudio.isNotEmpty() && s.audios.isNotEmpty() && !prefAudio.equals(s.selAudio, true) &&',
               'if (parseSportInfo(fetchDetail(id)) != null && prefAudio.isNotEmpty() && s.audios.isNotEmpty() && !prefAudio.equals(s.selAudio, true) &&')
 
-          # 3) Quality sheet: Auto tile / header show the quality that auto is playing right now
-          rep('qvSub.text = "Currently: " + (if (qualitySel == 0) "Auto" else qualitySel.toString() + "p")',
-              'qvSub.text = "Currently: " + (if (qualitySel == 0) (if (curVideoH() > 0) "Auto (" + curVideoH() + "p)" else "Auto") else qualitySel.toString() + "p")')
-          rep('addT(qvTile("Auto", "Best for your network", qualitySel == 0) { selectQuality(null); closeQV(true) }, qualitySel == 0)',
-              'addT(qvTile("Auto", if (curVideoH() > 0) "(" + curVideoH() + "p) now playing" else "Best for your network", qualitySel == 0) { selectQuality(null); closeQV(true) }, qualitySel == 0)')
+          # 3) Quality button opens the new pill style sheet
+          rep('pillSet = pill("Quality", R.drawable.ic_quality) { openQV(0) }',
+              'pillSet = pill("Quality", R.drawable.ic_quality) { openQuality() }')
 
-          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', r'''// height of the video track that is playing right now (0 = unknown)
+          # 4) live refresh of the Auto label while the sheet is open (progress tick runs every 500 ms)
+          rep('private fun updateProgress() {', 'private fun updateProgress() {\n        qvLiveTick()')
+
+          rep('private fun isHomeTab() = homeTabs.containsKey(tab)', r'''// ---------------------------------------------------------------- Update 12
+              private var qvAutoPill: LinearLayout? = null
+
+              // height of the video that is really being played right now (the format the player is rendering, NOT the
+              // "selected tracks" list: with adaptive streaming every track of the group counts as selected, which made it report the lowest one)
               private fun curVideoH(): Int {
                   val p = mainPlayer ?: return 0
-                  for (g in p.currentTracks.groups) {
-                      if (g.type != C.TRACK_TYPE_VIDEO) continue
-                      for (i in 0 until g.length) {
-                          if (g.isTrackSelected(i)) {
-                              val h = g.getTrackFormat(i).height
-                              if (h > 0) return h
-                          }
-                      }
-                  }
+                  val f = p.videoFormat
+                  if (f != null && f.height > 0) return f.height
+                  val vs = p.videoSize
+                  if (vs.height > 0) return vs.height
                   return 0
+              }
+
+              private fun autoText(): String { val h = curVideoH(); return if (h > 0) "Auto (" + h + "p)" else "Auto" }
+
+              private fun qvLiveTick() {
+                  if (panel != 4 || qvKind != 0 || qualitySel != 0) return
+                  val pl = qvAutoPill ?: return
+                  val tv = pl.getChildAt(1) as? TextView ?: return
+                  val s = autoText()
+                  if (tv.text.toString() != s) { tv.text = s; qvSub.text = "Currently: $s" }
+              }
+
+              // Quality sheet, same look as Audio / Subtitles: pill options (both ends semicircle), Auto shows the real playing quality
+              private fun openQuality() {
+                  val p = mainPlayer ?: return
+                  if (panel != 0) return
+                  qvKind = 0
+                  qvRow.removeAllViews()
+                  var focusV: View? = null
+                  fun addP(v: View, sel: Boolean) {
+                      qvRow.addView(v, LinearLayout.LayoutParams(-2, u(58)).apply { rightMargin = u(14) })
+                      if (sel && focusV == null) focusV = v
+                  }
+                  qvIcon.setImageResource(R.drawable.ic_quality)
+                  qvTitle.text = "Video Quality"
+                  qvSub.text = "Currently: " + (if (qualitySel == 0) autoText() else qualitySel.toString() + "p")
+                  val ap = qvPill(autoText(), qualitySel == 0) { selectQuality(null); closeQV(true) }
+                  qvAutoPill = ap
+                  addP(ap, qualitySel == 0)
+                  for (o in qualityOptions()) {
+                      addP(qvPill(o.h.toString() + "p  \u2022  " + qlabelH(o.h), qualitySel == o.h) { selectQuality(o); closeQV(true) }, qualitySel == o.h)
+                  }
+                  if (focusV == null) focusV = qvRow.getChildAt(0)
+                  qvScroll.visibility = View.VISIBLE; qvSpeedBox.visibility = View.GONE
+                  qvScroll.scrollTo(0, 0)
+                  panel = 4
+                  ui.removeCallbacks(hideRun)
+                  ctrlVisible = false
+                  cancelScrub()
+                  cueLift(false)
+                  hideNext()
+                  ctrl.animate().cancel(); ctrl.alpha = 0f; ctrl.visibility = View.INVISIBLE
+                  ctrl.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  qvLayer.animate().cancel()
+                  qvLayer.visibility = View.VISIBLE
+                  qvLayer.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  qvLayer.translationY = qvH * 0.35f
+                  qvLayer.alpha = 0f
+                  qvLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                  qvLayer.animate().translationY(0f).alpha(1f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f))
+                      .withEndAction { qvLayer.setLayerType(View.LAYER_TYPE_NONE, null) }.start()
+                  ui.postDelayed({
+                      if (inPlayer && panel == 4 && qvKind == 0) focusV?.requestFocus()
+                  }, 120)
               }
 
               private fun isHomeTab() = homeTabs.containsKey(tab)''')
