@@ -1,24 +1,25 @@
 import sys, pathlib
 
-# ---- 1) AndroidManifest + drawable icons
 M = pathlib.Path('app/src/main/AndroidManifest.xml')
-mt = M.read_text(encoding='utf-8')
-if 'android:screenOrientation="sensorLandscape"' not in mt:
-    sys.exit('MANIFEST PATCH FAILED: sensorLandscape not found')
-M.write_text(mt.replace('android:screenOrientation="sensorLandscape"', 'android:screenOrientation="unspecified"'), encoding='utf-8')
+M.write_text(
+    M.read_text(encoding='utf-8').replace(
+        'android:screenOrientation="sensorLandscape"',
+        'android:screenOrientation="unspecified"'
+    ),
+    encoding='utf-8'
+)
 
 D = pathlib.Path('app/src/main/res/drawable')
 D.mkdir(parents=True, exist_ok=True)
 (D / 'ic_more.xml').write_text(
-    '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">'
-    '<path android:fillColor="#FFFFFF" android:pathData="M12,8c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM12,10c-1.1,0 -2,0.9 -2,2s0.9,2 2,2 2,-0.9 2,-2 -0.9,-2 -2,-2zM12,16c-1.1,0 -2,0.9 -2,2s0.9,2 2,2 2,-0.9 2,-2 -0.9,-2 -2,-2z"/>'
-    '</vector>\n', encoding='utf-8')
+    '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M12,8c1.1,0 2,-0.9 2,-2s-0.9,-2 -2,-2 -2,0.9 -2,2 0.9,2 2,2zM12,10c-1.1,0 -2,0.9 -2,2s0.9,2 2,2 2,-0.9 2,-2 -0.9,-2 -2,-2zM12,16c-1.1,0 -2,0.9 -2,2s0.9,2 2,2 2,-0.9 2,-2 -0.9,-2 -2,-2z"/></vector>\n',
+    encoding='utf-8'
+)
 (D / 'ic_brightness.xml').write_text(
-    '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">'
-    '<path android:fillColor="#FFFFFF" android:pathData="M20,8.69V4h-4.69L12,0.69 8.69,4H4v4.69L0.69,12 4,15.31V20h4.69L12,23.31 15.31,20H20v-4.69L23.31,12 20,8.69zM12,18c-3.31,0 -6,-2.69 -6,-6s2.69,-6 6,-6 6,2.69 6,6 -2.69,6 -6,6zM12,8c-2.21,0 -4,1.79 -4,4s1.79,4 4,4 4,-1.79 4,-4 -1.79,-4 -4,-4z"/>'
-    '</vector>\n', encoding='utf-8')
+    '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M20,8.69V4h-4.69L12,0.69 8.69,4H4v4.69L0.69,12 4,15.31V20h4.69L12,23.31 15.31,20H20v-4.69L23.31,12 20,8.69zM12,18c-3.31,0 -6,-2.69 -6,-6s2.69,-6 6,-6 6,2.69 6,6 -2.69,6 -6,6zM12,8c-2.21,0 -4,1.79 -4,4s1.79,4 4,4 4,-1.79 4,-4 -1.79,-4 -4,-4z"/></vector>\n',
+    encoding='utf-8'
+)
 
-# ---- 2) MainActivity.kt
 P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
 t = P.read_text(encoding='utf-8')
 
@@ -355,7 +356,6 @@ MEM = r'''// ---------------------------------------------------------------- Up
         var pending = false
         var heroRv: RecyclerView? = null
         var heroOn = false
-        var started = false
         private val ad = MobRowsAd(this)
 
         init {
@@ -379,7 +379,7 @@ MEM = r'''// ---------------------------------------------------------------- Up
         fun refresh() {
             pending = false
             items.clear()
-            if (td.rows.isEmpty()) items.add(if (td.loading) "skel" else if (!td.loaded && started) "err" else "skel")
+            if (td.rows.isEmpty()) items.add(if (td.loading || !td.loaded) "skel" else "err")
             else {
                 val hero = td.rows.firstOrNull { it.spotlight && it.items.isNotEmpty() }
                 if (hero != null) items.add(hero) else items.add("pad")
@@ -395,7 +395,6 @@ MEM = r'''// ---------------------------------------------------------------- Up
         }
 
         fun ensureLoaded() {
-            started = true
             if (!td.loaded) startLoad(td)
             refresh()
         }
@@ -1578,6 +1577,11 @@ MEM = r'''// ---------------------------------------------------------------- Up
     }'''
 rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM + '\n\n    private fun isHomeTab() = homeTabs.containsKey(tab)')
 
+# ---- fixes for earlier parts of this patch
+# error state only after a load was really started
+rep('var heroOn = false', 'var heroOn = false\n        var started = false')
+rep('fun ensureLoaded() {', 'fun ensureLoaded() {\n            started = true')
+rep('if (td.loading || !td.loaded) "skel" else "err"', 'if (td.loading) "skel" else if (!td.loaded && started) "err" else "skel"')
 # center play / pause button follows the progress tick
 rep('private fun updateProgress() {', 'private fun updateProgress() {\n        mobSyncCenter(mainPlayer)')
 
