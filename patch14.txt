@@ -1,0 +1,554 @@
+import sys, pathlib
+
+D = pathlib.Path('app/src/main/res/drawable')
+D.mkdir(parents=True, exist_ok=True)
+S = 'android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeLineCap="round" android:strokeLineJoin="round"'
+H = '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">'
+icons = {
+    'ic_m_play.xml': f'{H}<path android:fillColor="#FFFFFF" android:pathData="M8.5,5.6C8.5,4.8 9.4,4.3 10.1,4.8L19.2,10.9C19.8,11.4 19.8,12.6 19.2,13.1L10.1,19.2C9.4,19.7 8.5,19.2 8.5,18.4Z"/></vector>\n',
+    'ic_m_pause.xml': f'{H}<path android:fillColor="#FFFFFF" android:pathData="M7,5.5h2.6a1.2,1.2 0 0 1 1.2,1.2v10.6a1.2,1.2 0 0 1 -1.2,1.2H7a1.2,1.2 0 0 1 -1.2,-1.2V6.7a1.2,1.2 0 0 1 1.2,-1.2zM14.4,5.5h2.6a1.2,1.2 0 0 1 1.2,1.2v10.6a1.2,1.2 0 0 1 -1.2,1.2h-2.6a1.2,1.2 0 0 1 -1.2,-1.2V6.7a1.2,1.2 0 0 1 1.2,-1.2z"/></vector>\n',
+    'ic_m_back10.xml': f'{H}<path {S} android:strokeWidth="1.7" android:pathData="M5.2,8.6A7.6,7.6 0 1 1 4.6,13.2M5,4.4V8.9H9.5"/><path {S} android:strokeWidth="1.4" android:pathData="M10.3,10.4L11.6,9.7V15.3M13.3,9.8h1.4a1,1 0 0 1 1,1v3.6a1,1 0 0 1 -1,1h-1.4a1,1 0 0 1 -1,-1v-3.6a1,1 0 0 1 1,-1z"/></vector>\n',
+    'ic_m_fwd10.xml': f'{H}<group android:pivotX="12" android:scaleX="-1"><path {S} android:strokeWidth="1.7" android:pathData="M5.2,8.6A7.6,7.6 0 1 1 4.6,13.2M5,4.4V8.9H9.5"/></group><path {S} android:strokeWidth="1.4" android:pathData="M10.3,10.4L11.6,9.7V15.3M13.3,9.8h1.4a1,1 0 0 1 1,1v3.6a1,1 0 0 1 -1,1h-1.4a1,1 0 0 1 -1,-1v-3.6a1,1 0 0 1 1,-1z"/></vector>\n',
+    'ic_m_fs_on.xml': f'{H}<path {S} android:strokeWidth="1.9" android:pathData="M4,9V5.5A1.5,1.5 0 0 1 5.5,4H9M15,4h3.5A1.5,1.5 0 0 1 20,5.5V9M20,15v3.5a1.5,1.5 0 0 1 -1.5,1.5H15M9,20H5.5A1.5,1.5 0 0 1 4,18.5V15"/></vector>\n',
+    'ic_m_fs_off.xml': f'{H}<path {S} android:strokeWidth="1.9" android:pathData="M9,4V7.5A1.5,1.5 0 0 1 7.5,9H4M20,9h-3.5a1.5,1.5 0 0 1 -1.5,-1.5V4M15,20v-3.5a1.5,1.5 0 0 1 1.5,-1.5H20M4,15h3.5a1.5,1.5 0 0 1 1.5,1.5V20"/></vector>\n',
+    'ic_m_audio.xml': f'{H}<path {S} android:strokeWidth="1.7" android:pathData="M4,10v4h3l4.5,3.5V6.5L7,10zM15,9.3a3.6,3.6 0 0 1 0,5.4M17.6,7a7,7 0 0 1 0,10"/></vector>\n',
+    'ic_m_cc.xml': f'{H}<path {S} android:strokeWidth="1.7" android:pathData="M6.5,5h11a3,3 0 0 1 3,3v8a3,3 0 0 1 -3,3h-11a3,3 0 0 1 -3,-3V8a3,3 0 0 1 3,-3zM10.6,10.3a2,2 0 1 0 0,3.4M16.6,10.3a2,2 0 1 0 0,3.4"/></vector>\n',
+    'ic_m_quality.xml': f'{H}<path {S} android:strokeWidth="1.8" android:pathData="M4,7h7M17,7h3M4,17h3M13,17h7M15,7m-2,0a2,2 0 1 0 4,0a2,2 0 1 0 -4,0M9,17m-2,0a2,2 0 1 0 4,0a2,2 0 1 0 -4,0"/></vector>\n',
+    'ic_m_speed.xml': f'{H}<path {S} android:strokeWidth="1.8" android:pathData="M4.6,17.2A8.4,8.4 0 1 1 19.4,17.2M12,13.2L16,9.2"/><path {S} android:strokeWidth="2.8" android:pathData="M12,13.2h0.01"/></vector>\n',
+    'ic_m_list.xml': f'{H}<path {S} android:strokeWidth="1.9" android:pathData="M9,6.5h11M9,12h11M9,17.5h11M4.5,6.5h0.01M4.5,12h0.01M4.5,17.5h0.01"/></vector>\n',
+}
+for name, xml in icons.items():
+    (D / name).write_text(xml, encoding='utf-8')
+
+P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+t = P.read_text(encoding='utf-8')
+
+def rep(old, new, must=True):
+    global t
+    n = t.count(old)
+    if n != 1:
+        if must:
+            sys.exit('PATCH FAILED (%d): %s' % (n, old[:100]))
+        print('WARN (%d): %s' % (n, old[:80]))
+        return
+    t = t.replace(old, new)
+
+# ---- 1) mobile home api + masthead_mobile_v2 on every item
+rep('const val EP_PAGE = 30', 'const val EP_PAGE = 30\nconst val MOB_HOME_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/MWEB/IN/UP/PAGE-V2/244390?from=0&to=100"')
+rep('homeTabs[1] = TabData(1, HOME_URL)', 'homeTabs[1] = TabData(1, if (mobOn) MOB_HOME_URL else HOME_URL)')
+rep('val aspect: Float = 0f', 'val aspect: Float = 0f, val mob: String? = null')
+rep('"", "", s("square_thumb"), false)', '"", "", s("square_thumb"), false, 0f, s("masthead_mobile_v2"))')
+
+# ---- 2) less wasted work on phones (TV sized prefetch / decode)
+rep('else if (td.rows.size <= 6) { prefetchRow(r, 12); warmRow(r) }', 'else if (!mobOn && td.rows.size <= 6) { prefetchRow(r, 12); warmRow(r) }', False)
+rep('r.items.forEach { prefetchHero(it) }', 'if (!mobOn) r.items.forEach { prefetchHero(it) }', False)
+
+# ---- 3) home rows: incremental updates, smooth hero
+rep('fun refresh() {', r'''fun refresh() { refreshSmart() }
+
+        fun refreshSmart() {
+            pending = false
+            val n = ArrayList<Any>()
+            if (td.rows.isEmpty()) n.add(if (td.loading) "skel" else if (!td.loaded && started) "err" else "skel")
+            else {
+                val hero = td.rows.firstOrNull { it.spotlight && it.items.isNotEmpty() }
+                if (hero != null) n.add(hero) else n.add("pad")
+                for (r in td.rows) if (!r.spotlight && r.items.isNotEmpty()) n.add(r)
+            }
+            val old = items.size
+            var same = old > 0 && n.size >= old
+            if (same) for (i in 0 until old) if (items[i] !== n[i]) { same = false; break }
+            items.clear(); items.addAll(n)
+            if (same) { if (n.size > old) ad.notifyItemRangeInserted(old, n.size - old) } else ad.notifyDataSetChanged()
+        }
+
+        fun refreshOld() {''')
+rep('if (cur >= 0) h.smoothScrollToPosition((cur + 1) % n)',
+    r'''if (cur >= 0 && SystemClock.uptimeMillis() - mobHeroTouch > 7000L) {
+                                val nx = (cur + 1) % n
+                                if (nx == 0) h.scrollToPosition(0)
+                                else {
+                                    val sc = object : LinearSmoothScroller(this@MainActivity) {
+                                        override fun calculateTimeForScrolling(dx: Int): Int = 700
+                                        override fun getHorizontalSnapPreference(): Int = SNAP_TO_START
+                                    }
+                                    sc.targetPosition = nx
+                                    lm.startSmoothScroll(sc)
+                                }
+                            }''')
+rep('androidx.recyclerview.widget.PagerSnapHelper().attachToRecyclerView(hrv)',
+    'androidx.recyclerview.widget.PagerSnapHelper().attachToRecyclerView(hrv); hrv.setItemViewCacheSize(3)')
+rep('hrv.clearOnScrollListeners()', 'hrv.clearOnScrollListeners(); mobHeroParallax(hrv, h.dots, row.items.size)')
+rep('cardReq(img(it0.portrait ?: it0.spot ?: it0.landscape ?: it0.bg, 900), mobW, hh).priority(Priority.HIGH).into(h.iv)',
+    'h.iv.scaleX = 1.2f; h.iv.scaleY = 1.2f; mobGl(img(it0.mob ?: it0.portrait ?: it0.spot ?: it0.landscape ?: it0.bg, 1000), h.iv, mobW, hh)')
+rep('rv.setItemViewCacheSize(4); rv.setRecycledViewPool(mobPool)', 'rv.setItemViewCacheSize(4); rv.setRecycledViewPool(mobPool); rv.setHasFixedSize(true)')
+rep('rv.clipToPadding = false; rv.setPadding(dp(11), 0, dp(11), 0)',
+    'rv.clipToPadding = false; rv.setPadding(dp(11), 0, dp(11), 0); (rv.layoutManager as LinearLayoutManager).initialPrefetchItemCount = 4')
+
+# ---- 4) detail page: mobile masthead banner, logo on the banner, endless episodes with skeleton
+rep('d.preview(); d.load()', 'd.relayout(); d.preview(); d.load()')
+rep('fun preview() {', r'''fun relayout() {
+            val bf = banner.parent as FrameLayout
+            mobBH = min((mobW * 1.15f).toInt(), (mobH * 0.55f).toInt())
+            bf.layoutParams = LinearLayout.LayoutParams(-1, mobBH)
+            (bf.getChildAt(1).layoutParams as FrameLayout.LayoutParams).height = (mobBH * 0.55f).toInt()
+            (logo.parent as? ViewGroup)?.removeView(logo)
+            (titleTv.parent as? ViewGroup)?.removeView(titleTv)
+            logo.maxWidth = (mobW * 0.62f).toInt(); logo.maxHeight = dp(110)
+            logo.scaleType = ImageView.ScaleType.FIT_START
+            bf.addView(logo, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply { leftMargin = dp(18); bottomMargin = dp(16) })
+            titleTv.maxLines = 2
+            bf.addView(titleTv, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM or Gravity.START).apply { leftMargin = dp(18); rightMargin = dp(18); bottomMargin = dp(16) })
+            rv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(r: RecyclerView, dx: Int, dy: Int) {
+                    if (dy <= 0 || mv || !epHasMore || epLoading || eps.isEmpty()) return
+                    val lm = r.layoutManager as LinearLayoutManager
+                    if (lm.findLastVisibleItemPosition() >= ad.itemCount - 5) loadEpisodes()
+                }
+            })
+        }
+
+        fun preview() {''')
+rep('bgBigReq(img(pv.bg ?: pv.landscape, W_BG)).into(banner)', 'mobBanner(img(item.mob ?: pv.bg ?: pv.landscape, 1000), banner)')
+rep('bgBigReq(detBgUrl(show) ?: img(item.bg ?: item.landscape, W_BG)).into(banner)',
+    'mobBanner(img(e.str("masthead_mobile_v2") ?: item.mob ?: rawBgOf(show) ?: item.bg, 1000), banner)')
+rep('logoReq(pv.logo, (mobW * 0.62f).toInt(), dp(84)).into(logo)', 'logoReq(pv.logo, (mobW * 0.62f).toInt(), dp(110)).into(logo)')
+rep('logoReq(lg, (mobW * 0.62f).toInt(), dp(84)).into(logo)', 'logoReq(lg, (mobW * 0.62f).toInt(), dp(110)).into(logo)')
+rep('if (seasons.isNotEmpty()) { selectSeason(0, false); styleChips() }', 'if (seasons.isNotEmpty()) { selectSeason(0, false); styleChips() }; ad.notifyDataSetChanged()')
+rep('override fun getItemCount() = 1 + eps.size',
+    'private fun skelN(): Int = if (d.mv) 0 else if (eps.isEmpty()) (if (epLoading || epHasMore) 3 else 0) else if (epHasMore) 2 else 0\n        override fun getItemCount() = 1 + eps.size + skelN()')
+rep('override fun getItemViewType(position: Int) = if (position == 0) 0 else 1',
+    'override fun getItemViewType(position: Int) = if (position == 0) 0 else if (position > eps.size) 2 else 1')
+rep('if (t == 0) return object : RecyclerView.ViewHolder(d.head) { }',
+    'if (t == 0) return object : RecyclerView.ViewHolder(d.head) { }\n            if (t == 2) return object : RecyclerView.ViewHolder(mobEpSkel()) { }')
+rep('if (pos == 0) return', 'if (pos == 0 || pos > eps.size) return')
+
+# ---- 5) player: portrait + fullscreen, details panel, modern controls
+rep('if (mobOn && !inPlayer) { window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE; return }',
+    'if (mobOn && (!inPlayer || !mobFs)) { window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE; return }')
+rep('if (mobOn && !splashOn && !inPlayer) { mobBackPressed(); return }',
+    'if (mobOn && !splashOn && !inPlayer) { mobBackPressed(); return }\n        if (mobOn && inPlayer && panel == 0) { if (mobFs) mobSetFs(false) else closePlayer(); return }')
+rep('requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE',
+    'requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR; mobApplyPlayerLayout(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE); mobPdUpdate()')
+rep('mobRoot.visibility = View.VISIBLE',
+    'mobRoot.visibility = View.VISIBLE; mobFs = false; if (::mobPD.isInitialized) mobPD.visibility = View.GONE; val pl0 = playerLayer.layoutParams; pl0.height = -1; playerLayer.layoutParams = pl0')
+rep('val w = max(1, window.decorView.width).toFloat()', 'val w = max(1, playerLayer.width).toFloat()')
+rep('val h = max(1, window.decorView.height).toFloat()',
+    'val h = max(1, playerLayer.height).toFloat()\n        if (!mobFs) { if (a == MotionEvent.ACTION_DOWN) mobOut = !hit(playerLayer, ev); if (mobOut) return super.dispatchTouchEvent(ev) }')
+rep('val cl = listOf<View>(pBack, pPause, pillAudio, pillSub, pillSet, pillSpeed, pillEps, pillScore, pillMoments, pGoLive)',
+    'val cl = listOf<View>(pBack, pPause, pillAudio, pillSub, pillSet, pillSpeed, pillEps, pillScore, pillMoments, pGoLive, mobCtr, mobTools, mobFsBtn)')
+rep('if (mobCenter.visibility != want) mobCenter.visibility = want', 'mobCenter.visibility = View.GONE; mobSyncModern(p, show)')
+rep('pBack.setOnClickListener { if (panel == 0) closePlayer() else onBackPressed() }',
+    'pBack.setOnClickListener { if (panel == 0) { if (mobFs) mobSetFs(false) else closePlayer() } else onBackPressed() }')
+rep('nextCard.setOnClickListener { playNextNow() }', 'nextCard.setOnClickListener { playNextNow() }; mobBuildPd(); mobSkin()')
+rep('private fun setPlayerTitles() {', 'private fun setPlayerTitles() {\n        mobPdPost()')
+rep('wantEpFocus = grab', 'wantEpFocus = grab; mobPdNotify()')
+rep('private fun mobEpsChanged() { mobDetail?.epsChanged() }', 'private fun mobEpsChanged() { mobDetail?.epsChanged(); mobPdNotify() }')
+rep('if (tok != epToken || !lvFull) return@post', 'if (tok != epToken || !lvFull) return@post\n                ui.postDelayed({ mobPdNotify() }, 60)')
+
+MEM = r'''// ---------------------------------------------------------------- Update 14 : Mobile v2
+    private var mobBH = 0
+    private var mobFs = false
+    private var mobOut = false
+    private var mobHeroTouch = 0L
+    private var mobPlayRes = 0
+    private var mobCtrWas = false
+    private var mobToolN = -1
+    private lateinit var mobPD: FrameLayout
+    private lateinit var mobPdRv: RecyclerView
+    private lateinit var mobPdAd: MobPdAd
+    private lateinit var mobPdHead: LinearLayout
+    private lateinit var mobCtr: LinearLayout
+    private lateinit var mobTools: LinearLayout
+    private lateinit var mobFsBtn: ImageView
+    private lateinit var mobPlayBtn: ImageView
+    private lateinit var mobB10: ImageView
+    private lateinit var mobF10: ImageView
+    private var mobListBtn: ImageView? = null
+    private val mobToolPairs = ArrayList<Pair<ImageView, View>>()
+    private lateinit var pdTitle: TextView
+    private lateinit var pdSub: TextView
+    private lateinit var pdMeta: TextView
+    private lateinit var pdDesc: TextView
+    private lateinit var pdListBtn: LinearLayout
+    private lateinit var pdEpHead: TextView
+    private lateinit var pdChipsScroll: HorizontalScrollView
+    private lateinit var pdChipsRow: LinearLayout
+
+    private fun mobGl(url: String?, iv: ImageView, w: Int, h: Int) {
+        Glide.with(this).load(url).override(w, h).centerCrop().diskCacheStrategy(DiskCacheStrategy.ALL).into(iv)
+    }
+
+    private fun mobBanner(url: String?, iv: ImageView) { mobGl(url, iv, mobW, if (mobBH > 0) mobBH else mobW) }
+
+    // ---------------- hero: parallax image, fading text, dots follow the swipe
+    private fun mobParallax(r: RecyclerView) {
+        val w = r.width.toFloat()
+        if (w <= 0f) return
+        for (i in 0 until r.childCount) {
+            val c = r.getChildAt(i) as? FrameLayout ?: continue
+            val off = (c.left / w).coerceIn(-1f, 1f)
+            c.getChildAt(0)?.translationX = -off * w * 0.1f
+            val col = c.getChildAt(2)
+            if (col != null) { col.alpha = (1f - abs(off) * 1.7f).coerceIn(0f, 1f); col.translationX = off * w * 0.15f }
+        }
+    }
+
+    private fun mobHeroParallax(hrv: RecyclerView, dots: LinearLayout?, n: Int) {
+        val st = IntArray(1) { -1 }
+        hrv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(r: RecyclerView, s: Int) {
+                if (s == RecyclerView.SCROLL_STATE_DRAGGING) mobHeroTouch = SystemClock.uptimeMillis()
+            }
+            override fun onScrolled(r: RecyclerView, dx: Int, dy: Int) {
+                mobParallax(r)
+                val lm = r.layoutManager as? LinearLayoutManager ?: return
+                val w = r.width
+                if (w <= 0) return
+                var p = lm.findFirstVisibleItemPosition()
+                val c = lm.findViewByPosition(p)
+                if (c != null && abs(c.left) > w / 2) p += 1
+                if (p >= 0 && p != st[0] && dots != null) { st[0] = p; mobDots(dots, n, p) }
+            }
+        })
+        hrv.post { mobParallax(hrv) }
+    }
+
+    private fun mobEpSkel(): View {
+        val tw = (mobW * 0.4f).toInt()
+        val th = tw * 9 / 16
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.layoutParams = RecyclerView.LayoutParams(-1, -2)
+        row.setPadding(dp(16), dp(8), dp(16), dp(8))
+        row.addView(ShimmerView(this, dp(8).toFloat()), LinearLayout.LayoutParams(tw, th))
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.addView(ShimmerView(this, dp(4).toFloat()), LinearLayout.LayoutParams(dp(150), dp(14)))
+        col.addView(ShimmerView(this, dp(4).toFloat()), LinearLayout.LayoutParams(dp(90), dp(11)).apply { topMargin = dp(10) })
+        col.addView(ShimmerView(this, dp(4).toFloat()), LinearLayout.LayoutParams(dp(170), dp(11)).apply { topMargin = dp(8) })
+        row.addView(col, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(12) })
+        return row
+    }
+
+    // ---------------- orientation: portrait player on top + details below, rotate or button = fullscreen
+    override fun onConfigurationChanged(c: Configuration) {
+        super.onConfigurationChanged(c)
+        if (mobOn && mobBuilt && inPlayer) mobApplyPlayerLayout(c.orientation == Configuration.ORIENTATION_LANDSCAPE)
+    }
+
+    private fun mobApplyPlayerLayout(fs: Boolean) {
+        if (!::mobPD.isInitialized) return
+        mobFs = fs
+        val l = playerLayer.layoutParams as FrameLayout.LayoutParams
+        l.width = -1; l.height = if (fs) -1 else mobW * 9 / 16; l.gravity = Gravity.TOP
+        playerLayer.layoutParams = l
+        mobPD.visibility = if (fs) View.GONE else View.VISIBLE
+        if (::mobFsBtn.isInitialized) mobFsBtn.setImageResource(if (fs) R.drawable.ic_m_fs_off else R.drawable.ic_m_fs_on)
+        (nextCard.layoutParams as? FrameLayout.LayoutParams)?.let { n ->
+            n.bottomMargin = if (fs) u(190) else u(90); n.rightMargin = if (fs) u(56) else u(12)
+            nextCard.layoutParams = n
+        }
+        hideBars()
+    }
+
+    private fun mobSetFs(fs: Boolean) {
+        requestedOrientation = if (fs) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        mobApplyPlayerLayout(fs)
+        ui.postDelayed({ if (mobOn && inPlayer) requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR }, 2200)
+    }
+
+    // ---------------- modern controls
+    private fun mobGlass(res: Int, pad: Int, gold: Boolean, onClick: () -> Unit): ImageView {
+        val v = ImageView(this)
+        v.setImageResource(res)
+        v.setPadding(dp(pad), dp(pad), dp(pad), dp(pad))
+        v.scaleType = ImageView.ScaleType.FIT_CENTER
+        v.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.argb(if (gold) 150 else 105, 0, 0, 0))
+            setStroke(max(1, dp(if (gold) 2 else 1)), if (gold) Color.argb(230, 255, 193, 7) else Color.argb(60, 255, 255, 255))
+        }
+        v.isClickable = true
+        v.setOnTouchListener { vw, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) vw.animate().scaleX(0.86f).scaleY(0.86f).setDuration(80).start()
+            else if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) vw.animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+            false
+        }
+        v.setOnClickListener { onClick() }
+        return v
+    }
+
+    // sheets (audio / subtitles / quality / speed ...) are drawn for the wide player: go fullscreen first when portrait
+    private fun mobTool(k: Int) {
+        val go = {
+            when (k) {
+                2 -> openTrackSheet(2)
+                3 -> openTrackSheet(3)
+                0 -> openQuality()
+                1 -> openQV(1)
+                4 -> openPlayerEps()
+                5 -> openScore()
+                else -> openMoments()
+            }
+        }
+        if (!mobFs) { mobSetFs(true); ui.postDelayed({ if (inPlayer && panel == 0) go() }, 700) } else go()
+    }
+
+    private fun mobSkin() {
+        (pillSub.parent as? View)?.visibility = View.GONE
+        pPause.visibility = View.GONE
+        (pPrev.layoutParams as? FrameLayout.LayoutParams)?.let { it.bottomMargin = u(80); pPrev.layoutParams = it }
+        mobCtr = LinearLayout(this)
+        mobCtr.orientation = LinearLayout.HORIZONTAL; mobCtr.gravity = Gravity.CENTER_VERTICAL
+        mobB10 = mobGlass(R.drawable.ic_m_back10, 11, false) { mobSeekTap(false); schedHide() }
+        mobPlayBtn = mobGlass(R.drawable.ic_m_play, 20, true) { togglePause(); schedHide() }
+        mobF10 = mobGlass(R.drawable.ic_m_fwd10, 11, false) { mobSeekTap(true); schedHide() }
+        mobCtr.addView(mobB10, LinearLayout.LayoutParams(dp(54), dp(54)))
+        mobCtr.addView(mobPlayBtn, LinearLayout.LayoutParams(dp(76), dp(76)).apply { leftMargin = dp(28); rightMargin = dp(28) })
+        mobCtr.addView(mobF10, LinearLayout.LayoutParams(dp(54), dp(54)))
+        ctrl.addView(mobCtr, lp(-2, -2, Gravity.CENTER))
+        mobTools = LinearLayout(this)
+        mobTools.orientation = LinearLayout.HORIZONTAL
+        fun tool(res: Int, pill: View, k: Int) {
+            val b = mobGlass(res, 8, false) { schedHide(); mobTool(k) }
+            mobTools.addView(b, LinearLayout.LayoutParams(dp(38), dp(38)).apply { leftMargin = dp(8) })
+            mobToolPairs.add(Pair(b, pill))
+            if (k == 4) mobListBtn = b
+        }
+        tool(R.drawable.ic_m_audio, pillAudio, 2)
+        tool(R.drawable.ic_m_cc, pillSub, 3)
+        tool(R.drawable.ic_m_quality, pillSet, 0)
+        tool(R.drawable.ic_m_speed, pillSpeed, 1)
+        tool(R.drawable.ic_m_list, pillEps, 4)
+        tool(R.drawable.ic_score, pillScore, 5)
+        tool(R.drawable.ic_moments, pillMoments, 6)
+        ctrl.addView(mobTools, lp(-2, -2, Gravity.TOP or Gravity.END).apply { topMargin = u(26); rightMargin = u(20) })
+        mobFsBtn = mobGlass(R.drawable.ic_m_fs_on, 8, false) { mobSetFs(!mobFs); schedHide() }
+        (pTime.parent as? LinearLayout)?.addView(mobFsBtn, LinearLayout.LayoutParams(dp(38), dp(38)).apply { leftMargin = dp(8) })
+    }
+
+    private fun mobSyncModern(p: ExoPlayer?, show: Boolean) {
+        if (p == null || !::mobCtr.isInitialized) return
+        val pv = if (pSpin.visibility == View.VISIBLE) View.INVISIBLE else View.VISIBLE
+        if (mobPlayBtn.visibility != pv) mobPlayBtn.visibility = pv
+        val res = if (p.playbackState == Player.STATE_ENDED || !p.playWhenReady) R.drawable.ic_m_play else R.drawable.ic_m_pause
+        if (res != mobPlayRes) {
+            val first = mobPlayRes == 0
+            mobPlayRes = res
+            if (first) mobPlayBtn.setImageResource(res)
+            else {
+                mobPlayBtn.animate().cancel()
+                mobPlayBtn.animate().scaleX(0.7f).scaleY(0.7f).alpha(0.4f).setDuration(80).withEndAction {
+                    mobPlayBtn.setImageResource(res)
+                    mobPlayBtn.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(240)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(2f)).start()
+                }.start()
+            }
+        }
+        val sk = p.isCurrentMediaItemSeekable
+        val sv = if (sk) View.VISIBLE else View.GONE
+        if (mobB10.visibility != sv) { mobB10.visibility = sv; mobF10.visibility = sv }
+        if (ctrlVisible != mobCtrWas) {
+            mobCtrWas = ctrlVisible
+            if (ctrlVisible) {
+                mobCtr.scaleX = 0.85f; mobCtr.scaleY = 0.85f
+                mobCtr.animate().scaleX(1f).scaleY(1f).setDuration(240).setInterpolator(DecelerateInterpolator()).start()
+            }
+        }
+        var n = 0
+        for ((b, pl) in mobToolPairs) {
+            var vis = pl.visibility == View.VISIBLE
+            if (b === mobListBtn && !mobFs) vis = false
+            val want = if (vis) View.VISIBLE else View.GONE
+            if (b.visibility != want) b.visibility = want
+            if (vis) n++
+        }
+        if (n != mobToolN) {
+            mobToolN = n
+            (pTitle.parent as? LinearLayout)?.let { tc ->
+                (tc.layoutParams as? LinearLayout.LayoutParams)?.let { l -> l.rightMargin = n * dp(46) + dp(14); tc.layoutParams = l }
+            }
+        }
+    }
+
+    // ---------------- portrait details panel (title, episode, description, actions, episode list with endless loading)
+    private fun mobPdPost() { if (mobOn && ::mobPD.isInitialized) ui.post { mobPdUpdate() } }
+
+    private fun mobPdChips() {
+        pdChipsRow.removeAllViews()
+        if (seasons.size <= 1) { pdChipsScroll.visibility = View.GONE; return }
+        pdChipsScroll.visibility = View.VISIBLE
+        for (i in seasons.indices) {
+            val sel = i == curSeason
+            val c = mtx(seasons[i].title, 13f, if (sel) Color.BLACK else Color.WHITE, true)
+            c.setPadding(dp(14), dp(7), dp(14), dp(7)); c.isClickable = true
+            c.background = GradientDrawable().apply {
+                cornerRadius = dp(30).toFloat()
+                if (sel) setColor(Color.WHITE) else { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), Color.argb(150, 255, 255, 255)) }
+            }
+            c.setOnClickListener { selectSeason(i, false) }
+            pdChipsRow.addView(c, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        }
+    }
+
+    private fun mobPdNotify() {
+        if (!::mobPD.isInitialized) return
+        mobPdChips()
+        pdEpHead.text = if (lvFull) "Catchup" else "Episodes"
+        pdEpHead.visibility = if (mobPdAd.listOn()) View.VISIBLE else View.GONE
+        mobPdAd.notifyDataSetChanged()
+    }
+
+    private fun mobPdListUi() {
+        val d = detailItem
+        pdListBtn.visibility = if (d != null && !lvFull) View.VISIBLE else View.GONE
+        val on = d != null && Store.inList(d.cid)
+        mobBtnIcon(pdListBtn)?.setImageResource(if (on) R.drawable.ic_check else R.drawable.ic_add)
+        mobBtnLabel(pdListBtn)?.text = if (on) "In My List" else "My List"
+    }
+
+    private fun mobPdUpdate() {
+        if (!::mobPD.isInitialized) return
+        val ep = curPlayEp ?: return
+        if (lvFull) {
+            val cat = liveStartS > 0L
+            pdTitle.text = if (cat) ep.title else showTitle
+            pdSub.text = (lvCur?.name ?: "") + (if (cat) " \u2022 Catchup" else " \u2022 LIVE")
+            pdMeta.text = if (cat) fmtTimeIst(ep.air) + " - " + fmtTimeIst(ep.air + ep.dur * 1000L) else ""
+        } else {
+            pdTitle.text = showTitle
+            val pre = ((if (curPlaySeason > 0) "S$curPlaySeason " else "") + (if (ep.num > 0) "E${ep.num}" else "")).trim()
+            pdSub.text = listOf(pre, ep.title).filter { it.isNotBlank() }.joinToString(" \u2022 ")
+            val bits = ArrayList<String>()
+            fmtDate(ep.air, true).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
+            fmtDur(ep.dur).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
+            pdMeta.text = bits.joinToString(" \u2022 ")
+        }
+        pdSub.visibility = if (pdSub.text.isNullOrBlank()) View.GONE else View.VISIBLE
+        pdMeta.visibility = if (pdMeta.text.isNullOrBlank()) View.GONE else View.VISIBLE
+        val d = if (ep.desc.isNotBlank()) ep.desc else (detailItem?.desc ?: "")
+        pdDesc.text = d
+        pdDesc.visibility = if (d.isBlank()) View.GONE else View.VISIBLE
+        mobPdListUi()
+        mobPdNotify()
+    }
+
+    private fun mobBuildPd() {
+        val ctx = this
+        mobPD = FrameLayout(ctx)
+        mobPD.setBackgroundColor(mBg); mobPD.visibility = View.GONE; mobPD.isClickable = true
+        val head = LinearLayout(ctx)
+        head.orientation = LinearLayout.VERTICAL
+        head.layoutParams = RecyclerView.LayoutParams(-1, -2)
+        head.setPadding(dp(16), dp(14), dp(16), dp(4))
+        pdTitle = mtx("", 19f, Color.WHITE, true); pdTitle.maxLines = 2; pdTitle.ellipsize = TextUtils.TruncateAt.END
+        pdSub = mtx("", 13.5f, mGold, true); pdSub.maxLines = 2; pdSub.ellipsize = TextUtils.TruncateAt.END
+        pdMeta = mtx("", 12.5f, Color.parseColor("#9AA0B4"))
+        pdDesc = mtx("", 13.5f, Color.parseColor("#C9CEDD")); pdDesc.maxLines = 3; pdDesc.ellipsize = TextUtils.TruncateAt.END
+        pdDesc.setOnClickListener { pdDesc.maxLines = if (pdDesc.maxLines == 3) 20 else 3 }
+        pdListBtn = mobBtn("My List", R.drawable.ic_add, false) {
+            val d = detailItem
+            if (d != null) { val now = Store.toggle(d); mobPdListUi(); toast(if (now) "Added to My List" else "Removed from My List") }
+        }
+        val fsBtn = mobBtn("Full screen", R.drawable.ic_m_fs_on, false) { mobSetFs(true) }
+        val acts = LinearLayout(ctx)
+        acts.orientation = LinearLayout.HORIZONTAL
+        acts.addView(pdListBtn, LinearLayout.LayoutParams(-2, -2))
+        acts.addView(fsBtn, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
+        pdEpHead = mtx("Episodes", 17f, Color.WHITE, true)
+        pdChipsRow = LinearLayout(ctx); pdChipsRow.orientation = LinearLayout.HORIZONTAL
+        pdChipsScroll = HorizontalScrollView(ctx)
+        pdChipsScroll.isHorizontalScrollBarEnabled = false
+        pdChipsScroll.addView(pdChipsRow)
+        pdChipsScroll.visibility = View.GONE
+        head.addView(pdTitle, LinearLayout.LayoutParams(-1, -2))
+        head.addView(pdSub, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        head.addView(pdMeta, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+        head.addView(acts, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
+        head.addView(pdDesc, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        head.addView(pdEpHead, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(18) })
+        head.addView(pdChipsScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        mobPdHead = head
+        mobPdAd = MobPdAd(head)
+        mobPdRv = RecyclerView(ctx)
+        mobPdRv.layoutManager = LinearLayoutManager(ctx)
+        mobPdRv.adapter = mobPdAd
+        mobPdRv.overScrollMode = View.OVER_SCROLL_NEVER
+        mobPdRv.itemAnimator = null
+        mobPdRv.setItemViewCacheSize(6)
+        mobPdRv.clipToPadding = false; mobPdRv.setPadding(0, 0, 0, dp(24))
+        mobPdRv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(r: RecyclerView, dx: Int, dy: Int) {
+                if (dy <= 0 || lvFull || !epHasMore || epLoading || eps.isEmpty() || curSeason !in seasons.indices) return
+                val lm = r.layoutManager as LinearLayoutManager
+                if (lm.findLastVisibleItemPosition() >= mobPdAd.itemCount - 4) loadEpisodes()
+            }
+        })
+        mobPD.addView(mobPdRv, lp(-1, -1))
+        root.addView(mobPD, lp(-1, -1).apply { topMargin = mobW * 9 / 16 })
+    }
+
+    inner class MobPdAd(private val head: View) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        private val tw = (mobW * 0.4f).toInt()
+        private val th = tw * 9 / 16
+        fun listOn(): Boolean = !curNoEps && !momentsMode && (eps.isNotEmpty() || epLoading || seasons.isNotEmpty())
+        private fun skelN(): Int {
+            if (!listOn()) return 0
+            if (eps.isEmpty()) return if (epLoading) 3 else 0
+            return if (epHasMore && !lvFull) 2 else 0
+        }
+        override fun getItemCount() = 1 + (if (listOn()) eps.size else 0) + skelN()
+        override fun getItemViewType(position: Int) = if (position == 0) 0 else if (position > eps.size) 2 else 1
+
+        override fun onCreateViewHolder(p: ViewGroup, t: Int): RecyclerView.ViewHolder {
+            if (t == 0) return object : RecyclerView.ViewHolder(head) { }
+            if (t == 2) return object : RecyclerView.ViewHolder(mobEpSkel()) { }
+            val ctx = this@MainActivity
+            val row = LinearLayout(ctx)
+            row.orientation = LinearLayout.HORIZONTAL; row.gravity = Gravity.CENTER_VERTICAL
+            row.layoutParams = RecyclerView.LayoutParams(-1, -2)
+            row.setPadding(dp(16), dp(8), dp(16), dp(8)); row.isClickable = true
+            val fr = FrameLayout(ctx)
+            val iv = ImageView(ctx)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP; iv.setBackgroundColor(Color.rgb(26, 28, 42))
+            mobRound(iv, dp(8))
+            fr.addView(iv, lp(-1, -1))
+            val bar = BarView(ctx)
+            bar.visibility = View.GONE
+            fr.addView(bar, lp(-1, dp(3), Gravity.BOTTOM).apply { setMargins(dp(8), 0, dp(8), dp(6)) })
+            row.addView(fr, LinearLayout.LayoutParams(tw, th))
+            val col = LinearLayout(ctx)
+            col.orientation = LinearLayout.VERTICAL
+            val t1 = mtx("", 14f, Color.WHITE, true); t1.maxLines = 2; t1.ellipsize = TextUtils.TruncateAt.END
+            val t2 = mtx("", 12f, Color.parseColor("#C8C8D0")); t2.maxLines = 1
+            val t3 = mtx("", 12f, Color.parseColor("#9AA0B4")); t3.maxLines = 2; t3.ellipsize = TextUtils.TruncateAt.END
+            col.addView(t1, LinearLayout.LayoutParams(-1, -2))
+            col.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+            col.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+            row.addView(col, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(12) })
+            return MobEpVH(row, iv, bar, t1, t2, t3)
+        }
+
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, pos: Int) {
+            if (pos == 0 || pos > eps.size || h !is MobEpVH) return
+            val ep = eps[pos - 1]
+            cardReq(img(ep.thumb, W_EP), tw, th).into(h.iv)
+            val playing = ep.id == curPlayEp?.id
+            h.t1.text = (if (ep.num > 0) "${ep.num}. " else "") + ep.title
+            val bits = ArrayList<String>()
+            if (lvFull) bits.add(fmtTimeIst(ep.air))
+            else fmtDate(ep.air, true).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
+            fmtDur(ep.dur).takeIf { it.isNotEmpty() }?.let { bits.add(it) }
+            h.t2.text = if (playing) "Now playing" else bits.joinToString(" \u2022 ")
+            h.t2.setTextColor(if (playing) mGold else Color.parseColor("#C8C8D0"))
+            h.t3.text = ep.desc
+            h.row.setOnClickListener { playEpisode(ep) }
+        }
+    }
+
+    private fun isHomeTab() = homeTabs.containsKey(tab)'''
+rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM)
+
+P.write_text(t, encoding='utf-8')
+print('update 14 applied')
