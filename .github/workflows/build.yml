@@ -8139,6 +8139,35 @@ jobs:
           PYEOF
       - name: Apply update 13 (Mobile UI)
         run: python3 patch13.txt
+      - name: Apply update 13b (fix nullable RecyclerView in mobile row adapter)
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import pathlib
+          P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+          t = P.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global t
+              n = t.count(old)
+              if n != 1:
+                  print('WARN (%d matches): %s' % (n, old[:80]))
+                  return
+              t = t.replace(old, new)
+
+          rep('if (h.rv!!.adapter !== cad) h.rv.adapter = cad',
+              'h.rv?.let { r1 -> if (r1.adapter !== cad) r1.adapter = cad }')
+          rep('h.title!!.text = row.title', 'h.title?.text = row.title')
+          rep('h.title.visibility = if (row.title.isBlank()) View.GONE else View.VISIBLE',
+              'h.title?.visibility = if (row.title.isBlank()) View.GONE else View.VISIBLE')
+          rep('mobDots(h.dots!!, row.items.size, 0)',
+              'h.dots?.let { d0 -> mobDots(d0, row.items.size, 0) }')
+          rep('if (p >= 0) mobDots(h.dots, row.items.size, p)',
+              'if (p >= 0) h.dots?.let { d1 -> mobDots(d1, row.items.size, p) }')
+
+          P.write_text(t, encoding='utf-8')
+          print('update 13b applied')
+          PYEOF
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload APK
