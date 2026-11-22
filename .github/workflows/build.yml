@@ -8170,6 +8170,8 @@ jobs:
           PYEOF
       - name: Apply update 14 (Mobile v2)
         run: python3 patch14.txt
+       - name: Apply update 15 (Mobile v3)
+        run: python3 patch15.txt
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload APK
