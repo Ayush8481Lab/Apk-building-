@@ -1,0 +1,546 @@
+import sys, pathlib
+
+M = pathlib.Path('app/src/main/AndroidManifest.xml')
+mt = M.read_text(encoding='utf-8')
+mt = mt.replace(
+    'android:launchMode="singleTask"',
+    'android:launchMode="singleTask" android:supportsPictureInPicture="true"'
+)
+mt = mt.replace(
+    '|uiMode"',
+    '|uiMode|smallestScreenSize|screenLayout|density"'
+)
+M.write_text(mt, encoding='utf-8')
+
+D = pathlib.Path('app/src/main/res/drawable')
+D.mkdir(parents=True, exist_ok=True)
+(D / 'ic_chev.xml').write_text(
+    '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="2.2" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M9,5.5L15.5,12L9,18.5"/></vector>\n',
+    encoding='utf-8'
+)
+(D / 'ic_vol_off.xml').write_text(
+    '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M4,10v4h3l4.5,3.5V6.5L7,10zM15.5,9.5l5,5M20.5,9.5l-5,5"/></vector>\n',
+    encoding='utf-8'
+)
+
+P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+t = P.read_text(encoding='utf-8')
+
+def rep(old, new, must=False):
+    global t
+    n = t.count(old)
+    if n != 1:
+        if must:
+            sys.exit('PATCH FAILED (%d): %s' % (n, old[:110]))
+        print('WARN (%d): %s' % (n, old[:90]))
+        return
+    t = t.replace(old, new)
+
+# ---------- settings: remember trailer mute
+rep('@Volatile var uiMode = 0', '@Volatile var uiMode = 0\n    @Volatile var trailerMuted = true')
+rep('uiMode = sp().getInt("ui_mode", 0)', 'uiMode = sp().getInt("ui_mode", 0); trailerMuted = sp().getBoolean("tmute", true)')
+rep('.putInt("ui_mode", uiMode).apply()', '.putInt("ui_mode", uiMode).putBoolean("tmute", trailerMuted).apply()')
+
+# ---------- player controls: no skip buttons, plain big play / pause (no circle), dim layer
+rep('mcPlay = mobGlass(R.drawable.ic_m_play, 16, true) { togglePause(); schedHide() }',
+    'mcPlay = mobPlain(R.drawable.ic_m_play) { togglePause(); schedHide() }')
+rep('center.addView(mcF10, LinearLayout.LayoutParams(dp(44), dp(44)))',
+    'center.addView(mcF10, LinearLayout.LayoutParams(dp(44), dp(44)))\n        mcB10.visibility = View.GONE; mcF10.visibility = View.GONE')
+rep('if (mcB10.visibility != sk) { mcB10.visibility = sk; mcF10.visibility = sk }',
+    'mcB10.visibility = View.GONE; mcF10.visibility = View.GONE')
+rep('sz(mcPlay, if (fs) 72 else 54); sz(mcB10, if (fs) 50 else 40); sz(mcF10, if (fs) 50 else 40)',
+    'sz(mcPlay, if (fs) 96 else 78); mcPlay.setPadding(0, 0, 0, 0)')
+rep('mctl = FrameLayout(ctx)', 'mctl = FrameLayout(ctx); mctl.setBackgroundColor(Color.argb(80, 0, 0, 0))')
+rep('playerLayer.addView(mctl, lp(-1, -1))', 'playerLayer.addView(mctl, lp(-1, -1)); mobBuildExtras()')
+rep('if (!inPlayer || !::mctl.isInitialized) return', 'if (!inPlayer || !::mctl.isInitialized || mobPip) return')
+
+# ---------- double tap seek animation: "+10 >>" / "<< -10"
+rep(r'v.text = if (fwd) "\u25B6\u25B6  ${gAcc}s" else "${gAcc}s  \u25C0\u25C0"',
+    r'v.text = if (fwd) "+${gAcc}  \u00BB\u00BB" else "\u00AB\u00AB  -${gAcc}"')
+rep('v.visibility = View.VISIBLE; v.alpha = 1f',
+    'v.visibility = View.VISIBLE; v.alpha = 1f; v.scaleX = 0.85f; v.scaleY = 0.85f; v.animate().scaleX(1f).scaleY(1f).setDuration(160).start()')
+
+# ---------- hold = 2x : small pill stays until release
+rep('setSpeed(2f); mobHud(R.drawable.ic_speed, "2x speed")', 'setSpeed(2f); mobHoldShow(true)')
+rep('} else if (gHeld) { gHeld = false; setSpeed(gSavedSpeed) }', '} else if (gHeld) { gHeld = false; setSpeed(gSavedSpeed); mobHoldShow(false) }')
+
+# ---------- settings sheet: ">" chevron (and "<" for back)
+rep('ch.setImageResource(R.drawable.ic_back); ch.rotation = 180f;', 'ch.setImageResource(R.drawable.ic_chev);')
+rep('val b = ImageView(this); b.setImageResource(R.drawable.ic_back);', 'val b = ImageView(this); b.setImageResource(R.drawable.ic_chev); b.rotation = 180f;')
+
+# ---------- portrait panel: no extra My List / Full screen buttons
+rep('head.addView(acts, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })', 'acts.visibility = View.GONE')
+
+# ---------- stale episodes of the previous show in the portrait panel
+rep('curSeason = -1; epToken++; homeShowId = ""', 'curSeason = -1; epToken++; homeShowId = ""; mobPdNotify()')
+rep('homeShowId = par.first', 'homeShowId = par.first; mobPdNotify()')
+rep('private fun mobEnterPlayer() {', r'''private fun mobEnterPlayer() {
+        mobTrailerStop(); mobVW = 0; mobVH = 0; mobZoom = false
+        if (mobOn && detailItem == null && !lvFull && !liveMode) {
+            seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+            sCol.removeAllViews(); chips.clear(); sScroll.visibility = View.GONE
+            curSeason = -1; epToken++; homeShowId = ""
+        }''')
+rep('private fun mobExitPlayer() {', 'private fun mobExitPlayer() {\n        mobPipOff(); mobHoldShow(false)')
+
+# ---------- video size, fit / zoom, cutout, insets
+rep('override fun onCues(cueGroup: CueGroup) {',
+    'override fun onVideoSizeChanged(vs: VideoSize) { mobVideoSize(vs) }\n        override fun onCues(cueGroup: CueGroup) {')
+rep('mobFs = fs; mobCtlLayout(fs)', 'mobFs = fs; mobCtlLayout(fs); mobFsExtras(fs)')
+rep('mcGest = View(ctx)',
+    'mcGest = View(ctx); mcScale = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() { override fun onScaleBegin(d: ScaleGestureDetector): Boolean { mcPinchAcc = 1f; return true }; override fun onScale(d: ScaleGestureDetector): Boolean { mcPinchAcc *= d.scaleFactor; return true }; override fun onScaleEnd(d: ScaleGestureDetector) { if (mcPinchAcc > 1.08f) mobSetZoom(true) else if (mcPinchAcc < 0.92f) mobSetZoom(false) } })')
+rep('private fun mobGestTouch(ev: MotionEvent): Boolean {', 'private fun mobGestTouch(ev: MotionEvent): Boolean {\n        if (mobPinch(ev)) return true')
+
+# ---------- PiP
+rep('mobSyncCenter(p); mobUpdateCtl()', 'mobSyncCenter(p); mobUpdateCtl(); mobPipSync(p)')
+rep('mainPlayer?.pause(); lvStopPreview(true) }', 'if (!(mobOn && mobPip)) mainPlayer?.pause(); lvStopPreview(true); mobTrailerStop() }')
+rep('lvPlayer?.release(); lvPlayer = null', 'lvPlayer?.release(); lvPlayer = null; mobTrailerRelease()')
+
+# ---------- trailer on mobile detail
+rep('} else { trailerPlayUrl = null; trailerEp = null; trailerBtn.visibility = View.GONE }',
+    '} else { trailerPlayUrl = null; trailerEp = null; trailerBtn.visibility = View.GONE; mobTrailerStop() }')
+rep('trailerBtn.visibility = View.VISIBLE', 'trailerBtn.visibility = View.VISIBLE; mobTrailerStart(this, tUrl)')
+rep('mobDetail = null; mobDetTok++', 'mobDetail = null; mobDetTok++; mobTrailerStop()')
+rep('mobDetail?.refreshAct()', 'mobDetail?.refreshAct(); mobTrailerResume()')
+
+# ---------- spotlight: tiny side space, no dots, loop, centered snap, nested scroll fix
+rep('private fun mobHeroItemW(): Int = mobW - dp(44)', 'private fun mobHeroItemW(): Int = mobW - dp(26)')
+rep('fun heroH(): Int = mobHeroCardH() + dp(58) + dp(28)', 'fun heroH(): Int = mobHeroCardH() + dp(58) + dp(14)')
+rep('val hrv = RecyclerView(ctx); hrv.clipToPadding = false; hrv.setPadding(dp(16), dp(58), dp(16), dp(28))',
+    'val hrv = MobNestRv(ctx); hrv.clipToPadding = false; hrv.setPadding(dp(10), dp(58), dp(10), dp(14))', True)
+rep('val rv = RecyclerView(ctx)', 'val rv = MobNestRv(ctx)')
+rep('val had = hrv.adapter as? MobHero2Ad', 'val had = hrv.adapter as? MobHero3Ad')
+rep('hrv.adapter = MobHero2Ad(row)', 'hrv.adapter = MobHero3Ad(row); mobHeroStart(hrv, row.items.size)')
+rep('mobHeroParallax(hrv, h.dots, row.items.size)', 'mobHeroParallax(hrv, h.dots, row.items.size); mobHeroSettle(hrv)')
+rep('(c.width + dp(12).toFloat())', '(c.width + dp(6).toFloat())')
+rep('private fun mobDots(dl: LinearLayout, n: Int, sel: Int) {', 'private fun mobDots(dl: LinearLayout, n: Int, sel: Int) {\n        if (n >= 0) { dl.visibility = View.GONE; return }')
+rep('val cur = lm.findFirstVisibleItemPosition()', 'var cur = lm.findFirstCompletelyVisibleItemPosition(); if (cur < 0) cur = lm.findFirstVisibleItemPosition()')
+
+TOP = r'''// ---------------- Update 16 : horizontal list that never lets the vertical page steal a sideways swipe ----------------
+class MobNestRv(c: Context) : RecyclerView(c) {
+    private var x0 = 0f
+    private var y0 = 0f
+    private val slop = ViewConfiguration.get(c).scaledTouchSlop
+    override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { x0 = e.x; y0 = e.y; parent?.requestDisallowInterceptTouchEvent(true) }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = abs(e.x - x0)
+                val dy = abs(e.y - y0)
+                if (dy > slop && dy > dx * 1.7f) parent?.requestDisallowInterceptTouchEvent(false)
+                else if (dx > slop) parent?.requestDisallowInterceptTouchEvent(true)
+            }
+        }
+        return super.dispatchTouchEvent(e)
+    }
+}
+
+object Net {'''
+rep('object Net {', TOP, True)
+
+MEM = r'''// ---------------------------------------------------------------- Update 16 : Mobile v4
+    private var mobPip = false
+    private var mobPipArmed = false
+    private var mobVW = 0
+    private var mobVH = 0
+    private var mobVPar = 1f
+    private var mobZoom = false
+    private var mcPinchAcc = 1f
+    private var mcScale: ScaleGestureDetector? = null
+    private lateinit var mobHoldTv: TextView
+    private var mobTPlayer: ExoPlayer? = null
+    private var mobTView: TextureView? = null
+    private var mobTIcon: ImageView? = null
+    private var mobTBanner: ImageView? = null
+    private var mobTUrl: String? = null
+    private var mobTRun: Runnable? = null
+
+    private fun mobPlain(res: Int, onClick: () -> Unit): ImageView {
+        val v = ImageView(this)
+        v.setImageResource(res)
+        v.scaleType = ImageView.ScaleType.FIT_CENTER
+        v.setPadding(0, 0, 0, 0)
+        v.isClickable = true
+        v.setOnTouchListener { vw, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) vw.animate().scaleX(0.88f).scaleY(0.88f).setDuration(80).start()
+            else if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) vw.animate().scaleX(1f).scaleY(1f).setDuration(150).start()
+            false
+        }
+        v.setOnClickListener { onClick() }
+        return v
+    }
+
+    private fun mobBuildExtras() {
+        val hp = mtx("2x  \u25B6\u25B6", 13f, Color.WHITE, true)
+        hp.setPadding(dp(14), dp(6), dp(14), dp(6)); hp.visibility = View.GONE
+        hp.background = GradientDrawable().apply { cornerRadius = dp(20).toFloat(); setColor(Color.argb(175, 0, 0, 0)) }
+        playerLayer.addView(hp, lp(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(20) })
+        mobHoldTv = hp
+        playerLayer.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> mobFitSurface() }
+    }
+
+    private fun mobHoldShow(on: Boolean) {
+        if (!::mobHoldTv.isInitialized) return
+        if (on) {
+            if (ctrlVisible) hideControls()
+            mobHoldTv.visibility = View.VISIBLE; mobHoldTv.alpha = 0f
+            mobHoldTv.animate().alpha(1f).setDuration(120).start()
+        } else if (mobHoldTv.visibility == View.VISIBLE) {
+            mobHoldTv.animate().alpha(0f).setDuration(150).withEndAction { mobHoldTv.visibility = View.GONE }.start()
+        }
+    }
+
+    // ---------------- video fit / zoom (pinch like YouTube) + camera cutout
+    private fun mobVideoSize(vs: VideoSize) {
+        mobVW = vs.width; mobVH = vs.height
+        mobVPar = if (vs.pixelWidthHeightRatio > 0f) vs.pixelWidthHeightRatio else 1f
+        if (mobOn && mobBuilt) mobFitSurface()
+    }
+
+    private fun mobFitSurface() {
+        if (!mobOn || !mobBuilt) return
+        val cw = playerLayer.width
+        val ch = playerLayer.height
+        if (cw <= 0 || ch <= 0) return
+        var w = cw
+        var h = ch
+        if (mobVW > 0 && mobVH > 0) {
+            val ar = mobVW * mobVPar / mobVH
+            val wide = cw.toFloat() / ch > ar
+            val fw = if (wide) (ch * ar).toInt() else cw
+            val fh = if (wide) ch else (cw / ar).toInt()
+            if (mobZoom && mobFs) {
+                val s = max(cw.toFloat() / max(1, fw), ch.toFloat() / max(1, fh))
+                w = (fw * s).toInt(); h = (fh * s).toInt()
+            } else { w = fw; h = fh }
+        }
+        val l = pSurface.layoutParams as FrameLayout.LayoutParams
+        if (l.width != w || l.height != h || l.gravity != Gravity.CENTER) {
+            l.width = w; l.height = h; l.gravity = Gravity.CENTER
+            pSurface.layoutParams = l
+        }
+    }
+
+    private fun mobSetZoom(z: Boolean) {
+        mobZoom = z
+        if (z && !mobFs) mobSetFs(true) else mobFitSurface()
+        mobHud(R.drawable.ic_m_fs_on, if (z) "Zoomed to fill" else "Original")
+    }
+
+    private fun mobPinch(ev: MotionEvent): Boolean {
+        mcScale?.onTouchEvent(ev)
+        val a = ev.actionMasked
+        if (a == MotionEvent.ACTION_DOWN) { if (gMode == 7) gMode = 0; return false }
+        if (ev.pointerCount > 1 || mcScale?.isInProgress == true) {
+            ui.removeCallbacks(gLongRun); ui.removeCallbacks(gTapRun)
+            if (gHeld) mobHoldSpeed(false)
+            gMode = 7
+            return true
+        }
+        if (gMode == 7) { if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) gMode = 0; return true }
+        return false
+    }
+
+    // landscape: the window extends into the camera cutout, controls stay inside the safe area
+    private fun mobFsExtras(fs: Boolean) {
+        if (!fs) mobZoom = false
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                val a = window.attributes
+                a.layoutInDisplayCutoutMode = if (fs) {
+                    if (android.os.Build.VERSION.SDK_INT >= 30) WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                } else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                window.attributes = a
+            }
+        } catch (e: Exception) { }
+        if (mobPip && ::mobPD.isInitialized) {
+            val l = playerLayer.layoutParams; l.height = -1; playerLayer.layoutParams = l
+            mobPD.visibility = View.GONE
+        }
+        mobFitSurface()
+        ui.postDelayed({ mobInsets(); mobFitSurface() }, 150)
+        ui.postDelayed({ mobInsets(); mobFitSurface() }, 550)
+    }
+
+    private fun mobInsets() {
+        if (!mobOn || !::mctl.isInitialized) return
+        var l = 0
+        var r = 0
+        if (mobFs && android.os.Build.VERSION.SDK_INT >= 28) {
+            try {
+                val c = window.decorView.rootWindowInsets?.displayCutout
+                if (c != null) { l = c.safeInsetLeft; r = c.safeInsetRight }
+            } catch (e: Exception) { }
+        }
+        (mctl.getChildAt(2) as? LinearLayout)?.setPadding(dp(6) + l, dp(6), dp(6) + r, 0)
+        (mctl.getChildAt(4) as? LinearLayout)?.setPadding(dp(10) + l, 0, dp(6) + r, dp(4))
+    }
+
+    // ---------------- picture in picture (auto while playing)
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (android.os.Build.VERSION.SDK_INT in 26..30) mobTryPip()
+    }
+
+    private fun mobTryPip() {
+        if (!mobOn || !mobBuilt || !inPlayer) return
+        val p = mainPlayer ?: return
+        if (!p.playWhenReady) return
+        try {
+            enterPictureInPictureMode(android.app.PictureInPictureParams.Builder().setAspectRatio(android.util.Rational(16, 9)).build())
+        } catch (e: Exception) { }
+    }
+
+    private fun mobPipSync(p: ExoPlayer?) {
+        if (!mobOn || android.os.Build.VERSION.SDK_INT < 31 || !inPlayer) return
+        val want = p != null && p.playWhenReady && p.playbackState != Player.STATE_ENDED
+        if (want == mobPipArmed) return
+        mobPipArmed = want
+        try {
+            setPictureInPictureParams(android.app.PictureInPictureParams.Builder()
+                .setAspectRatio(android.util.Rational(16, 9)).setAutoEnterEnabled(want).build())
+        } catch (e: Exception) { }
+    }
+
+    private fun mobPipOff() {
+        if (android.os.Build.VERSION.SDK_INT >= 31 && mobPipArmed) {
+            try {
+                setPictureInPictureParams(android.app.PictureInPictureParams.Builder()
+                    .setAspectRatio(android.util.Rational(16, 9)).setAutoEnterEnabled(false).build())
+            } catch (e: Exception) { }
+        }
+        mobPipArmed = false
+    }
+
+    override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(inPip, newConfig)
+        if (!mobOn || !mobBuilt) return
+        mobPip = inPip
+        if (inPip) {
+            mcSheet?.dismiss()
+            if (::mctl.isInitialized) mctl.visibility = View.GONE
+            if (::mobPD.isInitialized) mobPD.visibility = View.GONE
+            val l = playerLayer.layoutParams; l.height = -1; playerLayer.layoutParams = l
+        } else if (inPlayer) {
+            mobApplyPlayerLayout(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+            showControls()
+        }
+    }
+
+    // ---------------- trailer on the detail banner (autoplay + remembered mute)
+    override fun onStart() { super.onStart(); mobTrailerResume() }
+
+    private fun mobTrailerClear() {
+        mobTRun?.let { ui.removeCallbacks(it) }; mobTRun = null
+        try { mobTPlayer?.let { it.stop(); it.clearMediaItems() } } catch (e: Exception) { }
+        mobTView?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        mobTIcon?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        mobTView = null; mobTIcon = null
+        mobTBanner?.alpha = 1f
+    }
+
+    private fun mobTrailerStop() {
+        mobTRun?.let { ui.removeCallbacks(it) }; mobTRun = null
+        try { mobTPlayer?.let { it.stop(); it.clearMediaItems() } } catch (e: Exception) { }
+        mobTView?.alpha = 0f
+        mobTBanner?.alpha = 1f
+        mobTIcon?.visibility = View.GONE
+    }
+
+    private fun mobTrailerRelease() {
+        mobTRun?.let { ui.removeCallbacks(it) }; mobTRun = null
+        try { mobTPlayer?.release() } catch (e: Exception) { }
+        mobTPlayer = null
+    }
+
+    private fun mobTrailerVol() {
+        val p = mobTPlayer ?: return
+        val m = AppSettings.trailerMuted
+        p.volume = if (m) 0f else 1f
+        p.setAudioAttributes(AudioAttributes.DEFAULT, !m)
+        mobTIcon?.setImageResource(if (m) R.drawable.ic_vol_off else R.drawable.ic_m_audio)
+    }
+
+    private fun mobTrailerStart(d: MobDetail, url: String) {
+        mobTUrl = url
+        mobTrailerClear()
+        if (!AppSettings.autoplay || !mobOn) return
+        val bf = d.banner.parent as? FrameLayout ?: return
+        val tv = TextureView(this)
+        tv.alpha = 0f
+        bf.addView(tv, 1, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        val ic = ImageView(this)
+        ic.setImageResource(if (AppSettings.trailerMuted) R.drawable.ic_vol_off else R.drawable.ic_m_audio)
+        ic.setPadding(dp(9), dp(9), dp(9), dp(9)); ic.isClickable = true; ic.visibility = View.GONE
+        ic.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL; setColor(Color.argb(150, 0, 0, 0)); setStroke(max(1, dp(1)), Color.argb(90, 255, 255, 255))
+        }
+        ic.setOnClickListener {
+            AppSettings.trailerMuted = !AppSettings.trailerMuted
+            AppSettings.save()
+            mobTrailerVol()
+        }
+        bf.addView(ic, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(16), dp(16)) })
+        mobTView = tv; mobTIcon = ic; mobTBanner = d.banner
+        val r = Runnable { mobTrailerPlay() }
+        mobTRun = r
+        ui.postDelayed(r, 700)
+    }
+
+    private fun mobTrailerResume() {
+        if (!mobOn || !mobBuilt || inPlayer || mobTUrl == null || mobTView == null) return
+        if (mobStack.lastOrNull() !== mobDetail?.root) return
+        mobTRun?.let { ui.removeCallbacks(it) }
+        val r = Runnable { mobTrailerPlay() }
+        mobTRun = r
+        ui.postDelayed(r, 500)
+    }
+
+    private fun mobTrailerPlay() {
+        val url = mobTUrl ?: return
+        if (mobTView == null || inPlayer || mobDetail == null || mobStack.lastOrNull() !== mobDetail?.root) return
+        try {
+            val p = mobTPlayer ?: ExoPlayer.Builder(this).build().also { pl ->
+                mobTPlayer = pl
+                pl.repeatMode = Player.REPEAT_MODE_ONE
+                pl.trackSelectionParameters = pl.trackSelectionParameters.buildUpon().setMaxVideoSize(1280, 720).build()
+                pl.addListener(object : Player.Listener {
+                    override fun onVideoSizeChanged(vs: VideoSize) {
+                        val tv = mobTView ?: return
+                        if (vs.width == 0 || vs.height == 0) return
+                        val ar = vs.width * vs.pixelWidthHeightRatio / vs.height
+                        val bw = mobW
+                        val bh = if (mobBH > 0) mobBH else mobW
+                        var w = bw
+                        var h = (w / ar).toInt()
+                        if (h < bh) { h = bh; w = (h * ar).toInt() }
+                        tv.layoutParams = FrameLayout.LayoutParams(w, h, Gravity.CENTER)
+                    }
+                    override fun onRenderedFirstFrame() {
+                        mobTView?.animate()?.alpha(1f)?.setDuration(450)?.start()
+                        mobTBanner?.animate()?.alpha(0f)?.setDuration(450)?.start()
+                        mobTIcon?.visibility = View.VISIBLE
+                    }
+                    override fun onPlayerError(error: PlaybackException) {
+                        mobTView?.alpha = 0f
+                        mobTBanner?.alpha = 1f
+                        mobTIcon?.visibility = View.GONE
+                    }
+                })
+            }
+            p.setVideoTextureView(mobTView)
+            p.setMediaItem(MediaItem.fromUri(url))
+            p.prepare()
+            p.playWhenReady = true
+            mobTrailerVol()
+        } catch (e: Exception) { }
+    }
+
+    // ---------------- spotlight: looping 1 2 3 4 5 6 1 2 3 ..., always settles centered
+    private fun mobHeroStart(hrv: RecyclerView, n: Int) {
+        if (n <= 1) return
+        val start = 300000 - 300000 % n
+        hrv.post { (hrv.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(start, 0) }
+    }
+
+    private fun mobHeroSettle(hrv: RecyclerView) {
+        hrv.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(r: RecyclerView, s: Int) {
+                if (s != RecyclerView.SCROLL_STATE_IDLE) return
+                val w = r.width
+                if (w <= 0) return
+                var best = Int.MAX_VALUE
+                for (i in 0 until r.childCount) {
+                    val c = r.getChildAt(i)
+                    val d = (c.left + c.right) / 2 - w / 2
+                    if (best == Int.MAX_VALUE || abs(d) < abs(best)) best = d
+                }
+                if (best != Int.MAX_VALUE && abs(best) > dp(2)) r.smoothScrollBy(best, 0)
+            }
+        })
+    }
+
+    inner class MobHero3Ad(val row: Row) : RecyclerView.Adapter<MobHero2VH>() {
+        private val iw = mobHeroItemW()
+        private val ih = mobHeroCardH()
+        override fun getItemCount() = if (row.items.size > 1) 600000 else row.items.size
+        override fun onCreateViewHolder(p: ViewGroup, t: Int): MobHero2VH {
+            val ctx = this@MainActivity
+            val box = FrameLayout(ctx)
+            val lpp = RecyclerView.LayoutParams(iw, ih)
+            lpp.setMargins(dp(3), 0, dp(3), 0)
+            box.layoutParams = lpp
+            box.isClickable = true
+            mobRound(box, dp(24))
+            val iv = ImageView(ctx)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP; iv.setBackgroundColor(Color.rgb(26, 28, 42))
+            iv.scaleX = 1.12f; iv.scaleY = 1.12f
+            box.addView(iv, FrameLayout.LayoutParams(iw, ih))
+            val sc = View(ctx)
+            sc.background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(Color.argb(245, 8, 9, 14), Color.argb(170, 8, 9, 14), Color.argb(0, 8, 9, 14)))
+            box.addView(sc, FrameLayout.LayoutParams(-1, (ih * 0.55f).toInt(), Gravity.BOTTOM))
+            val col = LinearLayout(ctx)
+            col.orientation = LinearLayout.VERTICAL; col.gravity = Gravity.CENTER_HORIZONTAL
+            val logo = ImageView(ctx)
+            logo.adjustViewBounds = true; logo.scaleType = ImageView.ScaleType.FIT_CENTER
+            logo.maxWidth = (iw * 0.62f).toInt(); logo.maxHeight = dp(86)
+            val title = mtx("", 23f, Color.WHITE, true)
+            title.gravity = Gravity.CENTER; title.maxLines = 2
+            val meta = mtx("", 12.5f, Color.parseColor("#E0E0E6"), true)
+            meta.gravity = Gravity.CENTER; meta.maxLines = 1; meta.ellipsize = TextUtils.TruncateAt.END
+            val btns = LinearLayout(ctx)
+            btns.orientation = LinearLayout.HORIZONTAL; btns.gravity = Gravity.CENTER
+            val play = mobBtn("Watch Now", R.drawable.ic_play, true) { }
+            val add = mobBtn("", R.drawable.ic_add, false) { }
+            btns.addView(play, LinearLayout.LayoutParams(-2, -2))
+            btns.addView(add, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
+            col.addView(logo, LinearLayout.LayoutParams(-2, -2))
+            col.addView(title, LinearLayout.LayoutParams(-2, -2))
+            col.addView(meta, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
+            col.addView(btns, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(14) })
+            box.addView(col, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(18); leftMargin = dp(14); rightMargin = dp(14) })
+            return MobHero2VH(box, iv, logo, title, meta, play, add)
+        }
+
+        override fun onBindViewHolder(h: MobHero2VH, pos: Int) {
+            val it0 = row.items[pos % row.items.size]
+            val m = it0.mob ?: mobMast[it0.cid]
+            mobGl(img(m ?: it0.portrait ?: it0.spot ?: it0.landscape ?: it0.bg, 1000), h.iv, iw, ih)
+            if (m == null && it0.cid.isNotBlank() && mobMastBusy.add(it0.cid)) {
+                Thread {
+                    val j = fetchDetail(it0.cid, it0.sub == SUB_MOVIE_BUNDLE)
+                    val c = j?.optJSONObject("resultObj")?.optJSONArray("containers")?.optJSONObject(0)
+                    val u = c?.optJSONObject("metadata")?.optJSONObject("emfAttributes")?.str("masthead_mobile_v2")
+                    if (u != null) mobMast[it0.cid] = u
+                    ui.post { mobMastBusy.remove(it0.cid); if (u != null) notifyItemChanged(pos) }
+                }.start()
+            }
+            val lg = it0.logo
+            if (lg != null) {
+                h.logo.visibility = View.VISIBLE; h.title.visibility = View.GONE
+                logoReq(lg, (iw * 0.62f).toInt(), dp(86)).into(h.logo)
+            } else {
+                h.logo.setImageDrawable(null); h.logo.visibility = View.GONE
+                h.title.text = it0.title; h.title.visibility = View.VISIBLE
+            }
+            h.meta.text = it0.meta; h.meta.visibility = if (it0.meta.isBlank()) View.GONE else View.VISIBLE
+            h.box.setOnClickListener { onItemClick(it0, h.box) }
+            h.play.setOnClickListener { onItemClick(it0, h.box) }
+            val on = Store.inList(it0.cid)
+            mobBtnIcon(h.add)?.setImageResource(if (on) R.drawable.ic_check else R.drawable.ic_add)
+            h.add.setOnClickListener {
+                if (it0.cid.isNotBlank()) {
+                    val now = Store.toggle(it0)
+                    mobBtnIcon(h.add)?.setImageResource(if (now) R.drawable.ic_check else R.drawable.ic_add)
+                    toast(if (now) "Added to My List" else "Removed from My List")
+                }
+            }
+        }
+    }
+
+    private fun isHomeTab() = homeTabs.containsKey(tab)'''
+rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM, True)
+
+P.write_text(t, encoding='utf-8')
+print('update 16 applied')
