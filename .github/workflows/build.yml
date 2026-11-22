@@ -8172,6 +8172,8 @@ jobs:
         run: python3 patch14.txt
       - name: Apply update 15 (Mobile v3)
         run: python3 patch15.txt
+      - name: Apply update 16 (Mobile v4)
+        run: python3 patch16.txt
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload APK
