@@ -34,7 +34,7 @@ def rep(old, new, must=True):
     t = t.replace(old, new)
 
 # ---- 1) mobile home api + masthead_mobile_v2 on every item
-rep('const val EP_PAGE = 30', 'const val EP_PAGE = 30\nconst val MOB_HOME_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/MWEB/IN/UP/PAGE-V2/244390?from=0&to=100"')
+rep('const val EP_PAGE = 30', 'const val EP_PAGE = 30\nconst val MOB_HOME_URL = "https://apiv3.sonyliv.com/AGL/4.9/R/ENG/MWEB/IN/UP/PAGE-V2/34355?from=0&to=100"')
 rep('homeTabs[1] = TabData(1, HOME_URL)', 'homeTabs[1] = TabData(1, if (mobOn) MOB_HOME_URL else HOME_URL)')
 rep('val aspect: Float = 0f', 'val aspect: Float = 0f, val mob: String? = null')
 rep('"", "", s("square_thumb"), false)', '"", "", s("square_thumb"), false, 0f, s("masthead_mobile_v2"))')
