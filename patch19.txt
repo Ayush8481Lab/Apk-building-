@@ -1,0 +1,122 @@
+import sys, pathlib
+P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+t = P.read_text(encoding='utf-8')
+
+def rep(old, new, must=False):
+    global t
+    n = t.count(old)
+    if n != 1:
+        if must:
+            sys.exit('PATCH FAILED (%d): %s' % (n, old[:110]))
+        print('WARN (%d): %s' % (n, old[:90]))
+        return
+    t = t.replace(old, new)
+
+def repall(old, new):
+    global t
+    n = t.count(old)
+    if n == 0:
+        print('WARN (0): %s' % old[:90]); return
+    t = t.replace(old, new)
+
+# ---------- 1) spotlight: edge to edge, thin line between cards, all 4 corners of every card rounded
+repall('mobRound(box, 0)', 'mobRound(box, dp(22))')
+
+# ---------- 2) offline detection while a stream is loading / buffering
+rep('private fun updateProgress() {', 'private fun updateProgress() {\n        mobNetWatch()')
+
+# ---------- 3) home / movies / shows / sports pages: offline => error + retry instead of endless skeleton
+rep('fun ensureLoaded() {', 'fun ensureLoaded() {\n            if (!online() && td.rows.isEmpty()) { td.loading = false; td.loaded = false; started = true; refresh(); return }')
+
+# ---------- 4) PiP: closing the PiP window (cross) stops playback
+rep('mobPip = inPip', 'mobPip = inPip\n        if (!inPip) mobPipExitCheck()')
+rep('lvStopPreview(true); mobTrailerStop() }',
+    'lvStopPreview(true); mobTrailerStop(); if (mobOn && !mobPip && SystemClock.uptimeMillis() - mobPipExitAt < 3000L) mobStopForPip() }')
+
+# ---------- 5) Live TV tab: shimmer skeleton instead of the "Loading channels" text
+rep('val ad = MobLiveOuterAd()', 'val ad = MobLiveOuterAd(); mobLiveSkelAttach(b)')
+rep('mobLiveMsg?.visibility = if (mobLiveItems.isEmpty()) View.VISIBLE else View.GONE',
+    'mobLiveMsg?.visibility = View.GONE; mobLiveSkelV?.visibility = if (lvRows.isEmpty()) View.VISIBLE else View.GONE')
+rep('if (lvLoaded && mobLiveItems.isEmpty()) mobLiveBuild()',
+    '''if (lvLoaded && mobLiveItems.isEmpty()) mobLiveBuild()
+        if (!lvLoaded) {
+            val offl = !online()
+            mobLiveMsg?.let { m -> if (offl) { m.text = "No internet connection"; m.visibility = View.VISIBLE } else m.visibility = View.GONE }
+            if (!offl && !lvLoading && SystemClock.uptimeMillis() - mobLiveTry > 4000L) { mobLiveTry = SystemClock.uptimeMillis(); lvLoad() }
+        }''')
+
+MEM = r'''// ---------------------------------------------------------------- Update 19
+    private var mobOffN = 0
+    private var mobNetErr = false
+    private var mobRes = true
+    private var mobPipExitAt = 0L
+    private var mobLiveSkelV: View? = null
+    private var mobLiveTry = 0L
+
+    override fun onResume() { super.onResume(); mobRes = true }
+    override fun onPause() { super.onPause(); mobRes = false }
+
+    // while a stream is waiting for data (spinner) and the phone has no internet: show "No internet connection" + Retry,
+    // and retry automatically as soon as the connection is back
+    private fun mobNetWatch() {
+        if (!mobOn || !inPlayer) { mobOffN = 0; return }
+        val err = pErr
+        if (err != null && err.visibility == View.VISIBLE) {
+            if (mobNetErr && online()) { mobNetErr = false; mobOffN = 0; lastRetry?.invoke() }
+            return
+        }
+        val p = mainPlayer
+        val waiting = pSpin.visibility == View.VISIBLE || (p != null && p.playbackState == Player.STATE_BUFFERING && p.playWhenReady)
+        if (waiting && !online()) {
+            mobOffN++
+            if (mobOffN >= 2) { mobOffN = 0; mobNetErr = true; showPlayerError() }
+        } else mobOffN = 0
+    }
+
+    // PiP window closed with the cross: the activity is not resumed any more => stop the video
+    private fun mobPipExitCheck() {
+        mobPipExitAt = SystemClock.uptimeMillis()
+        ui.postDelayed({ if (!mobRes && inPlayer) mobStopForPip() }, 700)
+        ui.postDelayed({ if (!mobRes && inPlayer) mobStopForPip() }, 1600)
+    }
+
+    private fun mobStopForPip() {
+        try { mainPlayer?.let { it.playWhenReady = false; it.pause() } } catch (e: Exception) { }
+        try { saveProgress() } catch (e: Exception) { }
+        try { refreshPlayUi() } catch (e: Exception) { }
+    }
+
+    // Live TV skeleton: category title + 2 rows of poster cards with a small logo bar under each
+    private fun mobLiveSkelAttach(b: FrameLayout) {
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setBackgroundColor(mBg)
+        col.setPadding(0, dp(54), 0, 0)
+        col.isClickable = true
+        for (c in 0 until 2) {
+            col.addView(ShimmerView(this, dp(6).toFloat()), LinearLayout.LayoutParams(dp(130), dp(18)).apply { setMargins(dp(16), dp(16), 0, dp(10)) })
+            for (r in 0 until 2) {
+                val row = LinearLayout(this)
+                row.orientation = LinearLayout.HORIZONTAL
+                row.setPadding(dp(11), 0, 0, 0)
+                for (k in 0 until 3) {
+                    val cell = LinearLayout(this)
+                    cell.orientation = LinearLayout.VERTICAL
+                    cell.setPadding(dp(5), 0, dp(5), 0)
+                    cell.addView(ShimmerView(this, dp(8).toFloat()), LinearLayout.LayoutParams(mobLvCw(), mobLvPh()))
+                    cell.addView(ShimmerView(this, dp(4).toFloat()), LinearLayout.LayoutParams(dp(64), dp(14)).apply { topMargin = dp(8) })
+                    row.addView(cell, LinearLayout.LayoutParams(mobLvCw() + dp(10), -2))
+                }
+                col.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+            }
+        }
+        b.addView(col, FrameLayout.LayoutParams(-1, -1))
+        mobLiveSkelV = col
+        b.post { mobLiveMsg?.visibility = View.GONE }
+    }
+
+    private fun isHomeTab() = homeTabs.containsKey(tab)'''
+rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM, True)
+
+P.write_text(t, encoding='utf-8')
+print('update 19 applied')
