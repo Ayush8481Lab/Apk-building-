@@ -1,0 +1,698 @@
+import sys, pathlib
+
+D = pathlib.Path('app/src/main/res/drawable')
+D.mkdir(parents=True, exist_ok=True)
+icons = {
+    'ic_m_play.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M7.85,4.42 a1.5,1.5 0 0 0 -2.35,1.27 v12.62 c0,1.18 1.3,1.9 2.3,1.27 l10.5,-6.31 a1.5,1.5 0 0 0 0,-2.54 L7.85,4.42 z"/></vector>\n',
+    'ic_m_pause.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFF" android:pathData="M7.1,4 h1.55 a1.6,1.6 0 0 1 1.6,1.6 v12.8 a1.6,1.6 0 0 1 -1.6,1.6 h-1.55 a1.6,1.6 0 0 1 -1.6,-1.6 v-12.8 a1.6,1.6 0 0 1 1.6,-1.6 z M15.35,4 h1.55 a1.6,1.6 0 0 1 1.6,1.6 v12.8 a1.6,1.6 0 0 1 -1.6,1.6 h-1.55 a1.6,1.6 0 0 1 -1.6,-1.6 v-12.8 a1.6,1.6 0 0 1 1.6,-1.6 z"/></vector>\n',
+    'ic_m_gear.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.6" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M9,12 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0"/><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.6" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M19.4,15 a1.65,1.65 0 0 0 0.33,1.82 l0.06,0.06 a2,2 0 1 1 -2.83,2.83 l-0.06,-0.06 a1.65,1.65 0 0 0 -1.82,-0.33 a1.65,1.65 0 0 0 -1,1.51 V21 a2,2 0 1 1 -4,0 v-0.09 a1.65,1.65 0 0 0 -1,-1.51 a1.65,1.65 0 0 0 -1.82,0.33 l-0.06,0.06 a2,2 0 1 1 -2.83,-2.83 l0.06,-0.06 a1.65,1.65 0 0 0 0.33,-1.82 a1.65,1.65 0 0 0 -1.51,-1 H3 a2,2 0 1 1 0,-4 h0.09 a1.65,1.65 0 0 0 1.51,-1 a1.65,1.65 0 0 0 -0.33,-1.82 l-0.06,-0.06 a2,2 0 1 1 2.83,-2.83 l0.06,0.06 a1.65,1.65 0 0 0 1.82,0.33 h0.09 a1.65,1.65 0 0 0 1,-1.51 V3 a2,2 0 1 1 4,0 v0.09 a1.65,1.65 0 0 0 1,1.51 a1.65,1.65 0 0 0 1.82,-0.33 l0.06,-0.06 a2,2 0 1 1 2.83,2.83 l-0.06,0.06 a1.65,1.65 0 0 0 -0.33,1.82 V9 a1.65,1.65 0 0 0 1.51,1 H21 a2,2 0 1 1 0,4 h-0.09 a1.65,1.65 0 0 0 -1.51,1 z"/></vector>\n',
+    'ic_m_close.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="2.2" android:strokeLineCap="round" android:pathData="M18,6 L6,18 M6,6 L18,18"/></vector>\n',
+    'ic_s_quality.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M4.5,5 h15 a2,2 0 0 1 2,2 v9 a2,2 0 0 1 -2,2 h-15 a2,2 0 0 1 -2,-2 v-9 a2,2 0 0 1 2,-2 z M8,21 h8 M12,18 v3"/></vector>\n',
+    'ic_s_speed.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M3.5,12 a8.5,8.5 0 1 0 17,0 a8.5,8.5 0 1 0 -17,0 M12,12 l4,-4"/><path android:fillColor="#FFFFFF" android:pathData="M10.8,12 a1.2,1.2 0 1 0 2.4,0 a1.2,1.2 0 1 0 -2.4,0"/></vector>\n',
+    'ic_s_audio.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M11,5 L6,9 H3 v6 h3 l5,4 V5 z M15.5,8.5 a5,5 0 0 1 0,7 M18.5,5.5 a9,9 0 0 1 0,13"/></vector>\n',
+    'ic_s_subs.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M5,5 h14 a2.5,2.5 0 0 1 2.5,2.5 v9 a2.5,2.5 0 0 1 -2.5,2.5 h-14 a2.5,2.5 0 0 1 -2.5,-2.5 v-9 a2.5,2.5 0 0 1 2.5,-2.5 z M7,12 h4 M15,12 h2 M7,15 h2 M11,15 h6"/></vector>\n',
+    'ic_s_chev.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.9" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M9,6 l6,6 -6,6"/></vector>\n',
+    'ic_s_back.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M10.5,19.5 L3,12 m0,0 l7.5,-7.5 M3,12 h18"/></vector>\n',
+    'ic_s_check.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="2.6" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M5,13 l4,4 L19,7"/></vector>\n',
+    'ic_skip_r.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="2.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M9,5 l7,7 -7,7"/></vector>\n',
+    'ic_skip_l.xml': '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#00000000" android:strokeColor="#FFFFFF" android:strokeWidth="2.5" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M15,19 l-7,-7 7,-7"/></vector>\n',
+}
+for name, xml in icons.items():
+    (D / name).write_text(xml, encoding='utf-8')
+
+P = pathlib.Path('app/src/main/java/com/example/livtv/MainActivity.kt')
+t = P.read_text(encoding='utf-8')
+
+def rep(old, new, must=False):
+    global t
+    n = t.count(old)
+    if n != 1:
+        if must:
+            sys.exit('PATCH FAILED (%d): %s' % (n, old[:110]))
+        print('WARN (%d): %s' % (n, old[:90]))
+        return
+    t = t.replace(old, new)
+
+# ---------- player: React style play / pause size (64 portrait, 72 fullscreen) + gear icon
+rep('sz(mcPlay, if (fs) 96 else 78); mcPlay.setPadding(0, 0, 0, 0)', 'sz(mcPlay, if (fs) 72 else 64); mcPlay.setPadding(0, 0, 0, 0)')
+rep('mcGear.setImageResource(R.drawable.ic_settings)', 'mcGear.setImageResource(R.drawable.ic_m_gear)')
+
+# ---------- skip animation: side panels with 3 animated chevrons + "+10s" / "-10s"
+rep('val v = if (fwd) mobIndR else mobIndL', 'val v = mobIndNull; mobSkipShow(fwd, gAcc)')
+rep('ui.removeCallbacks(gAccRun); ui.postDelayed(gAccRun, 700)', 'ui.removeCallbacks(gAccRun); ui.postDelayed(gAccRun, 1000)')
+rep('private fun mobBuildExtras() {', 'private fun mobBuildExtras() {\n        mobBuildSkip()')
+
+# ---------- settings sheet: React style (old page kept as dead code, new page below)
+rep('private fun mobSettingsMain(d: android.app.Dialog, box: LinearLayout) {', 'private fun mobSettingsMainOld(d: android.app.Dialog, box: LinearLayout) {', True)
+rep('cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f); setColor(Color.rgb(22, 24, 34))',
+    'cornerRadii = floatArrayOf(r * 1.27f, r * 1.27f, r * 1.27f, r * 1.27f, 0f, 0f, 0f, 0f); setColor(Color.parseColor("#22232A"))')
+rep('mcSheet = null; mcEpAd = null; mcEpChips = null', 'mcSheet = null; mcEpAd = null; mcEpChips = null; mobSheetUi = null; mobSportReattach()')
+
+# ---------- live sports: key moments + scorecard live in the episodes place (panel / sheet)
+rep('private fun mobEpSheet() {', 'private fun mobEpSheet() {\n        if (mobSport != null) { mobSportSheet(); return }')
+rep('val ev = if (mobFs && seasons.isNotEmpty() && !curNoEps && !momentsMode && !liveSport) View.VISIBLE else View.GONE',
+    'val ev = if (mobFs && ((seasons.isNotEmpty() && !curNoEps && !momentsMode && !liveSport) || mobSport != null)) View.VISIBLE else View.GONE')
+rep('private fun applySport(s: SportInfo?) {', 'private fun applySport(s: SportInfo?) {\n        mobSportHook(s)')
+rep('mobPipOff(); mobHoldShow(false)', 'mobPipOff(); mobHoldShow(false); mobSportOff(true)')
+
+# ---------- live tv: upcoming programs for channels without catchup
+rep('if (LvCatch.has(ch.id)) lvEnableCatchup()', 'lvUpMode = false\n        if (LvCatch.has(ch.id)) lvEnableCatchup() else if (mobOn && LvCatch.map.isNotEmpty()) lvEnableUpcoming()')
+rep('ui.post { if (lvFull && inPlayer && lvCur?.id == ch.id && LvCatch.has(ch.id)) lvEnableCatchup() }',
+    'ui.post { if (lvFull && inPlayer && lvCur?.id == ch.id) { if (LvCatch.has(ch.id)) lvEnableCatchup() else if (mobOn) lvEnableUpcoming() } }')
+rep('for (p in list) if (p.start <= now)', 'for (p in list) if (if (lvUpMode) p.start > now else p.start <= now)')
+rep('pdEpHead.text = if (lvFull) "Catchup" else "Episodes"', 'pdEpHead.text = if (lvFull) (if (lvUpMode) "Upcoming" else "Catchup") else "Episodes"')
+rep('val ttl = mtx(if (lvFull) "Catchup" else "Episodes", 17f, Color.WHITE, true)',
+    'val ttl = mtx(if (lvFull) (if (lvUpMode) "Upcoming" else "Catchup") else "Episodes", 17f, Color.WHITE, true)')
+
+# ---------- live tv tab: 2 rows per category, side scroll, channel logo under each card
+rep('private fun mobShowLive() {', 'private fun mobShowLiveOld() {', True)
+
+MEM = r'''// ---------------------------------------------------------------- Update 17 : Mobile v5
+    private class MobSportUi(val root: LinearLayout, val holder: FrameLayout, val momRv: RecyclerView,
+                             val chips: ArrayList<Pair<Int, TextView>>, val sub: TextView?)
+
+    private var lvUpMode = false
+    private var mobSport: SportInfo? = null
+    private var mobMomPlay = false
+    private var mobSportTab = 0
+    private var mobMomState = 0
+    private var mobMomAt = 0L
+    private var mobScoreBusy = false
+    private val mobMom = ArrayList<Ep>()
+    private var mobPanelUi: MobSportUi? = null
+    private var mobSheetUi: MobSportUi? = null
+    private val mobLvAds = HashMap<String, MobLvAd>()
+    private val mobIndNull: TextView by lazy { TextView(this) }
+    private val mobSkipBox = arrayOfNulls<LinearLayout>(2)
+    private val mobSkipTv = arrayOfNulls<TextView>(2)
+    private val mobSkipChev = Array(2) { ArrayList<ImageView>() }
+    private val mobSkipAn = ArrayList<ValueAnimator>()
+    private val mobSkipHide = Runnable { mobSkipHideNow() }
+
+    // ---------------- skip animation (same as the web player: 35% side panel, 3 sliding chevrons, "+10s")
+    private fun mobBuildSkip() {
+        val ctx = this
+        val row = LinearLayout(ctx)
+        row.orientation = LinearLayout.HORIZONTAL
+        for (side in 0..1) {
+            if (side == 1) row.addView(View(ctx), LinearLayout.LayoutParams(0, -1, 0.30f))
+            val left = side == 0
+            val box = LinearLayout(ctx)
+            box.orientation = LinearLayout.HORIZONTAL; box.gravity = Gravity.CENTER
+            box.setBackgroundColor(Color.argb(26, 0, 0, 0)); box.visibility = View.GONE
+            for (i in 0 until 3) {
+                val iv = ImageView(ctx)
+                iv.setImageResource(if (left) R.drawable.ic_skip_l else R.drawable.ic_skip_r)
+                iv.setColorFilter(Color.WHITE)
+                mobSkipChev[side].add(iv)
+                box.addView(iv, LinearLayout.LayoutParams(dp(28), dp(28)).apply { if (i > 0) leftMargin = -dp(10) })
+            }
+            val tv = mtx("", 20f, Color.WHITE, true)
+            tv.setShadowLayer(16f, 0f, 2f, Color.argb(210, 0, 0, 0))
+            box.addView(tv, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
+            mobSkipBox[side] = box; mobSkipTv[side] = tv
+            row.addView(box, LinearLayout.LayoutParams(0, -1, 0.35f))
+        }
+        playerLayer.addView(row, lp(-1, -1))
+    }
+
+    private fun mobSkipAnimStart(fwd: Boolean) {
+        for (a in mobSkipAn) a.cancel()
+        mobSkipAn.clear()
+        val i = if (fwd) 1 else 0
+        val sign = if (fwd) 1f else -1f
+        val delays = if (fwd) longArrayOf(200L, 100L, 0L) else longArrayOf(0L, 100L, 200L)
+        val d = resources.displayMetrics.density
+        for ((k, iv) in mobSkipChev[i].withIndex()) {
+            iv.alpha = 0.2f
+            val a = ValueAnimator.ofFloat(0f, 1f)
+            a.duration = 300L; a.startDelay = delays[k]
+            a.repeatCount = ValueAnimator.INFINITE; a.repeatMode = ValueAnimator.REVERSE
+            a.addUpdateListener { v ->
+                val f = v.animatedValue as Float
+                iv.alpha = 0.2f + 0.8f * f
+                iv.translationX = sign * (-2f + 4f * f) * d
+            }
+            a.start()
+            mobSkipAn.add(a)
+        }
+    }
+
+    private fun mobSkipShow(fwd: Boolean, secs: Int) {
+        val i = if (fwd) 1 else 0
+        val box = mobSkipBox[i] ?: return
+        mobSkipBox[1 - i]?.visibility = View.GONE
+        mobSkipTv[i]?.text = (if (fwd) "+" else "-") + secs + "s"
+        box.animate().cancel()
+        if (box.visibility != View.VISIBLE) {
+            box.visibility = View.VISIBLE
+            box.alpha = 0f; box.scaleX = 0.94f; box.scaleY = 0.94f
+            box.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(120).start()
+            mobSkipAnimStart(fwd)
+        } else { box.alpha = 1f; box.scaleX = 1f; box.scaleY = 1f }
+        ui.removeCallbacks(mobSkipHide); ui.postDelayed(mobSkipHide, 800)
+        playerLayer.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    private fun mobSkipHideNow() {
+        for (i in 0..1) {
+            val b = mobSkipBox[i] ?: continue
+            if (b.visibility == View.VISIBLE) {
+                b.animate().cancel()
+                b.animate().alpha(0f).scaleX(0.94f).scaleY(0.94f).setDuration(140).withEndAction { b.visibility = View.GONE }.start()
+            }
+        }
+        for (a in mobSkipAn) a.cancel()
+        mobSkipAn.clear()
+    }
+
+    // ---------------- settings sheet (React style)
+    private fun mobPress(r: Int, pressed: Int, normal: Int = Color.TRANSPARENT): android.graphics.drawable.Drawable {
+        val sd = android.graphics.drawable.StateListDrawable()
+        sd.addState(intArrayOf(android.R.attr.state_pressed), GradientDrawable().apply { cornerRadius = r.toFloat(); setColor(pressed) })
+        sd.addState(intArrayOf(), GradientDrawable().apply { cornerRadius = r.toFloat(); setColor(normal) })
+        return sd
+    }
+
+    private fun mobQBadge(h: Int): String = when {
+        h >= 2160 -> "4K"
+        h >= 1440 -> "QHD"
+        h >= 1080 -> "FHD"
+        h >= 720 -> "HD"
+        else -> "SD"
+    }
+
+    private fun mobSetHead(title: String, back: (() -> Unit)?, d: android.app.Dialog): View {
+        val h = LinearLayout(this)
+        h.orientation = LinearLayout.HORIZONTAL; h.gravity = Gravity.CENTER_VERTICAL
+        h.setPadding(dp(16), dp(8), dp(16), dp(12))
+        if (back != null) {
+            val b = LinearLayout(this)
+            b.orientation = LinearLayout.HORIZONTAL; b.gravity = Gravity.CENTER_VERTICAL
+            b.setPadding(dp(8), dp(6), dp(12), dp(6)); b.isClickable = true
+            b.background = mobPress(dp(12), Color.argb(15, 255, 255, 255))
+            val ar = ImageView(this)
+            ar.setImageResource(R.drawable.ic_s_back); ar.setColorFilter(Color.WHITE)
+            b.addView(ar, LinearLayout.LayoutParams(dp(16), dp(16)))
+            b.addView(mtx(title, 15f, Color.WHITE, true), LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+            b.setOnClickListener { back() }
+            h.addView(b, LinearLayout.LayoutParams(-2, -2))
+        } else {
+            val t = mtx(title, 16f, Color.WHITE, true)
+            t.setPadding(dp(8), 0, 0, 0)
+            h.addView(t, LinearLayout.LayoutParams(-2, -2))
+        }
+        h.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        val x = FrameLayout(this)
+        x.isClickable = true
+        x.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(15, 255, 255, 255)); setStroke(max(1, dp(1)), Color.argb(26, 255, 255, 255)) }
+        val xi = ImageView(this)
+        xi.setImageResource(R.drawable.ic_m_close); xi.setColorFilter(Color.argb(180, 255, 255, 255))
+        x.addView(xi, lp(dp(16), dp(16), Gravity.CENTER))
+        x.setOnClickListener { d.dismiss() }
+        h.addView(x, LinearLayout.LayoutParams(dp(32), dp(32)))
+        return h
+    }
+
+    private fun mobSetRow(label: String, value: String, icon: Int, onClick: () -> Unit): View {
+        val r = LinearLayout(this)
+        r.orientation = LinearLayout.HORIZONTAL; r.gravity = Gravity.CENTER_VERTICAL
+        r.setPadding(dp(16), dp(14), dp(14), dp(14)); r.isClickable = true
+        r.background = mobPress(dp(16), Color.argb(20, 255, 255, 255))
+        val tile = FrameLayout(this)
+        tile.background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.argb(13, 255, 255, 255)); setStroke(max(1, dp(1)), Color.argb(15, 255, 255, 255)) }
+        val ic = ImageView(this)
+        ic.setImageResource(icon); ic.setColorFilter(Color.argb(204, 255, 255, 255))
+        tile.addView(ic, lp(dp(18), dp(18), Gravity.CENTER))
+        r.addView(tile, LinearLayout.LayoutParams(dp(32), dp(32)))
+        r.addView(mtx(label, 14f, Color.argb(230, 255, 255, 255), true), LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(12) })
+        r.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        val vv = mtx(value, 12f, Color.argb(128, 255, 255, 255), true)
+        vv.maxLines = 1; vv.ellipsize = TextUtils.TruncateAt.END
+        r.addView(vv, LinearLayout.LayoutParams(-2, -2))
+        val ch = ImageView(this)
+        ch.setImageResource(R.drawable.ic_s_chev); ch.setColorFilter(Color.argb(64, 255, 255, 255))
+        r.addView(ch, LinearLayout.LayoutParams(dp(16), dp(16)).apply { leftMargin = dp(8) })
+        r.setOnClickListener { onClick() }
+        return r
+    }
+
+    private fun mobSetOpt(label: String, sel: Boolean, badge: String?, onClick: () -> Unit): View {
+        val r = LinearLayout(this)
+        r.orientation = LinearLayout.HORIZONTAL; r.gravity = Gravity.CENTER_VERTICAL
+        r.setPadding(dp(16), dp(14), dp(16), dp(14)); r.isClickable = true
+        r.background = mobPress(dp(16), Color.argb(20, 255, 255, 255), if (sel) Color.argb(18, 255, 255, 255) else Color.TRANSPARENT)
+        r.addView(mtx(label, 14f, if (sel) Color.WHITE else Color.argb(204, 255, 255, 255), sel), LinearLayout.LayoutParams(-2, -2))
+        if (badge != null) {
+            val b = mtx(badge, 9f, if (sel) Color.parseColor("#4DB8FF") else Color.argb(115, 255, 255, 255), true)
+            b.letterSpacing = 0.1f; b.setPadding(dp(6), dp(2), dp(6), dp(2))
+            b.background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setColor(if (sel) Color.argb(51, 0, 132, 255) else Color.argb(15, 255, 255, 255)) }
+            r.addView(b, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(10) })
+        }
+        r.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        if (sel) {
+            val c = FrameLayout(this)
+            c.background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor("#0084FF")) }
+            val ck = ImageView(this)
+            ck.setImageResource(R.drawable.ic_s_check); ck.setColorFilter(Color.WHITE)
+            c.addView(ck, lp(dp(12), dp(12), Gravity.CENTER))
+            r.addView(c, LinearLayout.LayoutParams(dp(20), dp(20)))
+        }
+        r.setOnClickListener { onClick() }
+        return r
+    }
+
+    private fun mobSetShow(box: LinearLayout, d: android.app.Dialog, title: String, back: (() -> Unit)?, rows: List<View>, opts: Boolean, anim: Boolean) {
+        while (box.childCount > 1) box.removeViewAt(1)
+        box.addView(mobSetHead(title, back, d), LinearLayout.LayoutParams(-1, -2))
+        val sv = ScrollView(this)
+        sv.isVerticalScrollBarEnabled = false; sv.overScrollMode = View.OVER_SCROLL_NEVER
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL; col.setPadding(0, dp(2), 0, dp(10))
+        val mh = if (opts) dp(8) else dp(4)
+        for (v in rows) col.addView(v, LinearLayout.LayoutParams(-1, -2).apply { setMargins(mh, dp(2), mh, dp(2)) })
+        sv.addView(col)
+        box.addView(sv, LinearLayout.LayoutParams(-1, -2))
+        if (anim) {
+            sv.alpha = 0f; sv.translationX = dp(12).toFloat()
+            sv.animate().alpha(1f).translationX(0f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f)).start()
+        }
+    }
+
+    private fun mobSettingsMain(d: android.app.Dialog, box: LinearLayout) {
+        val p = mainPlayer ?: return
+        val rows = ArrayList<View>()
+        rows.add(mobSetRow("Quality", if (qualitySel == 0) autoText() else qualitySel.toString() + "p", R.drawable.ic_s_quality) { mobSettingsQuality(d, box) })
+        val isLive = liveSport || liveSlot != 0 || (lvFull && liveStartS == 0L)
+        if (!isLive) rows.add(mobSetRow("Playback speed", if (abs(playSpeed - 1f) < 0.01f) "Normal" else spdText(playSpeed), R.drawable.ic_s_speed) { mobSettingsList(d, box, "Playback speed", mobSpeedRows { mobSettingsMain(d, box) }) })
+        val ar = mobAudioRows(p) { }
+        if (ar.size > 1) rows.add(mobSetRow("Audio", ar.firstOrNull { it.sel }?.label ?: "Default", R.drawable.ic_s_audio) { mobSettingsList(d, box, "Audio", mobAudioRows(p) { mobSettingsMain(d, box) }) })
+        val sr = mobSubRows(p) { }
+        if (sr.isNotEmpty()) rows.add(mobSetRow("Subtitles", sr.firstOrNull { it.sel }?.label ?: "Off", R.drawable.ic_s_subs) { mobSettingsList(d, box, "Subtitles", mobSubRows(p) { mobSettingsMain(d, box) }) })
+        mobSetShow(box, d, "Settings", null, rows, false, false)
+    }
+
+    private fun mobSettingsList(d: android.app.Dialog, box: LinearLayout, title: String, l: List<MobRowD>) {
+        val rows = ArrayList<View>()
+        for (r in l) rows.add(mobSetOpt(r.label, r.sel, null) { r.onClick() })
+        mobSetShow(box, d, title, { mobSettingsMain(d, box) }, rows, true, true)
+    }
+
+    private fun mobSettingsQuality(d: android.app.Dialog, box: LinearLayout) {
+        val rows = ArrayList<View>()
+        val l = mobQualityRows { mobSettingsMain(d, box) }
+        for ((i, r) in l.withIndex()) {
+            val h = if (i == 0) curVideoH() else (r.label.filter { it.isDigit() }.toIntOrNull() ?: 0)
+            rows.add(mobSetOpt(r.label, r.sel, if (h > 0) mobQBadge(h) else null) { r.onClick() })
+        }
+        mobSetShow(box, d, "Quality", { mobSettingsMain(d, box) }, rows, true, true)
+    }
+
+    // ---------------- live sports: Key moments + Scorecard tabs (portrait panel under the player / sheet in fullscreen)
+    private fun mobSportHook(s: SportInfo?) {
+        if (!mobOn || !::mobPD.isInitialized) return
+        if (s == null) { if (mobMomPlay) return; mobSportOff(false); return }
+        if (mobMomPlay) {
+            if (mobSport?.contentId == s.contentId) { mobMomPlay = false; mobSportHeadUpdate() }
+            return
+        }
+        if (!(s.markers || s.matchCode.isNotEmpty())) { mobSportOff(false); return }
+        val same = mobSport?.contentId == s.contentId && mobPanelUi != null
+        mobSport = s
+        if (!same) {
+            mobMom.clear(); mobMomState = 0; scoreJson = null; scoreInn = -1
+            mobSportTab = if (s.markers) 0 else 1
+            mobSportInstall()
+        }
+        mobSportHeadUpdate()
+        if (s.markers && mobMomState == 0) mobMomLoad(s)
+        ui.removeCallbacks(mobScoreRun); ui.postDelayed(mobScoreRun, 15000)
+    }
+
+    private fun mobSportOff(all: Boolean) {
+        ui.removeCallbacks(mobScoreRun)
+        if (!::mobPD.isInitialized) return
+        mobPanelUi?.let { mobPD.removeView(it.root) }
+        mobPanelUi = null
+        if (::mobPdRv.isInitialized) mobPdRv.visibility = View.VISIBLE
+        if (all) mobMomPlay = false
+        mobSport = null; mobMom.clear(); mobMomState = 0; scoreJson = null; scoreInn = -1
+    }
+
+    private val mobScoreRun: Runnable = object : Runnable {
+        override fun run() {
+            val s = mobSport
+            if (!inPlayer || s == null) return
+            if (mobSportTab == 1) mobScoreLoad()
+            else if (s.markers && SystemClock.uptimeMillis() - mobMomAt > 60000L) mobMomLoad(s)
+            ui.postDelayed(this, 15000)
+        }
+    }
+
+    private fun mobSportHeadUpdate() {
+        mobPanelUi?.sub?.text = if (mobMomPlay) "Key moment  \u2022  tap GO LIVE to return" else "\u25CF LIVE"
+    }
+
+    private fun mobSportInstall() {
+        mobPanelUi?.let { mobPD.removeView(it.root) }
+        val su = mobSportMake(false)
+        mobPanelUi = su
+        mobPD.addView(su.root, lp(-1, -1))
+        mobPdRv.visibility = View.GONE
+        mobSportSelect(su, mobSportTab)
+    }
+
+    private fun mobSportStyle(su: MobSportUi) {
+        for ((id, tv) in su.chips) {
+            val sel = id == mobSportTab
+            tv.setTextColor(if (sel) Color.BLACK else Color.WHITE)
+            tv.background = GradientDrawable().apply {
+                cornerRadius = dp(30).toFloat()
+                if (sel) setColor(Color.WHITE) else { setColor(Color.TRANSPARENT); setStroke(max(1, dp(1)), Color.argb(150, 255, 255, 255)) }
+            }
+        }
+    }
+
+    private fun mobSportMake(sheet: Boolean): MobSportUi {
+        val ctx = this
+        val si = mobSport
+        val root = LinearLayout(ctx)
+        root.orientation = LinearLayout.VERTICAL
+        var subTv: TextView? = null
+        if (!sheet) {
+            val hd = LinearLayout(ctx)
+            hd.orientation = LinearLayout.VERTICAL; hd.setPadding(dp(16), dp(14), dp(16), dp(4))
+            val t1 = mtx(showTitle, 19f, Color.WHITE, true)
+            t1.maxLines = 2; t1.ellipsize = TextUtils.TruncateAt.END
+            val t2 = mtx("", 13f, mGold, true)
+            hd.addView(t1, LinearLayout.LayoutParams(-1, -2))
+            hd.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            root.addView(hd, LinearLayout.LayoutParams(-1, -2))
+            subTv = t2
+        } else {
+            val tt = mtx(showTitle, 17f, Color.WHITE, true)
+            tt.setPadding(dp(20), dp(8), dp(20), dp(6)); tt.maxLines = 1; tt.ellipsize = TextUtils.TruncateAt.END
+            root.addView(tt, LinearLayout.LayoutParams(-1, -2))
+        }
+        val chips = ArrayList<Pair<Int, TextView>>()
+        val cr = LinearLayout(ctx)
+        cr.orientation = LinearLayout.HORIZONTAL
+        val cs = HorizontalScrollView(ctx)
+        cs.isHorizontalScrollBarEnabled = false; cs.clipToPadding = false; cs.setPadding(dp(16), dp(6), dp(16), dp(8))
+        cs.addView(cr)
+        fun addTab(id: Int, label: String) {
+            val c = mtx(label, 13.5f, Color.WHITE, true)
+            c.setPadding(dp(16), dp(8), dp(16), dp(8)); c.isClickable = true
+            chips.add(Pair(id, c))
+            cr.addView(c, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        }
+        if (si != null && si.markers) addTab(0, "Key Moments")
+        if (si != null && si.matchCode.isNotEmpty()) addTab(1, "Scorecard")
+        root.addView(cs, LinearLayout.LayoutParams(-1, -2))
+        val content = FrameLayout(ctx)
+        val momRv = RecyclerView(ctx)
+        momRv.layoutManager = LinearLayoutManager(ctx)
+        momRv.adapter = MobMomAd()
+        momRv.overScrollMode = View.OVER_SCROLL_NEVER; momRv.itemAnimator = null
+        momRv.clipToPadding = false; momRv.setPadding(0, 0, 0, dp(24))
+        val holder = FrameLayout(ctx)
+        content.addView(momRv, lp(-1, -1))
+        content.addView(holder, lp(-1, -1))
+        root.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
+        val su = MobSportUi(root, holder, momRv, chips, subTv)
+        for ((id, tv) in chips) tv.setOnClickListener { mobSportSelect(su, id) }
+        return su
+    }
+
+    private fun mobSportSelect(su: MobSportUi, tab: Int) {
+        mobSportTab = tab
+        for (u in listOfNotNull(mobPanelUi, mobSheetUi, su)) {
+            mobSportStyle(u)
+            u.momRv.visibility = if (tab == 0) View.VISIBLE else View.GONE
+            u.holder.visibility = if (tab == 1) View.VISIBLE else View.GONE
+        }
+        if (tab == 1) { mobScoreAttach(su); mobScoreLoad() }
+        else { val s = mobSport; if (s != null && s.markers && SystemClock.uptimeMillis() - mobMomAt > 45000L) mobMomLoad(s) }
+    }
+
+    private fun mobSportReattach() {
+        val pu = mobPanelUi ?: return
+        if (mobSportTab == 1 && mobSport != null) mobScoreAttach(pu)
+    }
+
+    private fun mobSportSheet() {
+        ui.removeCallbacks(hideRun)
+        val (d, box) = mobDialog(0.92f)
+        mcSheet = d
+        val su = mobSportMake(true)
+        mobSheetUi = su
+        box.addView(su.root, LinearLayout.LayoutParams(-1, 0, 1f))
+        d.show()
+        mobSportSelect(su, mobSportTab)
+    }
+
+    private fun mobScoreAttach(su: MobSportUi) {
+        if (scoreScroll.parent !== su.holder) {
+            (scoreScroll.parent as? ViewGroup)?.removeView(scoreScroll)
+            su.holder.addView(scoreScroll, FrameLayout.LayoutParams(-1, -1))
+        }
+        if (scoreJson == null && scoreCol.childCount == 0) scoreCol.addView(scoreText("Loading scorecard...", 16f, "#B4B8C8", false))
+    }
+
+    private fun mobScoreLoad() {
+        val s = mobSport ?: return
+        if (s.matchCode.isEmpty() || mobScoreBusy) return
+        mobScoreBusy = true
+        Thread {
+            val j = Api.get(SCORE_URL + s.matchCode + ".json")
+            ui.post {
+                mobScoreBusy = false
+                if (mobSport?.matchCode != s.matchCode || !inPlayer) return@post
+                if (j == null) {
+                    if (scoreJson == null) { scoreCol.removeAllViews(); scoreCol.addView(scoreText("Scorecard not available right now", 16f, "#B4B8C8", false)) }
+                    return@post
+                }
+                try {
+                    val sy = scoreScroll.scrollY
+                    scoreJson = j
+                    renderScore2()
+                    scoreCol.getChildAt(0)?.visibility = View.GONE
+                    scoreScroll.post { scoreScroll.scrollTo(0, sy) }
+                } catch (e: Exception) { }
+            }
+        }.start()
+    }
+
+    private fun mobMomNotify() {
+        mobPanelUi?.momRv?.adapter?.notifyDataSetChanged()
+        mobSheetUi?.momRv?.adapter?.notifyDataSetChanged()
+    }
+
+    private fun mobMomLoad(si: SportInfo) {
+        if (mobMom.isEmpty()) { mobMomState = 1; mobMomNotify() }
+        mobMomAt = SystemClock.uptimeMillis()
+        val cid = si.contentId
+        Thread {
+            val j = Api.get(MOMENTS_URL + cid)
+            val arr = j?.optJSONObject("resultObj")?.optJSONArray("containers")
+            val list = ArrayList<Ep>()
+            val marks = HashMap<String, String>()
+            if (arr != null) for (k in 0 until arr.length()) {
+                val o = arr.optJSONObject(k) ?: continue
+                val ep = parseEp(o) ?: continue
+                if (ep.id.isBlank()) continue
+                list.add(ep)
+                o.optJSONObject("metadata")?.optJSONObject("emfAttributes")?.str("tl_marker")?.let { marks[ep.id] = it.substringAfterLast('|') }
+            }
+            list.sortByDescending { timeSec(marks[it.id] ?: "") }
+            ui.post {
+                if (mobSport?.contentId != cid) return@post
+                momentMarks.putAll(marks)
+                mobMom.clear(); mobMom.addAll(list)
+                mobMomState = if (j == null) 3 else 2
+                mobMomNotify()
+            }
+        }.start()
+    }
+
+    private fun mobPlayMoment(ep: Ep) {
+        mcSheet?.dismiss()
+        if (!mobMomPlay) liveEpSaved = curPlayEp
+        mobMomPlay = true
+        histSkipNext = true
+        openPlayer(Ep(ep.id, ep.title, 0, ep.desc, ep.thumb, ep.dur, 0L), 0, true, true)
+        pGoLive.visibility = View.VISIBLE
+        mobSportHeadUpdate()
+        mobMomNotify()
+    }
+
+    inner class MobMomAd : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        private val tw = dp(130)
+        private val th = tw * 9 / 16
+        override fun getItemCount() = if (mobMom.isNotEmpty()) mobMom.size else if (mobMomState == 0 || mobMomState == 1) 3 else 1
+        override fun getItemViewType(position: Int) = if (mobMom.isNotEmpty()) 0 else if (mobMomState == 0 || mobMomState == 1) 1 else 2
+        override fun onCreateViewHolder(p: ViewGroup, t: Int): RecyclerView.ViewHolder {
+            if (t == 1) return object : RecyclerView.ViewHolder(mobEpSkel()) { }
+            val ctx = this@MainActivity
+            if (t == 2) {
+                val tv = mtx("", 14f, Color.parseColor("#B4B8C8"))
+                tv.gravity = Gravity.CENTER; tv.setPadding(dp(20), dp(40), dp(20), dp(40))
+                tv.layoutParams = RecyclerView.LayoutParams(-1, -2)
+                return object : RecyclerView.ViewHolder(tv) { }
+            }
+            val row = LinearLayout(ctx)
+            row.orientation = LinearLayout.HORIZONTAL; row.gravity = Gravity.CENTER_VERTICAL
+            row.layoutParams = RecyclerView.LayoutParams(-1, -2)
+            row.setPadding(dp(16), dp(8), dp(16), dp(8)); row.isClickable = true
+            val iv = ImageView(ctx)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP; iv.setBackgroundColor(Color.rgb(36, 38, 52))
+            mobRound(iv, dp(8))
+            row.addView(iv, LinearLayout.LayoutParams(tw, th))
+            val col = LinearLayout(ctx)
+            col.orientation = LinearLayout.VERTICAL
+            val t1 = mtx("", 14f, Color.WHITE, true); t1.maxLines = 2; t1.ellipsize = TextUtils.TruncateAt.END
+            val t2 = mtx("", 12.5f, mGold, true); t2.maxLines = 1
+            val t3 = mtx("", 12f, Color.parseColor("#9AA0B4")); t3.maxLines = 2; t3.ellipsize = TextUtils.TruncateAt.END
+            col.addView(t1, LinearLayout.LayoutParams(-1, -2))
+            col.addView(t2, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+            col.addView(t3, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(3) })
+            row.addView(col, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(12) })
+            return MobEpVH(row, iv, BarView(ctx), t1, t2, t3)
+        }
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, pos: Int) {
+            if (h is MobEpVH) {
+                if (pos >= mobMom.size) return
+                val ep = mobMom[pos]
+                cardReq(img(ep.thumb, W_EP), tw, th).into(h.iv)
+                val playing = ep.id == curPlayEp?.id
+                h.t1.text = ep.title
+                h.t2.text = if (playing) "Now playing" else istClock(momentMarks[ep.id] ?: "")
+                h.t3.text = ep.desc
+                h.row.setOnClickListener { mobPlayMoment(ep) }
+            } else if (h.itemView is TextView) {
+                (h.itemView as TextView).text = if (mobMomState == 3) "Could not load key moments" else "No key moments yet"
+            }
+        }
+    }
+
+    // ---------------- live tv: upcoming programs (channels without catchup)
+    private fun lvEnableUpcoming() {
+        lvUpMode = true
+        seasons.clear(); eps.clear(); epAdapter.notifyDataSetChanged()
+        val base = liveBaseOffset()
+        val f = SimpleDateFormat("dd MMM", Locale.ENGLISH).apply { timeZone = java.util.TimeZone.getTimeZone("Asia/Kolkata") }
+        for (d in 0..6) {
+            val label = when (d) { 0 -> "Today"; 1 -> "Tomorrow"; else -> f.format(Date(System.currentTimeMillis() + d * 86400000L)) }
+            seasons.add(Season((base + d).toString(), label, 0, 0, 0L))
+        }
+        buildSeasonCol()
+        epTab.text = "Upcoming"
+        (pillEps.getChildAt(1) as TextView).text = "Upcoming"
+        pillEps.visibility = View.VISIBLE
+        selectSeason(0, false)
+    }
+
+    // ---------------- live tv tab: 2 rows per category, side scroll, channel logo under every card
+    private fun mobLvCw(): Int = (mobW * 0.28f).toInt()
+    private fun mobLvPh(): Int = mobLvCw() * 3 / 2
+    private fun mobLvCell(): Int = mobLvPh() + dp(26) + dp(18)
+
+    inner class MobLvRowVH(val box: LinearLayout, val title: TextView, val rv: RecyclerView) : RecyclerView.ViewHolder(box)
+    inner class MobLvCardVH(val box: LinearLayout, val iv: ImageView, val logo: ImageView) : RecyclerView.ViewHolder(box)
+
+    inner class MobLiveOuterAd : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        override fun getItemCount() = lvRows.size
+        override fun onCreateViewHolder(p: ViewGroup, t: Int): RecyclerView.ViewHolder {
+            val ctx = this@MainActivity
+            val box = LinearLayout(ctx)
+            box.orientation = LinearLayout.VERTICAL
+            box.layoutParams = RecyclerView.LayoutParams(-1, -2)
+            val tt = mtx("", 17f, Color.WHITE, true)
+            tt.setPadding(dp(16), dp(16), dp(16), dp(8)); tt.maxLines = 1; tt.ellipsize = TextUtils.TruncateAt.END
+            val rv = MobNestRv(ctx)
+            rv.layoutManager = androidx.recyclerview.widget.GridLayoutManager(ctx, 2, RecyclerView.HORIZONTAL, false)
+            rv.clipToPadding = false; rv.setPadding(dp(11), 0, dp(11), 0)
+            rv.itemAnimator = null; rv.overScrollMode = View.OVER_SCROLL_NEVER
+            rv.setHasFixedSize(true)
+            box.addView(tt, LinearLayout.LayoutParams(-1, -2))
+            box.addView(rv, LinearLayout.LayoutParams(-1, mobLvCell() * 2 + dp(4)))
+            return MobLvRowVH(box, tt, rv)
+        }
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, pos: Int) {
+            val v = h as MobLvRowVH
+            val r = lvRows[pos]
+            v.title.text = r.title
+            var ad = mobLvAds[r.title]
+            if (ad == null || ad.row !== r) { ad = MobLvAd(r); mobLvAds[r.title] = ad }
+            if (v.rv.adapter !== ad) v.rv.adapter = ad else ad.notifyDataSetChanged()
+        }
+    }
+
+    inner class MobLvAd(val row: LvRow) : RecyclerView.Adapter<MobLvCardVH>() {
+        override fun getItemCount() = row.items.size
+        override fun onCreateViewHolder(p: ViewGroup, t: Int): MobLvCardVH {
+            val ctx = this@MainActivity
+            val cw = mobLvCw()
+            val box = LinearLayout(ctx)
+            box.orientation = LinearLayout.VERTICAL
+            box.layoutParams = RecyclerView.LayoutParams(cw + dp(10), mobLvCell())
+            box.setPadding(dp(5), 0, dp(5), 0); box.isClickable = true
+            val iv = ImageView(ctx)
+            iv.setBackgroundColor(Color.rgb(26, 28, 42)); mobRound(iv, dp(8))
+            val logo = ImageView(ctx)
+            logo.scaleType = ImageView.ScaleType.FIT_START
+            box.addView(iv, LinearLayout.LayoutParams(cw, mobLvPh()))
+            box.addView(logo, LinearLayout.LayoutParams(cw, dp(26)).apply { topMargin = dp(8) })
+            return MobLvCardVH(box, iv, logo)
+        }
+        override fun onBindViewHolder(h: MobLvCardVH, pos: Int) {
+            val c = row.items[pos]
+            val pr = lvProgNow(c)
+            val poster = pr?.poster
+            val g = Glide.with(this@MainActivity)
+            if (poster != null) {
+                h.iv.scaleType = ImageView.ScaleType.CENTER_CROP; h.iv.setPadding(0, 0, 0, 0)
+                g.load(poster).override(mobLvCw(), mobLvPh()).centerCrop().format(DecodeFormat.PREFER_RGB_565)
+                    .diskCacheStrategy(DiskCacheStrategy.ALL).into(h.iv)
+            } else {
+                h.iv.scaleType = ImageView.ScaleType.FIT_CENTER; h.iv.setPadding(dp(14), dp(14), dp(14), dp(14))
+                if (c.logo.isNotBlank()) g.load(c.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(h.iv)
+                else h.iv.setImageDrawable(null)
+                lvEnsureEpg(c)
+            }
+            if (c.logo.isNotBlank()) { h.logo.visibility = View.VISIBLE; g.load(c.logo).diskCacheStrategy(DiskCacheStrategy.ALL).fitCenter().into(h.logo) }
+            else h.logo.visibility = View.INVISIBLE
+            h.box.setOnClickListener { lvPlayFull(c, h.box) }
+        }
+    }
+
+    private fun mobShowLive() {
+        var box = mobLiveBox
+        if (box == null) {
+            val b = FrameLayout(this)
+            b.setBackgroundColor(mBg)
+            val rv = RecyclerView(this)
+            rv.layoutManager = LinearLayoutManager(this)
+            rv.clipToPadding = false; rv.setPadding(0, dp(54), 0, dp(16))
+            rv.itemAnimator = null; rv.overScrollMode = View.OVER_SCROLL_NEVER
+            val ad = MobLiveOuterAd()
+            mobLiveAd = ad
+            rv.adapter = ad
+            b.addView(rv, lp(-1, -1))
+            val msg = mtx("Loading channels...", 15f, Color.parseColor("#B4B8C8"))
+            b.addView(msg, lp(-2, -2, Gravity.CENTER))
+            mobLiveMsg = msg
+            mobPages.addView(b, lp(-1, -1))
+            mobLiveBox = b
+            box = b
+        }
+        box.visibility = View.VISIBLE
+        if (!lvLoaded) lvLoad() else if (mobLiveItems.isEmpty()) mobLiveBuild()
+        if (!mobLivePoll) { mobLivePoll = true; ui.postDelayed({ mobLiveTick() }, 400) }
+    }
+
+    private fun isHomeTab() = homeTabs.containsKey(tab)'''
+rep('private fun isHomeTab() = homeTabs.containsKey(tab)', MEM, True)
+
+P.write_text(t, encoding='utf-8')
+print('update 17 applied')
