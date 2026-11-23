@@ -8178,6 +8178,8 @@ jobs:
         run: python3 patch17.txt
       - name: Apply update 18 (Mobile v6)
         run: python3 patch18.txt
+      - name: Apply update 19 (Mobile v7)
+        run: python3 patch19.txt
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
       - name: Upload APK
